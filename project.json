@@ -1,0 +1,34 @@
+{
+  "$comment": "工程唯一事实来源：插件元数据 / 版本 / 打包参数。改动此文件即改动构建产物，不要在别处硬编码这些值。",
+
+  "pluginId": "com.example.netease",
+  "version": "0.11.51",
+  "name": "网易云音乐接入",
+  "provider": "TPR",
+  "description": "在线播放网易云曲目",
+  "openSourceUrl": "https://github.com/FUFUTPR/spw-netease-plugin",
+
+  "mainClass": "com.example.netease.NeteasePlugin",
+  "extensionPoint": "com.xuncorp.spw.workshop.api.PlaybackExtensionPoint",
+  "extensionClasses": [
+    "com.example.netease.NeteasePlaybackExtension"
+  ],
+
+  "hasConfig": true,
+  "permissions": [],
+
+  "targetSpwVersion": "1.18.5",
+  "javaRelease": "21",
+  "manifestVersion": "1.0",
+
+  "sourceDir": "src/main/java",
+  "resourceDir": "src/main/resources",
+  "libDir": "libs",
+  "distDir": "build/dist"
+}
+
+
+
+
+
+

@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    椒盐插件 · 内嵌安全验证宿主（0.11.34）
+    ================================================================
+    作用：把「网易云行为验证页」用 WebView2（本机 Edge WebView2 运行时，Chromium 内核）
+          渲染出来，并把它作为一个 子窗口 塞进插件自绘的验证窗里——用户全程不离开本软件。
+
+    形态：WinExe（无控制台窗口）+ WinForms + WebView2；对面（Java）读它的 stdout 拿状态行。
+    产物：向 src\main\resources\verify-host\ 发布，随包进 classes\verify-host\。
+
+    构建（本机已验证可用，见 tools\verify-host\build.ps1）：
+      pwsh -NoProfile -File tools\verify-host\build.ps1
+  -->
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>VerifyHost</AssemblyName>
+    <RootNamespace>VerifyHost</RootNamespace>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <DebugType>none</DebugType>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <EnableDefaultCompileItems>true</EnableDefaultCompileItems>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2903.40" />
+  </ItemGroup>
+
+</Project>

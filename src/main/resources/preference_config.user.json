@@ -1,0 +1,103 @@
+{
+  "configs": [
+    {
+      "title": "账号",
+      "config": "account_cfg.json",
+      "preferences": [
+        {
+          "type": "button",
+          "title": "当前账号",
+          "summary": "点击查看账号信息",
+          "arrow_type": "arrow",
+          "on_click": "com.example.netease.NeteasePlugin.currentAccount"
+        },
+        {
+          "type": "button",
+          "title": "登录",
+          "summary": "手机验证码或扫码登录",
+          "arrow_type": "arrow",
+          "on_click": "com.example.netease.NeteasePlugin.openLoginDialog"
+        },
+        {
+          "type": "button",
+          "title": "退出登录",
+          "summary": "清除本机保存的登录凭据",
+          "arrow_type": "none",
+          "on_click": "com.example.netease.NeteasePlugin.logout"
+        }
+      ]
+    },
+    {
+      "title": "状态与缓存",
+      "config": "cache_cfg.json",
+      "preferences": [
+        {
+          "type": "button",
+          "title": "清理音乐封面缓存",
+          "summary": "删除已缓存的全部封面图",
+          "arrow_type": "none",
+          "on_click": "com.example.netease.NeteasePlugin.clearCoverCache"
+        },
+        {
+          "type": "button",
+          "title": "清理歌词缓存",
+          "summary": "删除已缓存的全部歌词",
+          "arrow_type": "none",
+          "on_click": "com.example.netease.NeteasePlugin.clearLyricCache"
+        },
+        {
+          "type": "list",
+          "key": "audio_cache_gb",
+          "title": "音乐缓存大小",
+          "summary": "按最近使用顺序自动清理",
+          "entries": ["不缓存（切歌清理）", "1 GB", "2 GB", "5 GB", "10 GB", "20 GB", "50 GB"],
+          "entry_values": ["0", "1", "2", "5", "10", "20", "50"],
+          "default_value": "10"
+        },
+        {
+          "type": "button",
+          "title": "清理音乐缓存",
+          "summary": "删除已听歌曲的本地缓存",
+          "arrow_type": "none",
+          "on_click": "com.example.netease.NeteasePlugin.clearPlaybackCache"
+        }
+      ]
+    },
+    {
+      "title": "维护",
+      "config": "config.json",
+      "preferences": [
+        {
+          "type": "list",
+          "key": "audio_level",
+          "title": "在线播放音质",
+          "summary": "实际档位以账号权限为准",
+          "entries": ["标准 128k", "较高 192k", "极高 320k", "无损 FLAC", "Hi-Res", "高清臻音", "超清母带", "沉浸声", "杜比全景声"],
+          "entry_values": ["standard", "higher", "exhigh", "lossless", "hires", "sky", "jymaster", "jyeffect", "dolby"],
+          "default_value": "lossless"
+        },
+        {
+          "type": "button",
+          "title": "立即重新同步",
+          "summary": "立刻重跑歌单同步",
+          "arrow_type": "arrow",
+          "on_click": "com.example.netease.NeteasePlugin.syncNow"
+        },
+        {
+          "type": "switch",
+          "key": "merge_playlists",
+          "title": "合并歌单",
+          "summary": "将网易云和本地音乐合并显示在歌曲里，关闭后歌曲里只显示本地歌单",
+          "default_value": true
+        },
+        {
+          "type": "switch",
+          "key": "dev_mode",
+          "title": "开发者模式",
+          "summary": "显示排查与自检入口，重进插件生效",
+          "default_value": false
+        }
+      ]
+    }
+  ]
+}

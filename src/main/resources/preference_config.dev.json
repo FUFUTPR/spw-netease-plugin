@@ -1,0 +1,209 @@
+{
+  "configs": [
+    {
+      "title": "账号",
+      "config": "account_cfg.json",
+      "preferences": [
+        {
+          "type": "button",
+          "title": "当前账号",
+          "summary": "点击查看账号信息",
+          "arrow_type": "arrow",
+          "on_click": "com.example.netease.NeteasePlugin.currentAccount"
+        },
+        {
+          "type": "button",
+          "title": "登录",
+          "summary": "手机验证码或扫码登录",
+          "arrow_type": "arrow",
+          "on_click": "com.example.netease.NeteasePlugin.openLoginDialog"
+        },
+        {
+          "type": "button",
+          "title": "退出登录",
+          "summary": "清除本机保存的登录凭据",
+          "arrow_type": "none",
+          "on_click": "com.example.netease.NeteasePlugin.logout"
+        }
+      ]
+    },
+    {
+      "title": "在线播放（实验）",
+      "config": "online.json",
+      "preferences": [
+        {
+          "type": "button",
+          "title": "在线模式自检",
+          "summary": "检查宿主播放链路是否可用",
+          "arrow_type": "none",
+          "on_click": "com.example.netease.NeteasePlugin.onlineSelfCheck"
+        },
+        {
+          "type": "button",
+          "title": "试播一首",
+          "summary": "试播我喜欢的第一首",
+          "arrow_type": "arrow",
+          "on_click": "com.example.netease.NeteasePlugin.onlineTryOne"
+        },
+        {
+          "type": "button",
+          "title": "试播本地文件",
+          "summary": "对照诊断：定位取流或播放",
+          "arrow_type": "none",
+          "on_click": "com.example.netease.NeteasePlugin.onlineTryLocal"
+        },
+        {
+          "type": "button",
+          "title": "装拦截器",
+          "summary": "手动挂载在线取流拦截器",
+          "arrow_type": "none",
+          "on_click": "com.example.netease.NeteasePlugin.onlineInjectInterceptor"
+        }
+      ]
+    },
+    {
+      "title": "状态与缓存",
+      "config": "cache_cfg.json",
+      "preferences": [
+        {
+          "type": "button",
+          "title": "三条管线总览",
+          "summary": "同步、封面、歌词与缓存总览",
+          "arrow_type": "none",
+          "on_click": "com.example.netease.NeteasePlugin.pipelineStatus"
+        },
+        {
+          "type": "button",
+          "title": "封面完成度",
+          "summary": "封面就绪、待处理与失败数",
+          "arrow_type": "none",
+          "on_click": "com.example.netease.NeteasePlugin.coverStats"
+        },
+        {
+          "type": "button",
+          "title": "歌词完成度",
+          "summary": "已有歌词的曲目与缺失原因",
+          "arrow_type": "none",
+          "on_click": "com.example.netease.NeteasePlugin.lyricStats"
+        },
+        {
+          "type": "button",
+          "title": "清理音乐封面缓存",
+          "summary": "删除已缓存的全部封面图",
+          "arrow_type": "none",
+          "on_click": "com.example.netease.NeteasePlugin.clearCoverCache"
+        },
+        {
+          "type": "button",
+          "title": "清理歌词缓存",
+          "summary": "删除已缓存的全部歌词",
+          "arrow_type": "none",
+          "on_click": "com.example.netease.NeteasePlugin.clearLyricCache"
+        },
+        {
+          "type": "list",
+          "key": "audio_cache_gb",
+          "title": "音乐缓存大小",
+          "summary": "按最近使用顺序自动清理",
+          "entries": ["不缓存（切歌清理）", "1 GB", "2 GB", "5 GB", "10 GB", "20 GB", "50 GB"],
+          "entry_values": ["0", "1", "2", "5", "10", "20", "50"],
+          "default_value": "10"
+        },
+        {
+          "type": "button",
+          "title": "清理音乐缓存",
+          "summary": "删除已听歌曲的本地缓存",
+          "arrow_type": "none",
+          "on_click": "com.example.netease.NeteasePlugin.clearPlaybackCache"
+        }
+      ]
+    },
+    {
+      "title": "维护",
+      "config": "config.json",
+      "preferences": [
+        {
+          "type": "switch",
+          "key": "enabled",
+          "title": "启用插件",
+          "summary": "关闭后不再拦截与联网",
+          "default_value": true
+        },
+        {
+          "type": "list",
+          "key": "log_level",
+          "title": "日志级别",
+          "summary": "写进日志目录，调试量大",
+          "entries": ["错误", "警告", "信息", "调试"],
+          "entry_values": ["error", "warn", "info", "debug"],
+          "default_value": "info"
+        },
+        {
+          "type": "list",
+          "key": "audio_level",
+          "title": "在线播放音质",
+          "summary": "实际档位以账号权限为准",
+          "entries": ["标准 128k", "较高 192k", "极高 320k", "无损 FLAC", "Hi-Res", "高清臻音", "超清母带", "沉浸声", "杜比全景声"],
+          "entry_values": ["standard", "higher", "exhigh", "lossless", "hires", "sky", "jymaster", "jyeffect", "dolby"],
+          "default_value": "lossless"
+        },
+        {
+          "type": "button",
+          "title": "音质档位状态",
+          "summary": "最近实际拿到的档位",
+          "arrow_type": "none",
+          "on_click": "com.example.netease.NeteasePlugin.audioLevelStatus"
+        },
+        {
+          "type": "button",
+          "title": "打开数据目录",
+          "summary": "打开配置、日志与缓存目录",
+          "arrow_type": "arrow",
+          "on_click": "com.example.netease.NeteasePlugin.openDataDir"
+        },
+        {
+          "type": "button",
+          "title": "立即重新同步",
+          "summary": "立刻重跑歌单同步",
+          "arrow_type": "arrow",
+          "on_click": "com.example.netease.NeteasePlugin.syncNow"
+        },
+        {
+          "type": "button",
+          "title": "重建曲库映射",
+          "summary": "清理宿主库里的孤儿关联行",
+          "arrow_type": "none",
+          "on_click": "com.example.netease.NeteasePlugin.rebuildMapping"
+        },
+        {
+          "type": "button",
+          "title": "测试网络连通性",
+          "summary": "检测网易云接口是否可达",
+          "arrow_type": "none",
+          "on_click": "com.example.netease.NeteasePlugin.testConnection"
+        },
+        {
+          "type": "switch",
+          "key": "auto_login",
+          "title": "启动时自动登录",
+          "summary": "启动时自动恢复登录态",
+          "default_value": true
+        },
+        {
+          "type": "switch",
+          "key": "merge_playlists",
+          "title": "合并歌单",
+          "summary": "将网易云和本地音乐合并显示在歌曲里，关闭后歌曲里只显示本地歌单",
+          "default_value": true
+        },
+        {
+          "type": "switch",
+          "key": "dev_mode",
+          "title": "开发者模式",
+          "summary": "显示排查与自检入口，重进插件生效",
+          "default_value": false
+        }
+      ]
+    }
+  ]
+}

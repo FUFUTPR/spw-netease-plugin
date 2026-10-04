@@ -1,0 +1,13 @@
+# 统一换行策略：仓库与工作区都用 LF，禁止 git 做 eol 转换。
+# 原因：插件资源（preference_config.json 等）按字节进 .spmod，任何 CRLF 漂移都会改产物 sha256，
+# 而 docs/08 与 harness 的验证基线是绑定 sha256 的。
+* text=auto eol=lf
+
+# 明确按二进制处理（不做 diff/转换）
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.mp3 binary
+*.flac binary
+*.spmod binary
+*.jar binary

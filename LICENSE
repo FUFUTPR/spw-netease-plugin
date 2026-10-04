@@ -1,0 +1,39 @@
+MIT License
+
+Copyright (c) 2025 TPR (SPW NetEase Plugin)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+## 第三方组件与数据来源说明（重要）
+
+本插件是**第三方非官方插件**，与 Salt Player / 网易云音乐均无隶属关系。
+
+- **Salt Player for Windows Workshop API**（`com.xuncorp.spw.workshop.api`）、**PF4J 3.12.0**
+  （`org.pf4j`）由 Salt Player 宿主提供，本插件只在编译期以 `compileOnly` 方式引用，
+  **不随插件包分发**宿主字节码或 API 类。
+- **网易云音乐**的接口、歌词、曲目元数据、封面等内容的著作权归网易云音乐及其权利人所有。
+  本插件仅在**用户本机、用户自己登录**的前提下，为个人使用目的读取公开接口数据，
+  不存储、不传播、不对外提供任何内容副本，也不绕过任何版权/会员限制。
+- 本插件**零第三方运行期依赖**（不打包任何第三方 jar），全部代码只使用 JDK 标准库；
+  因此 `lib/` 目录为空。构建工具（`javac`、Python 标准库）不构成分发内容。
+- 详细合规与风险说明见 `docs/07-权限合规与风险清单.md`。
+
+使用本插件产生的一切后果由使用者自行承担；请在遵守当地法律与相关服务条款的前提下使用。

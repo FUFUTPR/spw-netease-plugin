@@ -1,0 +1,48 @@
+# ---- 构建产物（可重建，不入库）----
+build/
+harness/build/
+*.class
+
+# ---- 从宿主运行时抽取的编译期 classpath：含宿主私有字节码，禁止入库 ----
+tools/.cache/
+
+# ---- 阴性对照 / 临时产物 ----
+harness/tmp/
+harness/work/
+__pycache__/
+*.pyc
+
+# ---- C# 助手的中间产物（可重建；发布产物在 src/main/resources/verify-host/，那份要入库）----
+tools/verify-host/bin/
+tools/verify-host/obj/
+
+# ---- 烟测运行时产物（含 mock 音视频与下载结果，体积大）----
+tools/smoke/out-*/
+tools/smoke/**/*.part
+**.part
+
+# ---- 插件安装包（随 GitHub Release 附件分发，不进源码库）----
+*.spmod
+
+# ---- 编辑器 / 系统噪音 ----
+.idea/
+*.iml
+.vscode/
+Thumbs.db
+desktop.ini
+
+# ---- 会话存档解包（用户私有数据，禁止入库）----
+.session-inbox/
+
+# ---- 探针临时副本（含宿主数据库副本 = 用户私有数据，禁止入库）----
+harness/probe/tmp/
+
+# ---- 开发期文档 / 证据 / 日志 / 截图：只留本机，不随仓库分发 ----
+docs/
+harness/logs/
+harness/evidence/
+harness/probe/
+harness/host-accept/
+*.png
+*.jpg
+*.jpeg
