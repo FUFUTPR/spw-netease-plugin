@@ -3745,15 +3745,18 @@ public final class VoxzenBridge {
                     box.set(playingTrackIdOnWorker());
                 } catch (Throwable t) {
                     PluginLog.d(TAG, "读当前媒资项异常：" + brief(t));
+                    warnAuthLost("异常/" + t.getClass().getSimpleName(), "读当前媒资项异常：" + brief(t));
                 } finally {
                     done.countDown();
                 }
             })) {
+                warnAuthLost("提交失败", "宿主交互线程未接受读取任务（队列满 / 已关闭）");
                 return 0L;
             }
             done.await(2L, java.util.concurrent.TimeUnit.SECONDS);
             return box.get();
         } catch (Throwable t) {
+            warnAuthLost("调用异常/" + t.getClass().getSimpleName(), "调用失败：" + brief(t));
             return 0L;
         }
     }
@@ -3761,20 +3764,48 @@ public final class VoxzenBridge {
     /** 解析过的「当前媒资项」取值器（{@code PiscesPlayer} 上 0 参、返回 {@code PiscesMediaItem} 的那个方法）。 */
     private static volatile Method mCurrentMediaItem;
 
+    /** {@link #warnAuthLost} 的去重集合（0.11.52）：签名 = 失败形态；同一形态每会话只提醒一条。 */
+    private static final Set<String> AUTH_LOST_WARNED = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    /**
+     * 权威读失败的一次性 WARN（0.11.52 F2 可观测）。
+     *
+     * <p>此前这些降级点要么静默（{@code playingTrackIdOnWorker} 的 null 分支 / catch），要么只有 DEBUG
+     * ——日志 level=INFO 时数不到「读不到」，万一起播 / 投递时也读不到，就无从对照「权威未知」。提到
+     * WARN 且按签名去重后，每份日志里能数到它（见 docs/57）。</p>
+     */
+    private static void warnAuthLost(String sig, String detail) {
+        try {
+            if (AUTH_LOST_WARNED.add(sig)) {
+                PluginLog.w(TAG, "宿主权威当前曲读不到（" + detail
+                        + "）：本会话同类只提示一条；封面守卫按「权威未知」处理（宁缺勿错）");
+            }
+        } catch (Throwable ignored) {
+            // 记日志失败不影响读取路径
+        }
+    }
+
     private static long playingTrackIdOnWorker() {
         try {
             Object ctrl = staticInstance(CLS_CONTROLLER);
             if (ctrl == null) {
+                warnAuthLost("控制器未就绪", "PlaybackController 未初始化");
                 return 0L;
             }
             Object service = staticField(ctrl.getClass(), "PlaybackService", "service");
             Object player = findPlayer(service == null ? ctrl : service);
             if (player == null) {
+                warnAuthLost("播放器未找到", "控制器 / 服务上找不到播放器");
                 return 0L;
             }
             Object item = currentMediaItem(player);
-            return item == null ? 0L : neteaseTrackId(itemId(item));
+            if (item == null) {
+                warnAuthLost("媒资项为空", "播放器当前媒资项为空（空闲或读取失败）");
+                return 0L;
+            }
+            return neteaseTrackId(itemId(item));
         } catch (Throwable t) {
+            warnAuthLost("异常/" + t.getClass().getSimpleName(), "读当前媒资项异常：" + brief(t));
             return 0L;
         }
     }

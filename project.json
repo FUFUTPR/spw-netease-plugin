@@ -2,7 +2,7 @@
   "$comment": "工程唯一事实来源：插件元数据 / 版本 / 打包参数。改动此文件即改动构建产物，不要在别处硬编码这些值。",
 
   "pluginId": "com.example.netease",
-  "version": "0.11.51",
+  "version": "0.11.55",
   "name": "网易云音乐接入",
   "provider": "TPR",
   "description": "在线播放网易云曲目",

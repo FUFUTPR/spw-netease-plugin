@@ -474,6 +474,18 @@ public final class PlaybarCover {
                     + "）：不改变封面目标");
             return;
         }
+        if (auth <= 0L && songId != currentSongId) {
+            // 0.11.52（F2）：权威读不到时不猜 —— 供流字节只能证明「宿主碰过这一首的字节」，证明不了
+            // 「这一首正在播」。邻曲保温恰在权威不可用那一拍来要字节时，沿用旧行为（对齐）会把封面
+            // 目标带偏，且起播 / 投递前两次现读若也失败就是错图；宁缺勿错（0.11.49 结论）。
+            if (endedAt > 0L && System.currentTimeMillis() - endedAt <= TRANSITION_MS) {
+                servedId = songId;                   // 换曲窗口内只记供流凭证（供 lagTolerantTarget 裁决）
+                servedAt = System.currentTimeMillis();
+            }
+            trace("供流曲目 " + songId + "（权威未知，" + why + "）：只记不发");
+            PluginLog.d(TAG, "供流曲目 " + songId + "（权威未知，" + why + "）：不改变封面目标");
+            return;
+        }
         if (songId != currentSongId) {
             currentSongId = songId;
             traceSong(songId);

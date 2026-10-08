@@ -878,6 +878,71 @@ try {
     Add-Result 'P10.34' '占位桩自愈（有真图 URL 的占位不再算已就绪，补齐/播放路径会重取替换）已在包内' $phFixOk '' `
         '缺占位桩自愈：一次网络抖动落成的占位图会永久顶替真封面（2026-10-04 用户报障）'
 
+    # ---------- P10.35 下载池计数与权威未知守卫（0.11.52 审查批次 1：F1 + F2）
+    #  F1：CoverStore.build 的 finally 改用 refKey(album, artist) 复合键移除 INFLIGHT（此前用纯专辑名，
+    #      而加入用复合键 ⇒ 计数永不清零，「在下载」整场卡死、失败专辑不再重取）。
+    #  F2：PlaybarCover.onStreamServe 在权威读失败（auth<=0）且供流曲 ≠ 认到的当前曲时不改封面目标
+    #      （只记不发，宁缺勿错）；VoxzenBridge.playingTrackId 的降级点提升为一次性 WARN（可按签名数）。
+    #  注释不进字节码，只认真实 log 字符串。
+    $pb2Bytes = Get-EntryBytes $zip 'classes/com/example/netease/svc/PlaybarCover.class'
+    $pb2Text = if ($null -ne $pb2Bytes) { [System.Text.Encoding]::UTF8.GetString($pb2Bytes) } else { '' }
+    $vb2Bytes = Get-EntryBytes $zip 'classes/com/example/netease/host/VoxzenBridge.class'
+    $vb2Text = if ($null -ne $vb2Bytes) { [System.Text.Encoding]::UTF8.GetString($vb2Bytes) } else { '' }
+    $authGuardOk = $pb2Text.Contains('权威未知') `
+        -and $pb2Text.Contains('只记不发') `
+        -and $vb2Text.Contains('权威当前曲读不到')
+    Add-Result 'P10.35' '下载池计数 + 权威未知守卫（INFLIGHT 复合键移除 / 只记不发 / 读失败一次性 WARN）已在包内' $authGuardOk '' `
+        '缺 0.11.52 批次 1 修复：INFLIGHT 永不清零（失败专辑卡死）或权威读失败时仍可能被邻曲带偏封面目标'
+
+    # ---------- P10.36 引用键归属与按索引作废（0.11.53 审查批次 2：F3 + F4 + F5）
+    #  F3：CoverStore.writeStub 带歌手 —— rememberRef 走「专辑 + 歌手」复合键，不再按空歌手记引用
+    #      （字节码判据 = writeStub 的 8 参签名（album, artist, url, idx, image, mime, imgName, stub）
+    #      出现在常量池，旧 7 参版没有）。
+    #  F4：sweepWrongSize 按索引键作废 —— dropStubsFor 遍历 REFS、用 idxFromStub 反查命中才摘记录 + 删桩，
+    #      新日志串「作废引用 N 条 / 删除桩 M 张」（旧版按纯专辑名摘，复合键下永不命中）。
+    #  F5：补挂账本 REASSERT 改用 CoverStore.refKey(album, artist) 作键（同名专辑各行互不覆盖）。
+    #  注释不进字节码，只认真实方法引用与 log 字符串。
+    $cs3Bytes = Get-EntryBytes $zip 'classes/com/example/netease/svc/CoverStore.class'
+    $cs3Text = if ($null -ne $cs3Bytes) { [System.Text.Encoding]::UTF8.GetString($cs3Bytes) } else { '' }
+    $np3Bytes = Get-EntryBytes $zip 'classes/com/example/netease/NeteasePlugin.class'
+    $np3Text = if ($null -ne $np3Bytes) { [System.Text.Encoding]::UTF8.GetString($np3Bytes) } else { '' }
+    $refKeyFixOk = $cs3Text.Contains('作废引用') `
+        -and $cs3Text.Contains('删除桩') `
+        -and $cs3Text.Contains('(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;[BLjava/lang/String;Ljava/lang/String;Ljava/nio/file/Path;)V') `
+        -and $np3Text.Contains('refKey')
+    Add-Result 'P10.36' '引用键归属与按索引作废（writeStub 带歌手 / 巡检按索引摘引用删坏桩 / 补挂账本复合键）已在包内' $refKeyFixOk '' `
+        '缺 0.11.53 批次 2 修复：引用表会新增空歌手歧义键、坏尺寸桩清不掉（自愈失效）或同名专辑补挂互相覆盖'
+
+    # ---------- P10.37 归一截断对齐与陈旧键重写（0.11.54 审查批次 3：F6 + F7）
+    #  F6：CoverStore.text 对齐宿主写库口径 NativeLibrary.text 的 220 上限（保留 trim）——
+    #      引用键的专辑/歌手项都过 text，超长名不再「库里短名 / 键长名」错配、曲行永远缺图。
+    #      字节码判据 = sipush 220（0x11 0x00 0xDC）出现 ≥2 处（比较 + substring；0.11.53 = 0 处）。
+    #  F7：CoverDelivery 陈旧键不被 WROTE_KEYS 幂等短路，日志「⇒ 重写（忽略本会话已写兜底）」。
+    #  注释不进字节码，只认真实字节码常量。
+    $cs4Bytes = Get-EntryBytes $zip 'classes/com/example/netease/svc/CoverStore.class'
+    $cd4Bytes = Get-EntryBytes $zip 'classes/com/example/netease/svc/CoverDelivery.class'
+    $cs4Hex = if ($null -ne $cs4Bytes) { [BitConverter]::ToString($cs4Bytes).Replace('-', '').ToLowerInvariant() } else { '' }
+    $cd4Text = if ($null -ne $cd4Bytes) { [System.Text.Encoding]::UTF8.GetString($cd4Bytes) } else { '' }
+    $staleRewriteOk = ([regex]::Matches($cs4Hex, '1100dc').Count -ge 2) `
+        -and $cd4Text.Contains('忽略本会话已写兜底') `
+        -and $cd4Text.Contains('本会话已写（跳过）')
+    Add-Result 'P10.37' '归一截断对齐 + 陈旧键不受幂等短路（超长名 220 截断 / 陈旧 ⇒ 重写）已在包内' $staleRewriteOk '' `
+        '缺 0.11.54 批次 3 修复：超长名引用键与宿主库截断口径不一致（永远缺图）或换图后旧键被幂等兜底拦下不重写'
+
+    # ---------- P10.38 面板失败负缓存自愈（0.11.55 审查批次 4：F8）
+    #  F8a：CoverStore 的 NO_SRC 记账无人读 ⇒ 删除（无图源占位终态由 refetchableStub 的空 URL 判定兜住；
+    #      删除的反射判据 —— getDeclaredField("NO_SRC") 必须抛 NoSuchField —— 在沙箱 f8a 阶段钉死）。
+    #  F8b：ui.CoverCache 的失败负缓存改记「完成纪元 + 时刻」：CoverStore.deliver 每送出一批桩
+    #      epoch+1；面板同纪元内压制重试，epoch 前进或失败超 TTL（120 s）即自愈重试（先失败后成功不再等重启）。
+    #      字节码判据 = CoverStore.class 含 "doneEpoch"，CoverCache.class 含 "doneEpoch" 与 "failTtlMs"（0.11.54 = 无）。
+    $cs5Bytes = Get-EntryBytes $zip 'classes/com/example/netease/svc/CoverStore.class'
+    $cc5Bytes = Get-EntryBytes $zip 'classes/com/example/netease/ui/CoverCache.class'
+    $cs5Text = if ($null -ne $cs5Bytes) { [System.Text.Encoding]::UTF8.GetString($cs5Bytes) } else { '' }
+    $cc5Text = if ($null -ne $cc5Bytes) { [System.Text.Encoding]::UTF8.GetString($cc5Bytes) } else { '' }
+    Add-Result 'P10.38' '面板失败负缓存自愈（doneEpoch 完成纪元 + failTtlMs 超时）已在包内' `
+        ($cs5Text.Contains('doneEpoch') -and $cc5Text.Contains('doneEpoch') -and $cc5Text.Contains('failTtlMs')) '' `
+        '缺 0.11.55 批次 4 修复：面板缩略图先失败后成功仍要重启面板（失败负缓存无纪元 / 无超时自愈）'
+
     $p3Bytes = Get-EntryBytes $zip 'classes/preference_config.json'
     $p3 = $null
     $p3Err = 'classes/preference_config.json 缺失'

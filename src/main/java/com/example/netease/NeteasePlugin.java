@@ -1207,14 +1207,14 @@ public final class NeteasePlugin extends SpwPlugin {
         }
     }
 
-    /** 把一批封面并进补挂账本（按专辑去重）。 */
+    /** 把一批封面并进补挂账本（按（专辑 + 歌手）去重：同名不同艺人是宿主库的两行、两张图）。 */
     private static void mergeReassert(java.util.List<com.example.netease.svc.CoverArt.Cover> covers) {
         if (covers == null) {
             return;
         }
         for (com.example.netease.svc.CoverArt.Cover c : covers) {
             if (c != null && c.album() != null && !c.album().isBlank()) {
-                REASSERT.put(c.album(), c);
+                REASSERT.put(CoverStore.refKey(c.album(), c.artist()), c);
             }
         }
     }
@@ -1253,7 +1253,7 @@ public final class NeteasePlugin extends SpwPlugin {
             boolean ok = n != null && n > 0;
             if (ok) {
                 for (com.example.netease.svc.CoverArt.Cover c : batch) {
-                    REASSERT.remove(c.album(), c);
+                    REASSERT.remove(CoverStore.refKey(c.album(), c.artist()), c);
                 }
             }
             PluginLog.i(TAG, "封面补挂（第 " + round + " 次，+" + (delay / 1000L) + "s）："

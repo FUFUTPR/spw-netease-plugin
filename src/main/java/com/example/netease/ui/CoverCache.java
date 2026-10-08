@@ -40,7 +40,10 @@ import java.util.concurrent.Executors;
  * 在 <b>EDT</b> 上同步调用，必须<b>永不阻塞</b>：命中内存缓存立即返回；未命中就登记任务、立刻返回
  * {@code null}（本帧先不画图），完成后经 {@link #onLoaded(Runnable)} 注册的回调在 EDT 上触发一次重绘。</p>
  *
- * <p><b>失败负缓存</b>：拿不到的封面记进 {@code FAILED}，同一会话内不再重试（避免每帧发起同一条请求）。</p>
+ * <p><b>失败负缓存（0.11.55 F8 起自愈）</b>：拿不到的封面记进 {@code FAILED}（连完成纪元一起记），
+ * 同一纪元内不再重试（避免每帧发起同一条请求）；<b>有新批次落地</b>（{@link CoverStore#doneEpoch()} 前进，
+ * 下载池又造好了桩）或失败已超 {@code failTtlMs} 就清掉负缓存放行重试 —— 面板滚动中「先失败后成功」
+ * 的 URL 无需重启面板也能出图。</p>
  */
 final class CoverCache {
 
@@ -51,7 +54,12 @@ final class CoverCache {
 
     private static final Map<String, ImageIcon> MEM = new ConcurrentHashMap<>();
     private static final Set<String> PENDING = ConcurrentHashMap.newKeySet();
-    private static final Set<String> FAILED = ConcurrentHashMap.newKeySet();
+
+    /** 失败负缓存：key → {失败时的完成纪元, 失败时刻 ms}；自愈口径见 {@link #get(String, int)}。 */
+    private static final Map<String, long[]> FAILED = new ConcurrentHashMap<>();
+
+    /** 失败负缓存最长寿命 ms（0.11.55 F8；超过即无条件放行重试一次）。 */
+    private static volatile long failTtlMs = 120_000L;
 
     /** 缩放线程池：守护线程，2 条足够（现在是纯本地解码+缩放，瓶颈在磁盘）。 */
     private static final ExecutorService POOL = Executors.newFixedThreadPool(2, r -> {
@@ -88,7 +96,7 @@ final class CoverCache {
         if (hit != null) {
             return hit;
         }
-        if (FAILED.contains(key) || !PENDING.add(key)) {
+        if (negativeCached(key) || !PENDING.add(key)) {
             return null;
         }
         POOL.submit(() -> {
@@ -96,18 +104,37 @@ final class CoverCache {
                 ImageIcon icon = load(url, px, key);
                 if (icon != null) {
                     MEM.put(key, icon);
+                    FAILED.remove(key);
                     SwingUtilities.invokeLater(listener);
                 } else {
-                    FAILED.add(key);
+                    markFailed(key);
                 }
             } catch (Throwable t) {
-                FAILED.add(key);
+                markFailed(key);
                 PluginLog.d(TAG, "封面加载失败（忽略）：" + t);
             } finally {
                 PENDING.remove(key);
             }
         });
         return null;
+    }
+
+    /** 失败负缓存判定：同纪元且未超龄 ⇒ 仍压制；否则清掉负缓存放行（0.11.55 F8 自愈）。 */
+    private static boolean negativeCached(String key) {
+        long[] rec = FAILED.get(key);
+        if (rec == null) {
+            return false;
+        }
+        if (rec[0] != CoverStore.doneEpoch() || System.currentTimeMillis() - rec[1] >= failTtlMs) {
+            FAILED.remove(key);        // 有新批次落地 / 失败超龄 ⇒ 负缓存失效
+            return false;
+        }
+        return true;
+    }
+
+    /** 记一条失败负缓存（连当时的完成纪元一起记，供 {@link #negativeCached} 判自愈）。 */
+    private static void markFailed(String key) {
+        FAILED.put(key, new long[]{CoverStore.doneEpoch(), System.currentTimeMillis()});
     }
 
     /** 已就绪（内存里已有图）的数量，供自检/状态行使用。 */

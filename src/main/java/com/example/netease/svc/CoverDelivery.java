@@ -70,7 +70,8 @@ public final class CoverDelivery {
     }
 
     /**
-     * 给一首曲目补投宿主封面键（幂等：已命中正条目的键直接跳过）。
+     * 给一首曲目补投宿主封面键（幂等：已命中正条目的键直接跳过；<b>陈旧键例外</b> —— 图换过
+     * 时不受「本会话已写」兜底，一律重写，见 {@link #staleKey}）。
      *
      * @param songId 插件曲目 id（不含 {@code netease-} 前缀）
      * @return 本次新写入并回验通过的键数（0 = 已就绪或无图/失败）
@@ -103,7 +104,8 @@ public final class CoverDelivery {
     }
 
     /**
-     * 给一首曲目补投宿主封面键（幂等：已命中正条目的键直接跳过）。
+     * 给一首曲目补投宿主封面键（幂等：已命中正条目的键直接跳过；陈旧键例外 ——
+     * 0.11.54（F7）起不受「本会话已写」兜底，按新图重写）。
      *
      * @param songId 插件曲目 id（不含 {@code netease-} 前缀）
      * @param sizes  要铺的档位边长（升序，去重由调用方保证）
@@ -144,7 +146,6 @@ public final class CoverDelivery {
             int ok = 0;
             int wrote = 0;
             int hit = 0;
-            int stale = 0;
             long srcT = CoverStore.imageTime(refKey);      // 0.11.49：图换过（img 新于键）就得重铺
             StringBuilder detail = new StringBuilder();
             for (int sz : sizes) {
@@ -153,17 +154,20 @@ public final class CoverDelivery {
                 }
                 String key = path + "?v=1&t=" + CoverPrimer.KEY_MTIME + "&s=" + size + "&r=" + rev
                         + "&w=" + sz + "&h=" + sz;
-                if (snapshotLen(disk, key) > 0L && !staleKey(key, srcT)) {
+                // 0.11.54（F7）：陈旧判定只算一次；陈旧时连「本会话已写」兜底也不拦 —— 旧行为
+                // 在本会话写过的键上整档跳过，「陈旧 ⇒ 重写」的承诺被幂等短路，旧图留到巡检才兜底。
+                boolean stale = staleKey(key, srcT);
+                if (snapshotLen(disk, key) > 0L && !stale) {
                     ok++;                              // 已就绪（幂等）
                     hit++;
                     detail.append(sz).append(" 档 命中（跳过 ").append(lastSnapLen).append(" B）");
                     continue;
                 }
-                if (lastSnapLen > 0L && staleKey(key, srcT)) {
-                    stale++;                           // 内容对不上（图换过）：下面按新图重写
-                    detail.append(sz).append(" 档 陈旧（图 mtime ").append(srcT).append(" > 键）⇒ 重写；");
+                if (lastSnapLen > 0L && stale) {
+                    detail.append(sz).append(" 档 陈旧（图 mtime ").append(srcT)
+                            .append(" > 键）⇒ 重写（忽略本会话已写兜底）；");
                 }
-                if (WROTE_KEYS.contains(key)) {
+                if (!stale && WROTE_KEYS.contains(key)) {
                     ok++;                              // 本会话刚写过（回读不可用时的幂等兜底）
                     hit++;
                     detail.append(sz).append(" 档 本会话已写（跳过）");

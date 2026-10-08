@@ -181,8 +181,16 @@ public final class CoverStore {
     private static final java.util.concurrent.atomic.AtomicLong FETCHED_BYTES =
             new java.util.concurrent.atomic.AtomicLong();
 
-    /** 无图源专辑数（`plan` 时登记：picUrl 为空 ⇒ 永久占位，不进网络路径）。 */
-    private static final java.util.Set<String> NO_SRC = ConcurrentHashMap.newKeySet();
+    /**
+     * 完成纪元：每送出一批「新落地」的桩 +1（0.11.55 F8）。
+     *
+     * <p>面板缩略图（{@code ui.CoverCache}）的失败负缓存按它自愈：失败时记下当时的 epoch，
+     * 之后一看到 epoch 前进（= 又有新封面落地，先前拿不到的那张可能已在路上）就清掉负缓存重试。
+     * 0.11.55 之前的 NO_SRC 记账无人读，已删（无图源的占位终态由 {@link #refetchableStub}
+     * 的空 URL 判定兜住）。</p>
+     */
+    private static final java.util.concurrent.atomic.AtomicLong DONE_EPOCH =
+            new java.util.concurrent.atomic.AtomicLong();
 
     /**
      * 曲目 id → 专辑（{@link #plan} 登记，播放即时补图用）。
@@ -290,7 +298,7 @@ public final class CoverStore {
     /** 封面引用键 = 专辑 + {@link #REF_SEP} + 歌手（歌手为空也带分隔符，绝不与旧「纯专辑名」键混用）。 */
     public static String refKey(String album, String artist) {
         String a = text(album, "未知专辑");
-        String b = artist == null ? "" : artist.trim();
+        String b = text(artist, "");
         return a + REF_SEP + b;
     }
 
@@ -498,8 +506,7 @@ public final class CoverStore {
                     return CoverArt.fileUri(stub);
                 }
                 if (url.isEmpty()) {
-                    NO_SRC.add(idx);
-                    return placeholder(name, who, url, idx);
+                    return placeholder(name, who, url, idx);   // 无图源：占位即终态
                 }
                 // 失败长退避：退避期内先给占位图（不再让界面空着等网络）
                 Long until = RETRY_AT.get(idx);
@@ -563,7 +570,7 @@ public final class CoverStore {
             if (imgName == null) {
                 return fail(album, artist, url, idx, Fail.DISK, 0, null);
             }
-            writeStub(album, url, idx, image, mime, imgName, stub);
+            writeStub(album, artist, url, idx, image, mime, imgName, stub);
             FETCHED.incrementAndGet();
             FETCHED_BYTES.addAndGet(image.length);
             logRound();             // A9 判据行（自节流：≥5 s 或 ≥25 张才真打）
@@ -789,20 +796,18 @@ public final class CoverStore {
                 return;
             }
             int dropped = 0;
-            List<String> albums = new ArrayList<>();
+            List<String> idxs = new ArrayList<>();
             synchronized (REFS) {
                 java.util.Iterator<Map.Entry<String, Object>> it = INDEX.entrySet().iterator();
                 while (it.hasNext()) {
-                    Map<String, Object> rec = castOrNull(it.next().getValue());
+                    Map.Entry<String, Object> e = it.next();
+                    Map<String, Object> rec = castOrNull(e.getValue());
                     if (rec == null) {
                         continue;
                     }
                     Object img = rec.get("i");
                     if (img != null && bad.contains(String.valueOf(img))) {
-                        String a = str(rec.get("a"));
-                        if (!a.isEmpty()) {
-                            albums.add(a);
-                        }
+                        idxs.add(e.getKey());
                         it.remove();
                         dropped++;
                     }
@@ -811,9 +816,10 @@ public final class CoverStore {
                     dirty = true;
                 }
             }
-            int stubs = dropStubsFor(albums);
+            int[] drop = dropStubsFor(idxs);
             PluginLog.i(TAG, "封面尺寸巡检：img 里 " + bad.size() + " 张不是 " + SIZE + "²（0.11.6 遗留）已清除，"
-                    + "摘除索引 " + dropped + " 条 / 作废桩 " + stubs + " 张 ⇒ 下载池将按 " + SIZE + "² 重取");
+                    + "摘除索引 " + dropped + " 条 / 作废引用 " + drop[0] + " 条 / 删除桩 " + drop[1] + " 张"
+                    + " ⇒ 下载池将按 " + SIZE + "² 重取");
             flush(true);
         } catch (Throwable t) {
             PluginLog.w(TAG, "封面尺寸巡检失败（下次启动重试）：" + t);
@@ -821,46 +827,74 @@ public final class CoverStore {
     }
 
     /**
-     * 只作废<b>指定专辑</b>的 flac 桩并摘掉它们的 {@link #REFS} 记录（返回删除张数）。
+     * 只作废<b>指定索引</b>（{@link #INDEX} 的键）的 flac 桩并摘掉挂它们的 {@link #REFS} 记录。
      *
      * <p>{@link #readyUri(String)} 的判据是「桩文件在不在」，而桩内嵌的是<b>当次下载的图字节</b> ——
      * 图要被重取时桩必须跟着作废，否则宿主仍拿着旧像素的那张。</p>
      *
      * <p><b>0.11.7 修正</b>：最初写成「只要发现不合规图就作废全部桩」，真机上一张残留的占位图
-     * 会把 2090 张好桩一起打掉、逼下载池再铺一遍全量（2026-10-01 实测）。现在按专辑精确作废。</p>
+     * 会把 2090 张好桩一起打掉、逼下载池再铺一遍全量（2026-10-01 实测）。现在按目标精确作废。</p>
+     *
+     * <p><b>0.11.53（F4）</b>：引用表自 0.11.49 起是「专辑 + 歌手」复合键，旧实现按<b>纯专辑名</b>
+     * 摘 {@code REFS} 记录在复合键下永远打不中 ⇒ 坏桩清不掉、自愈失效（2026-10-07 审查）。
+     * 现在改为：遍历 {@link #REFS}，对每条记录用 {@link #idxFromStub(String)} 反查它挂的桩，
+     * 索引命中才摘记录 + 删桩 —— 精确到单张桩，同名专辑其它艺人的桩不受牵连；最后再按索引
+     * 兜底删一遍桩文件（引用记录缺失 / 无 {@code s} 字段的孤儿桩，删过的不重复计数）。</p>
+     *
+     * @return {@code int[]{作废引用条数, 删除桩张数}}（前者应与 {@link #sweepWrongSize} 摘除的索引条数一致）
      */
-    private static int dropStubsFor(java.util.Collection<String> albums) {
-        if (albums == null || albums.isEmpty()) {
-            return 0;
+    private static int[] dropStubsFor(java.util.Collection<String> idxs) {
+        if (idxs == null || idxs.isEmpty()) {
+            return new int[]{0, 0};
         }
-        int n = 0;
+        int refs = 0;
+        int files = 0;
         try {
             synchronized (REFS) {
-                for (String album : albums) {
-                    Object v = REFS.remove(album);
+                java.util.Iterator<Map.Entry<String, Object>> it = REFS.entrySet().iterator();
+                while (it.hasNext()) {
+                    Object v = it.next().getValue();
                     String s = null;
                     if (v instanceof Map<?, ?> m) {
                         Object o = m.get("s");
                         s = o == null ? null : String.valueOf(o);
                     }
-                    if (s != null && !s.isEmpty()) {
-                        try {
-                            if (Files.deleteIfExists(stubDir().resolve(s))) {
-                                n++;
-                            }
-                        } catch (Throwable t) {
-                            PluginLog.d(TAG, "作废桩失败（忽略）：" + s + "：" + t);
-                        }
+                    String idx = s == null ? null : idxFromStub(s);
+                    if (idx == null || !idxs.contains(idx)) {
+                        continue;
+                    }
+                    it.remove();
+                    refs++;
+                    if (deleteStubFile(s)) {
+                        files++;
                     }
                 }
-                if (n > 0) {
+                for (String idx : idxs) {
+                    if (deleteStubFile(stubName(idx))) {
+                        files++;
+                    }
+                }
+                if (refs > 0) {
                     dirty = true;
                 }
             }
         } catch (Throwable t) {
             PluginLog.d(TAG, "桩作废跳过：" + t);
         }
-        return n;
+        return new int[]{refs, files};
+    }
+
+    /** 删一张桩文件（返回是否真的删掉了）；失败只记日志、绝不抛。 */
+    private static boolean deleteStubFile(String name) {
+        if (name == null || name.isEmpty()) {
+            return false;
+        }
+        try {
+            return Files.deleteIfExists(stubDir().resolve(name));
+        } catch (Throwable t) {
+            PluginLog.d(TAG, "作废桩失败（忽略）：" + name + "：" + t);
+            return false;
+        }
     }
 
     /**
@@ -1040,7 +1074,7 @@ public final class CoverStore {
                 Files.write(tmp, png);
                 Files.move(tmp, img, StandardCopyOption.REPLACE_EXISTING);
             }
-            writeStub(album, url, idx, png, "image/png", imgName, stub);
+            writeStub(album, artist, url, idx, png, "image/png", imgName, stub);
             return CoverArt.fileUri(stub);
         } catch (Throwable t) {
             PluginLog.d(TAG, "占位封面落盘失败（跳过）：" + t);
@@ -1048,7 +1082,12 @@ public final class CoverStore {
         }
     }
 
-    private static void writeStub(String album, String url, String idx, byte[] image, String mime,
+    /**
+     * 写桩 + 登记引用。0.11.53 起引用记录必须归属真实 (专辑, 歌手)：{@link #rememberRef} 走
+     * {@link #refKey(String, String)} 复合键，不再按空歌手记（旧记录在复合键世界里是「最后写入者」
+     * 歧义，真机 2026-10-07 扫描到 100 条）。
+     */
+    private static void writeStub(String album, String artist, String url, String idx, byte[] image, String mime,
                                   String imgName, Path stub) throws Exception {
         byte[] flac = CoverArt.flac(image, mime);
         Files.createDirectories(stub.getParent());
@@ -1066,7 +1105,7 @@ public final class CoverStore {
             INDEX.put(idx, rec);
             dirty = true;
         }
-        rememberRef(album, "", url, stub.getFileName().toString());
+        rememberRef(album, artist, url, stub.getFileName().toString());
         PluginLog.i(TAG, "封面桩 " + stub.getFileName() + "（" + flac.length + " B，图 "
                 + image.length + " B " + mime + "）");
     }
@@ -1680,7 +1719,9 @@ public final class CoverStore {
             RETRY_AT.put(idxOf(album, url), System.currentTimeMillis() + wait);
             PluginLog.w(TAG, "封面造桩异常（" + RiskControl.human(wait) + " 后再试）：" + t);
         } finally {
-            INFLIGHT.remove(album);
+            // 0.11.52（F1）：加入用的是 refKey(album, artist) 复合键（带歌手），移除也必须同键 —— 此前按纯专辑名
+            // 移除永远删不掉，「在下载 N」整场不清零：失败专辑的退避重取失效、fillLoop 还会空转热扫。
+            INFLIGHT.remove(refKey(album, artist));
         }
     }
 
@@ -1707,6 +1748,7 @@ public final class CoverStore {
         if (batch.isEmpty() || sink == null) {
             return;
         }
+        DONE_EPOCH.incrementAndGet();            // 0.11.55（F8）：新批次落地信号（面板负缓存自愈）
         List<CoverArt.Cover> copy = new ArrayList<>(batch);
         batch.clear();
         try {
@@ -1714,6 +1756,11 @@ public final class CoverStore {
         } catch (Throwable t) {
             PluginLog.d(TAG, "封面投递回调失败（忽略）：" + t);
         }
+    }
+
+    /** 当前完成纪元（只读）：{@code ui.CoverCache} 判「失败后有没有新批次落地」（0.11.55 F8）。 */
+    public static long doneEpoch() {
+        return DONE_EPOCH.get();
     }
 
     /** 还没造出桩的专辑（按登记顺序）。 */
@@ -2153,7 +2200,7 @@ public final class CoverStore {
 
     private static void rememberRef(String album, String artist, String url, String stub) {
         String name = text(album, "未知专辑");
-        String who = artist == null ? "" : artist.trim();
+        String who = text(artist, "");
         synchronized (REFS) {
             String key = refKey(name, who);
             Map<String, Object> rec = new LinkedHashMap<>();
@@ -2322,7 +2369,6 @@ public final class CoverStore {
                 FAIL_CLASS.clear();
                 NORM_KINDS.clear();
                 NORM_KINDS_LOGGED.clear();
-                NO_SRC.clear();
                 INFLIGHT.clear();
                 READY.clear();
                 DEDUP_HITS.set(0);
@@ -2397,8 +2443,19 @@ public final class CoverStore {
         return sum;
     }
 
+    /**
+     * 文本归一（封面侧口径）：空白 → 兜底值，trim，超 220 字截断。
+     *
+     * <p><b>0.11.54（F6）</b>：宿主库里的 album/artist 值都是 {@link NativeLibrary#text} 写的
+     * （220 截断），引用键此前不截断 ⇒「库里短名 / 键长名」错配，超长名的曲行永远缺图。
+     * 这里对齐 220 上限后，两侧从同一个名字算出同一把键。</p>
+     */
     private static String text(String s, String fallback) {
-        return (s == null || s.isBlank()) ? fallback : s.trim();
+        if (s == null || s.isBlank()) {
+            return fallback;
+        }
+        String t = s.trim();
+        return t.length() > 220 ? t.substring(0, 220) : t;
     }
 
     private static String str(Object v) {
