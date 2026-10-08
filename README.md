@@ -18,7 +18,7 @@ Salt Player for Windows 的第三方插件，把网易云音乐接进本地播�
 
 ## 自己编译
 
-需要 JDK 21，机器上还要装好 Salt Player for Windows（编译期用到的 API 是从宿主里抽出来的）。
+需要 JDK 21，机器上还要装好 Salt Player for Windows。
 
     pwsh -File build.ps1
 
