@@ -236,6 +236,7 @@ public final class HostTrackListGate {
     // ------------------------------------------------------------ 安装（宿主交互线程内）
 
     private static void installOnWorker() {
+        if (install119()) { return; }
         installRefreshHook();   // 0.11.48：独立于列表门的「刷新音乐库」联动，先装（幂等，失败只记日志）
         if (installed) {
             return;
@@ -292,6 +293,63 @@ public final class HostTrackListGate {
         } catch (Throwable t) {
             note("失败：" + brief(t), false, t);
         }
+    }
+
+    /** 1.19 uses an instance Lazy DAO rather than a static TrackRepo field.
+     * The verified DAO method remains getAllFlow (U+0528); PlaylistDao is untouched.
+     * Resolve and validate all replacement slots before changing either one.
+     */
+    private static boolean install119() {
+        Class<?> holder;
+        try { holder = Class.forName("com.xuncorp.voxzen.data.\u0560"); }
+        catch (ClassNotFoundException absent) { return false; }
+        if (installed) { return true; }
+        try {
+            Class<?> dao = Class.forName("androidx.compose.ui.\u060b");
+            Class<?> lazy = Class.forName("kotlin.Lazy");
+            Object db = holder.getMethod("\u037f").invoke(null);
+            if (db == null || !dao.isInterface() || !prepareMap()) {
+                throw new IllegalStateException("1.19 database/DAO/Flow capability unavailable");
+            }
+            Field slot = null;
+            Object original = null;
+            for (Field f : db.getClass().getDeclaredFields()) {
+                if (!lazy.isAssignableFrom(f.getType())) { continue; }
+                if (!f.getGenericType().getTypeName().contains(dao.getName())) { continue; }
+                if (slot != null) { throw new IllegalStateException("Ambiguous TrackDao Lazy"); }
+                f.setAccessible(true);
+                slot = f;
+                original = f.get(db);
+            }
+            if (slot == null || original == null) { throw new IllegalStateException("TrackDao Lazy missing"); }
+            Field scan = Class.forName("androidx.compose.ui.\u021a").getDeclaredField(NAME_FIELD_DAO);
+            scan.setAccessible(true);
+            Object scanOriginal = scan.get(null);
+            if (!dao.isInstance(scanOriginal)) { throw new IllegalStateException("Scan DAO shape mismatch"); }
+            Object current = lazy.getMethod("getValue").invoke(original);
+            if (!dao.isInstance(current)) { throw new IllegalStateException("TrackDao value shape mismatch"); }
+            Object gate = Proxy.newProxyInstance(dao.getClassLoader(), new Class<?>[]{dao}, new DaoGate(current));
+            Object originalLazy = original;
+            Object replacement = Proxy.newProxyInstance(lazy.getClassLoader(), new Class<?>[]{lazy}, (p,m,a) -> {
+                if (m.getName().equals("getValue")) { return gate; }
+                if (m.getName().equals("isInitialized")) { return true; }
+                return m.invoke(originalLazy,a);
+            });
+            slot.set(db, replacement);
+            Object scanGate = Proxy.newProxyInstance(dao.getClassLoader(), new Class<?>[]{dao}, new DaoGate(scanOriginal));
+            String why = putStaticFinal(scan, scanGate);
+            if (why != null) {
+                slot.set(db, original);
+                throw new IllegalStateException("Scan DAO install rejected: " + why);
+            }
+            installed = isGate(lazy.getMethod("getValue").invoke(slot.get(db))) && isGate(scan.get(null));
+            scanGateInstalled = installed;
+            installRefreshHook();
+            note("已安装：1.19 TrackDao Lazy 列表过滤 / 扫库屏蔽；刷新联动=" + refreshGateInstalled, installed, null);
+        } catch (Throwable t) {
+            note("1.19 能力不可用：" + brief(t), false, t);
+        }
+        return true;
     }
 
     /** 解析 TrackDao 接口（幂等复核路径用）；失败返回 null，调用方自行降级。 */
@@ -417,7 +475,9 @@ public final class HostTrackListGate {
      */
     private static void installRefreshHook() {
         try {
-            Class<?> ctrl = Class.forName(CLS_REFRESH_CTRL);
+            Class<?> ctrl;
+            try { ctrl = Class.forName(CLS_REFRESH_CTRL); }
+            catch (ClassNotFoundException absent) { ctrl = Class.forName("androidx.compose.ui.\u01aa"); }
             Field field = ctrl.getDeclaredField(NAME_FIELD_SCAN_STATE);
             field.setAccessible(true);
             Object current = field.get(null);
@@ -777,7 +837,7 @@ public final class HostTrackListGate {
 
     /** 纯判定（离线探针可测）：这个类名是不是扫库用的「不可读标记」数据类。 */
     public static boolean isReadableMarkClass(String className) {
-        return CLS_TRACK_READABLE_MARK.equals(className);
+        return CLS_TRACK_READABLE_MARK.equals(className) || "androidx.compose.ui.\u1016".equals(className);
     }
 
     /** 纯判定（离线探针可测）：这个 id 是不是插件写入的行（决定是否把它从「不可读」批次里剔除）。 */
