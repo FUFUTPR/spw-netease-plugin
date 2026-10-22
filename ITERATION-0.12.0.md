@@ -19,7 +19,7 @@
 | 3 | 登录、账号及附属界面迁移 | 待验 | 实现、构建与自动检查全部完成（登录/账号/本地命名控制器 + 原生页）；**待用户真机验收** |
 | 4 | WebView2 验证区域改造 | 待验 | 助手严格挂载 + 控制器 + 内嵌验证面板 + 构建/自动检查全部完成；**待用户真机验收**（真实风控可见可操作、移动缩放、停用关闭） |
 | 5 | 旧 UI 清理与双渠道交付 | 待验 | 旧窗口与注册表已删除、门禁/探针已改写、0.12.0 包与双渠道材料完成，构建与 9 项自动检查全部 exit 0；**交付候选，待用户按 `ACCEPTANCE.md` 真机验收**；WebView2 技术关卡仍未闭合 |
-| 6 | 0.12.0 独立审查修复（7 项） | 待验 | 锁序、挂载范围、登录判据、会话生命周期、原子快照、宿主主题、键盘导航已修复并有探针；构建与 10 个检查步骤全部 exit 0（TOTAL_FAIL=0）；真机项待按 `ACCEPTANCE.md` 第 13–16 条复核 |
+| 6 | 0.12.0 独立审查修复（7 项） | 待验 | 锁序、挂载范围、登录判据、会话生命周期、原子快照、宿主主题、键盘导航已修复并有探针；第二轮审查指出的主题颜色位模式 P1 也已修复并做逐位数值回归；构建与批次 7 的 10 个检查步骤全部 exit 0（TOTAL_FAIL=0）；真机项待按 `ACCEPTANCE.md` 第 13–16 条复核 |
 
 ---
 
@@ -527,15 +527,24 @@ harness/run-regression.ps1 本批扩展：-Batch 5 编译并运行 SearchControl
     pwsh -NoProfile -File harness/run-regression.ps1 -Batch 6 -Spmod build/dist/plugin-com.example.netease-0.12.0.spmod   # 登录/本地命名控制器探针
     pwsh -NoProfile -File harness/run-regression.ps1 -Batch 7 -Spmod build/dist/plugin-com.example.netease-0.12.0.spmod   # 内嵌验证控制器探针（185 条）
     pwsh -NoProfile -File harness/run-regression.ps1 -Batch 8 -Spmod build/dist/plugin-com.example.netease-0.12.0.spmod   # 会话生命周期（59 条）
-    pwsh -NoProfile -File harness/run-regression.ps1 -Batch 9 -Spmod build/dist/plugin-com.example.netease-0.12.0.spmod   # 挂载范围/主题常量（31 条）
-    pwsh -NoProfile -File harness/run-verifyhost-probe.ps1 -Out build/evidence/batch6/07-verifyhost-proto.txt  # 真实助手协议（41 条）
+    pwsh -NoProfile -File harness/run-regression.ps1 -Batch 9 -Spmod build/dist/plugin-com.example.netease-0.12.0.spmod   # 挂载范围/主题常量与数值（66 条）
+    pwsh -NoProfile -File harness/run-verifyhost-probe.ps1 -Out build/evidence/batch7/07-verifyhost-proto.txt  # 真实助手协议（41 条）
 
 `run-regression.ps1` 的 `-Batch` 取值 1–9 或 all；批次 5 运行 `SearchControllerProbe`（**109** 条断言）、
 `PlaylistControllerProbe`（146 条断言 + PlaylistIds 10 条等价性）、`PlaylistLockOrderProbe`（17 条锁序）与
 `SearchKeyboardProbe`（66 条键盘导航）；批次 6 运行 `LoginControllerProbe`（**296** 条断言）与
 `LocalSaveControllerProbe`（156 条断言）；批次 7 运行 `VerifyEmbedControllerProbe` + `FakeVerifyHost`
 （**185** 条断言，假助手，不需要桌面）；批次 8 运行 `NativeUiSessionProbe`（59 条会话生命周期，
-classpath 需带宿主 `app/ffmpeg-x64.dll`）；批次 9 运行 `UiMountScopeProbe`（31 条挂载范围与主题常量）。
+classpath 需带宿主 `app/ffmpeg-x64.dll`）；批次 9 运行 `UiMountScopeProbe`（**66** 条：原 31 条挂载范围/
+主题常量，加浅色/深色 22 个颜色位模式与 `Palette` 11 项数值，任何不等即 FAIL）。
+
+第二轮主题颜色复核（需要宿主 `app/ffmpeg-x64.dll`，11 行 `equal=true` 才算通过；正式门禁仍是批次 9）：
+
+    # PowerShell 会话中（$hostRuntime 不能命名为 $Host，它是 PowerShell 只读变量）：
+    . ./tools/jdk.ps1; $jdk = Resolve-RepoJdk
+    $hostRuntime = 'C:\Program Files (x86)\Steam\steamapps\common\Salt Player for Windows\app\ffmpeg-x64.dll'
+    & $jdk.Javac -encoding UTF-8 -cp "build/plugin-classes;$hostRuntime" -d build/_tmp/review2-theme build/evidence/codex-review-2/ReviewThemeProbe.java
+    & $jdk.Java -Djava.awt.headless=true -cp "build/_tmp/review2-theme;build/plugin-classes;$hostRuntime" ReviewThemeProbe
 
 助手本体（C#）重建与验真：
 
@@ -553,7 +562,7 @@ classpath 需带宿主 `app/ffmpeg-x64.dll`）；批次 9 运行 `UiMountScopePr
     # DevModeProbe 要求「沙箱 classes 目录」本身是 classpath 第一项（= 真机 classpath 根），探针类不能放进去：
     java -cp "build/devmode-probe/plugin-com.example.netease-0.11.35/classes;build/_tmp/probes;build/plugin-classes;tools/.cache/*" com.example.netease.core.DevModeProbe build/devmode-probe src/main/resources
 
-每条命令单独检查退出码；证据写 `build/evidence/batchN/`（0.12.0 为 `batch5/01–09`），不入库。
+每条命令单独检查退出码；证据写 `build/evidence/batchN/`（0.12.0 最终复跑为 `batch7/00–10`），不入库。
 
 真机验收（本批新增工具，均只在本机使用、不进包）：
 
@@ -605,7 +614,7 @@ classpath 需带宿主 `app/ffmpeg-x64.dll`）；批次 9 运行 `UiMountScopePr
 | # | REVIEW 指出的问题 | 修复 | 证据 |
 | --- | --- | --- | --- |
 | 1 | 控制器在 `synchronized` 内投递/取消/关闭后台任务，与 `LatestTask` 形成反向锁序，外部持锁时会死锁 | `PlaylistController`、`LocalSaveController` 改为私有锁对象：版本/代次状态在锁内，`async.run/cancel/close` 一律移到锁外；`tick` 在锁内决定取消，锁外执行；`close` 锁内置位、锁外关通道；`submit` 先在锁内取版本与 epoch，锁外投递，投递异常按失败回调；`SearchController` 复核本就符合 | `PlaylistLockOrderProbe`（17 条）：外部持有对象监视器时结果仍回传；真实 `LatestTask` 下原死锁复现不再发生且 JVM 无死锁线程；在途请求 `close()` 快速返回；epoch 变化 `tick()` 快速取消；迟到回调不再通知 |
-| 2 | 面板 Hook 对所有插件无条件挂载并拦输入，可能顶掉其它插件的配置页 | 新增 `HostUiMountScope`：只认 `ScreenRoute$ModConfigContent` 且 `getPluginId()` 精确等于 `com.example.netease`；其它插件、空/缺失/异常路由直接返回，不建入口、不消费指针；`install()` 不再强制 `visible=true`，首页以收起态出现 | `UiMountScopeProbe`（31 条，批次 9）：本插件/其它插件/空/空白/首尾空格/大小写/非该路由/无参数/null/异常全部过滤正确；`PanelHook` 字节码只在匹配后绘制；`visible` 初值 false；宿主主题桥接常量齐全 |
+| 2 | 面板 Hook 对所有插件无条件挂载并拦输入，可能顶掉其它插件的配置页 | 新增 `HostUiMountScope`：只认 `ScreenRoute$ModConfigContent` 且 `getPluginId()` 精确等于 `com.example.netease`；其它插件、空/缺失/异常路由直接返回，不建入口、不消费指针；`install()` 不再强制 `visible=true`，首页以收起态出现 | `UiMountScopeProbe`（第一轮 31 条，第二轮扩至 66 条，批次 9）：本插件/其它插件/空/空白/首尾空格/大小写/非该路由/无参数/null/异常全部过滤正确；`PanelHook` 字节码只在匹配后绘制；`visible` 初值 false；宿主主题桥接常量齐全 |
 | 3 | 登录成功判据用构造时快照，打开后“旧登录被恢复”会被误判成新登录成功并关面板 | `LoginController` 去掉 `final wasLoggedInAtOpen`，改为每次 `open()` 在 `startQr` 之后捕获 `openWasLoggedIn/openSession`；`tick()` 每到 `LOGGED_IN` 都实时读 `ports.wasLoggedInAtOpen()`，旧登录恢复则保持面板并显示「已登录」，只有新登录才关闭；读失败回退到打开时快照；`State.wasLoggedInAtOpen` 仍为打开时语义 | `LoginControllerProbe` 由 253 增至 **296** 条，新增 G15 四场景：登录前打开后成功、旧登录恢复、已登录后新扫码、同控制器关闭重开；含 `startQr` 调用顺序与读失败回退 |
 | 4 | 停用插件不释放登录/本地保存异步通道，线程与 `LatestTask` 残留，重启可能复用旧通道 | `NativeUiSession` 把 `LoginAsync`/`LocalSaveAsync` 存为 `@Volatile` 字段；`start()` 每次重建；`stop()` 经 `detachLocked()` 摘除控制器与通道后在锁外释放，并 `awaitWorkersGone`（`native-ui-login`/`native-ui-local-save`，上限 1 s）；`closeLogin()` 只关面板不销毁通道 | `NativeUiSessionProbe`（59 条，批次 8）：stop 后登录/本地保存线程归零、旧 `LatestTask.closed=true`、会话不再持有旧通道；连续 3 轮启动/停用不累积；再次 start 重建全新通道并真正执行任务；`closeLogin()` 不关通道 |
 | 5 | 保存本地歌单在确认后重新读页面快照，同名歌单刷新后会存成旧曲目/旧来源 | `LocalSaveController` 新增 `submit(name, tracks, sourceName)`：在确认调用栈内先复制曲目、固定来源与默认名，再发布保存态并在锁外投递；`NativeUiSession.submitLocalSave` 读取一次 `NativeUiState.playlist` 快照后传入 | `LocalSaveControllerProbe` 156 条 + `NativeUiSessionProbe` G2：同名不同歌单保存当前可见列表、来源与曲目同一快照、提交后切页不影响本次写盘、一次确认只写一次 |
@@ -622,7 +631,9 @@ classpath 需带宿主 `app/ffmpeg-x64.dll`）；批次 9 运行 `UiMountScopePr
 - `run-regression.ps1`：批次 5 增加 lock-order / search-keyboard；新增批次 8（会话生命周期）与批次 9（挂载范围）；
   批次 8/9 运行 classpath 追加宿主 `app/ffmpeg-x64.dll`（内含 Compose runtime）。
 
-### 3. 复验结果
+### 3. 第一轮复验结果（批次 6）
+
+以下数字保留第一轮 7 项修复完成时的记录；第二轮主题颜色修复后的最终数字见 §4。
 
 新包 `build/dist/plugin-com.example.netease-0.12.0.spmod`：**14,332,386 B**，
 sha256 `1dedd0028b08440122141b7a4cc261d6a71c1b07c1053a26e6ebf11063742271`，
@@ -642,18 +653,70 @@ sha256 `1dedd0028b08440122141b7a4cc261d6a71c1b07c1053a26e6ebf11063742271`，
 
 `UiMountScopeProbe` 编译有 1 个 varargs 警告（不影响退出码）；已记录，不当作失败。
 
-### 4. 仍未闭合（真机）
+### 4. 第二轮审查修复：主题颜色位模式（REVIEW-2 P1）
 
-- 宿主主题桥接（issue 6）只用离线探针和构建验证，宿主是 1.19.0 的混淆名；真实窗口里的配色、字体、深浅色
-  是否与宿主完全一致，未真机确认。宿主升级后需重核 §8.2 的常量。
+背景：`build/evidence/codex-review-2/REVIEW.md` 复核第一轮的 7 项修复，确认其中 6 项已闭合，但指出
+宿主主题桥接的 **P1 颜色缺陷**：`HostUiAdapter.kt` 的 `Reader.read()` 用 `Color(value)` 转换宿主
+`SaltColors` getter 返回的 `Long`。宿主返回的是 Compose `Color` 的 ULong 打包位模式
+（AARRGGBB 在高 32 位），而 `Color(Long)` 是 ARGB 工厂，字节码会 `lshl 32`，把已编码的位模式
+再左移一次，11 个颜色全部变成 0（透明）。审查证据 `theme-repro.txt`：
+`hostPacked=ff0470e600000000`、`pluginPacked=0000000000000000`，11 行 `equal=false`；
+`theme-reader.javap.txt` 与 `color.javap.txt` 给出对应字节码。
+
+修复：`HostSaltTheme` 新增
+`internal fun colorFromPacked(packed: Long): Color = Color(packed.toULong())`，
+`Reader.read()` 改走该入口。`Color(ULong)` 保留原始位模式，不再二次移位。修改文件：
+`src/main/kotlin/com/example/netease/nativeui/HostUiAdapter.kt`。
+
+数值回归（不再用「非 0 / 非空」代替）：
+
+- `UiMountScopeProbe` 由 31 条增至 **66** 条：保留原挂载范围、主题常量、getter、local 检查；
+  新增浅色与深色各 11 个颜色（含带透明度的 `subBackground=80ffffff…`、`stroke=268c8c8c…`）
+  的宿主 getter 与生产 `colorFromPacked` 返回值逐位比较；再经生产 `Reader.read(...)` 取当前
+  宿主主题，核对 `Palette` 的 11 个底层值与宿主 getter 完全一致。
+- 探针把任何一项不等计为 FAIL，批次 9 的退出码因此是正式判据；
+  `build/evidence/codex-review-2/ReviewThemeProbe.java` 保留为独立复核证据，11 行 `equal=true`。
+- 编译产物核对：`HostSaltTheme$Reader` 调用
+  `HostSaltTheme."colorFromPacked-vNxB06k$netease_plugin":(J)J`，不再出现 `ColorKt.Color(J)`；
+  `Palette` 的 11 个 getter 返回 `long`。
+
+复验结果（批次 7，2026-10-22）：新包
+`build/dist/plugin-com.example.netease-0.12.0.spmod`：**14,332,617 B**，
+sha256 `f9148f7852e0bc079829dc1b3c15994bef774855bceda6c2ee0011b883ce5267`，
+249 个 `.class`、资源 15 个。10 个检查步骤全部 exit 0（`TOTAL_FAIL=0`）：
+
+| 检查 | 结果 |
+| --- | --- |
+| 构建 | exit 0；249 class / 15 资源 / 产物自检通过 |
+| 包结构 `verify-spmod` | 78 项 PASS |
+| 离线加载 `run-harness` | 56 PASS / 0 FAIL |
+| 全量回归 1–9 | 12 / 6+7+3 / 9+7 / 4+10 / 109+146+17+66 / 296+156 / 185 / 59 / **66** |
+| 行为回归 | 27+18+7+1 PASS |
+| 验收工具单测 | 5 个 OK |
+| 助手协议（真实 WebView2） | 41 PASS |
+| LoginShape | 40 PASS |
+| DevMode | 67 PASS |
+| 主题颜色数值 `ReviewThemeProbe` | 11/11 `equal=true`（`UiMountScopeProbe` 66 PASS 为正式门禁） |
+
+证据 `build/evidence/batch7/01–10`（`00-run-log.txt` 记 `TOTAL_FAIL=0`）。
+
+仍未闭合：离线探针只能证明颜色位模式与宿主 getter 逐位一致，不能证明真实窗口里的观感与透明度。
+修复前该缺陷表现为 11 个主题色全透明；修复后必须由用户按 `ACCEPTANCE.md` 第 13 条真机复看
+深浅色、文字与按钮是否可见。
+
+### 5. 仍未闭合（真机）
+
+- 宿主主题桥接（issue 6）现在有结构检查与 11 色位模式逐位数值回归，但仍是离线探针；宿主是 1.19.0 的
+  混淆名，真实窗口里的配色、字体、深浅色与透明度是否与宿主一致，未真机确认。宿主升级后需重核
+  `RELEASE-0.12.0.md` §8.2 的常量。
 - 锁序、会话生命周期、原子快照（issue 1/4/5）在真实宿主机多次切换歌单、反复停用/启用下的表现，
   仍要按 `ACCEPTANCE.md` 第 13–16 条走查；探针不能代替真机。
 - 搜索键盘（issue 7）需要真实键盘操作确认焦点框、上下选择与 Enter 播放；鼠标路径不受影响。
 - WebView2 真实风控、Steam/GitHub 双渠道等原有未闭合项不变，仍按 `RELEASE-0.12.0.md` §8 处理。
 
-### 5. 数字语义
+### 6. 数字语义
 
 - 本文件批次状态只用文字「已完成 / 待验」；用户验收结论用 `ACCEPTANCE.md` 的 0/1/2；
-  自动检查的进程退出码是 0 通过 / 1 失败 / 2 证据不足。本批 10 个检查步骤全部 exit 0，故写「全部通过」，
-  但真机项仍写「待验」。
+  自动检查的进程退出码是 0 通过 / 1 失败 / 2 证据不足。批次 6（第一轮 7 项修复）与批次 7（第二轮
+  主题颜色修复）各 10 个检查步骤全部 exit 0，故写「全部通过」，但真机项仍写「待验」。
 

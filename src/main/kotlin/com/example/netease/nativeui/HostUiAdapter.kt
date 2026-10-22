@@ -171,6 +171,16 @@ internal object HostSaltTheme {
         val shapes: ShapeSet,
     )
 
+    /**
+     * 宿主 SaltColors getter 返回的是 Compose Color 的 ULong 打包位模式：sRGB 的 AARRGGBB
+     * 位于高 32 位，低 32 位是颜色空间标记。必须走 ULong 构造入口原样保留位模式；
+     * `Color(Long)` 是 ARGB 工厂（字节码 `lshl 32`），会把已编码的位模式再左移一次而变成 0。
+     *
+     * <p>REVIEW-2 P1：此前误用 ARGB 工厂，11 个主题色全部透明。数值回归见
+     * UiMountScopeProbe 的宿主主题颜色位模式检查。</p>
+     */
+    internal fun colorFromPacked(packed: Long): Color = Color(packed.toULong())
+
     private class Reader(
         val configs: CompositionLocal<Any?>,
         val dynamicColors: CompositionLocal<Any?>,
@@ -192,7 +202,7 @@ internal object HostSaltTheme {
             val saltColors = (if (dark) darkColors else lightColors).invoke(dynamicValue) ?: return null
             val colors = colorGetters.map {
                 val value = it.invoke(saltColors) as? Long ?: return null
-                Color(value)
+                colorFromPacked(value)
             }
             val styles = textStyleGetters.map {
                 it.invoke(stylesValue) as? TextStyle ?: return null

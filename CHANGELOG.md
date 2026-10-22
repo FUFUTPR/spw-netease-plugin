@@ -7,8 +7,9 @@
 - 业务语义抽到控制器：`SearchController`（最新请求优先、20 秒超时、账号变化作废旧结果）、`PlaylistController`（来源与曲目数、整单播放）、`LoginController`（扫码 / 短信 / 风控、60 秒冷却、取消登录不退出账号）、`LocalSaveController`（本地歌单命名）、`VerifyEmbedController`（助手生命周期与有界关闭）。
 - 构建链：JDK 25 + Gradle 9.2.1 + Kotlin 2.4.20 + Compose 运行时 1.12.2；Python 只做组装与自检，产物 `build/dist/plugin-com.example.netease-0.12.0.spmod`。
 - 宿主要求 Salt Player for Windows 1.19.0（Steam 版亦可）；权限只用 `class-transform`，首次启用需勾选「允许修改应用行为与界面」；插件 ID、主类、扩展类、包布局和数据格式不变，0.11.59 的数据目录可直接沿用。
-- 自动检查：0.12.0 审查修复包复跑全部 exit 0——构建 249 class / 15 资源、包检查 78 PASS、加载检查 56 PASS、回归批次 1–9 为 12 / 6+7+3 / 9+7 / 4+10 / 109+146+17+66 / 296+156 / 185 / 59 / 31、行为 27+18+7+1 PASS、unittest 5 PASS、助手协议 41 PASS、LoginShape 40 PASS、DevMode 67 PASS；证据在 `build/evidence/batch6/01–09`（不入库，`TOTAL_FAIL=0`）。
+- 自动检查：0.12.0 审查修复后最终包复跑全部 exit 0——构建 249 class / 15 资源、包检查 78 PASS、加载检查 56 PASS、回归批次 1–9 为 12 / 6+7+3 / 9+7 / 4+10 / 109+146+17+66 / 296+156 / 185 / 59 / 66、行为 27+18+7+1 PASS、unittest 5 PASS、助手协议 41 PASS、LoginShape 40 PASS、DevMode 67 PASS、主题颜色 11/11 `equal=true`；证据在 `build/evidence/batch7/00–10`（不入库，`TOTAL_FAIL=0`）。
 - 独立审查修复：按 `build/evidence/codex-review/REVIEW.md` 修复 7 项——控制器锁外投递/取消/关闭（外部持锁不再死锁）、面板只在本插件配置页挂载、登录判据改为每次打开建立会话并实时读旧登录态、停用显式关闭登录/本地保存异步通道并重建、保存本地歌单在确认栈内原子固定曲目与来源、页面读取宿主 `SaltTheme`（配色/字体/形状/深浅色，失败才降级并显示原因）、搜索结果区键盘焦点与 ↑/↓/Enter；新增 4 个探针（锁序 17、键盘 66、会话 59、挂载 31），细节见 `ITERATION-0.12.0.md` §十三。
+- 第二轮复核修复：`build/evidence/codex-review-2/REVIEW.md` 指出主题桥接把宿主 `Compose Color` 的 ULong 位模式再用 ARGB 工厂左移 32 位，导致 11 个主题色全透明；现改为 `colorFromPacked(packed) = Color(packed.toULong())` 原样保留，`UiMountScopeProbe` 由 31 条增至 66 条（浅色/深色各 11 个位模式 + `Palette` 11 项数值，含透明度；任何一项不等即 FAIL，计入批次 9 退出码），`ReviewThemeProbe` 11/11 `equal=true`。
 - 用户真机：批次 1 的最小原生页面已由用户确认（显示、关闭恢复、重开、主题、密度、停用消失、重启用）；批次 2–4 的真实搜索播放、登录风控与内嵌验证区域仍待用户走查，未标为验收通过。
 - 版本演进：PLAN 原计划 0.11.60 / 0.11.61 / 0.11.62 / 0.12.0 四步，按用户要求一次性完成；0.11.60 只作为内部验证包承载批次 1–5，对外从 0.11.59 直接到 0.12.0。
 - 发布材料见 `RELEASE-0.12.0.md`：GitHub 清单、Steam 同包与同 ID 切换步骤、权限说明、回退基线与已知问题。

@@ -6,7 +6,9 @@ import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
+import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -29,7 +31,10 @@ import java.util.List;
  *   <li>PanelHook 必须按 shouldMountRoute 过滤且匹配时才画 NativeUiPanel（常量池断言）；</li>
  *   <li>NativeUiState.visible 初值 false（需 Compose runtime，缺失则 SKIP）；</li>
  *   <li>NativePage 含 DEVELOPER 开发者入口，HOME 仍保留（需插件类，缺失则 SKIP）；</li>
- *   <li>宿主 SaltTheme 混淆名桥接常量存在（需宿主 jar + Compose runtime，缺失则 SKIP）。</li>
+ *   <li>宿主 SaltTheme 混淆名桥接常量存在（需宿主 jar + Compose runtime，缺失则 SKIP）；</li>
+ *   <li>宿主 SaltColors 的 ULong 打包位模式经生产 colorFromPacked 转换后逐项相等，
+ *       覆盖浅色、深色与带透明度颜色；再经生产 Reader.read 读取当前主题，核对 Palette
+ *       的 11 个颜色底层值与宿主 getter 完全一致（REVIEW-2 P1 数值回归）。</li>
  * </ol>
  *
  * <p>推荐接入方式：仓库统一回归脚本已把本文件编入第 9 批（Batch 9），
@@ -53,6 +58,10 @@ public final class UiMountScopeProbe {
 
     private static final String SCOPE_CLASS = "com.example.netease.nativeui.HostUiMountScope";
     private static final String BRIDGE_CLASS = "com.example.netease.nativeui.HostSaltTheme";
+    private static final String[] COLOR_NAMES = {
+        "highlight", "text", "subText", "background", "subBackground", "popup",
+        "stroke", "onHighlight", "success", "warning", "error",
+    };
     private static final String ADAPTER_CLASS = "com.example.netease.nativeui.HostUiAdapter";
     private static final String PANEL_HOOK_CLASS = "com.example.netease.nativeui.HostUiAdapter$PanelHook";
     private static final String STATE_CLASS = "com.example.netease.nativeui.NativeUiState";
@@ -84,6 +93,7 @@ public final class UiMountScopeProbe {
         checkStateInitialVisible();
         checkDeveloperPageEnum();
         checkHostSaltThemeBridge();
+        checkHostSaltThemeColors();
         summarize();
     }
 
@@ -316,6 +326,215 @@ public final class UiMountScopeProbe {
             ok("HostSaltTheme.describe(Snapshot) 诊断入口存在");
         } catch (Throwable t) {
             skip("HostSaltTheme 读取/诊断入口", "需插件类与 Compose runtime：" + t);
+        }
+    }
+
+    // ------------------------------------------------------------------ 宿主主题颜色数值
+
+    /**
+     * REVIEW-2 P1：宿主 SaltColors getter 返回 Compose Color 的 ULong 打包位模式。
+     * 生产转换必须原样保留；浅色/深色两套共 22 个值逐位比较，并额外走一次生产
+     * Reader.read → Palette 路径，防止“非空但全透明”的回归再次发生。
+     */
+    private static void checkHostSaltThemeColors() {
+        Class<?> bridge;
+        Object instance;
+        Object reader;
+        Class<?> composerClass;
+        try {
+            bridge = Class.forName(BRIDGE_CLASS);
+            instance = bridge.getField("INSTANCE").get(null);
+            Method load = bridge.getDeclaredMethod("load");
+            load.setAccessible(true);
+            reader = load.invoke(instance);
+            composerClass = Class.forName("androidx.compose.runtime.Composer");
+        } catch (Throwable t) {
+            skip("宿主主题颜色位模式（数值）", "需要宿主 jar + Compose runtime：" + brief(t));
+            return;
+        }
+
+        Method converter;
+        try {
+            converter = findColorFromPacked(bridge);
+        } catch (Throwable t) {
+            bad("HostSaltTheme.colorFromPacked(long) 存在", brief(t));
+            return;
+        }
+
+        Object dynamic;
+        List<Method> getters;
+        Method light;
+        Method dark;
+        try {
+            dynamic = defaultValue(fieldOf(reader, "dynamicColors"));
+            getters = asMethodList(fieldOf(reader, "colorGetters"));
+            light = (Method) fieldOf(reader, "lightColors");
+            dark = (Method) fieldOf(reader, "darkColors");
+        } catch (Throwable t) {
+            bad("读取 HostSaltTheme.Reader 的配色字段", brief(t));
+            return;
+        }
+
+        if (getters.size() != COLOR_NAMES.length) {
+            bad("宿主 SaltColors getter 数量", "预期 " + COLOR_NAMES.length + "，实际 " + getters.size());
+            return;
+        }
+
+        int mismatches = 0;
+        mismatches += checkPackedPalette("浅色", instance, converter, getters, dynamic, light);
+        mismatches += checkPackedPalette("深色", instance, converter, getters, dynamic, dark);
+        check("宿主浅色/深色共 " + (COLOR_NAMES.length * 2) + " 个颜色位模式原样保留", mismatches == 0);
+
+        checkPaletteThroughRead(instance, reader, composerClass, getters, dynamic, light, dark);
+    }
+
+    private static int checkPackedPalette(String theme, Object instance, Method converter,
+            List<Method> getters, Object dynamic, Method colorsMethod) {
+        int mismatches = 0;
+        try {
+            Object colors = colorsMethod.invoke(dynamic);
+            for (int i = 0; i < getters.size(); i++) {
+                long hostPacked = (Long) getters.get(i).invoke(colors);
+                long pluginPacked = invokePacked(instance, converter, hostPacked);
+                String name = theme + " " + COLOR_NAMES[i] + " 位模式相等";
+                if (hostPacked == pluginPacked) {
+                    ok(name);
+                } else {
+                    mismatches++;
+                    bad(name, String.format("hostPacked=%016x pluginPacked=%016x", hostPacked, pluginPacked));
+                }
+            }
+        } catch (Throwable t) {
+            bad(theme + "配色读取", brief(t));
+            mismatches++;
+        }
+        return mismatches;
+    }
+
+    private static void checkPaletteThroughRead(Object instance, Object reader, Class<?> composerClass,
+            List<Method> getters, Object dynamic, Method light, Method dark) {
+        try {
+            Method read = reader.getClass().getDeclaredMethod("read", composerClass);
+            read.setAccessible(true);
+            Object fake = Proxy.newProxyInstance(UiMountScopeProbe.class.getClassLoader(),
+                new Class<?>[] {composerClass}, new FakeComposer());
+            Object snapshot = read.invoke(reader, fake);
+            if (snapshot == null) {
+                bad("HostSaltTheme.read 返回非空快照", "返回 null");
+                return;
+            }
+            ok("HostSaltTheme.read 返回非空快照（真实宿主默认主题）");
+            boolean isDark = (Boolean) snapshot.getClass().getMethod("getDark").invoke(snapshot);
+            Object palette = snapshot.getClass().getMethod("getPalette").invoke(snapshot);
+            Object colors = (isDark ? dark : light).invoke(dynamic);
+            for (int i = 0; i < getters.size(); i++) {
+                long hostPacked = (Long) getters.get(i).invoke(colors);
+                long palettePacked = palettePacked(palette, COLOR_NAMES[i]);
+                String name = "Palette " + COLOR_NAMES[i] + " 与宿主（" + (isDark ? "深色" : "浅色") + "）位模式相等";
+                if (hostPacked == palettePacked) {
+                    ok(name);
+                } else {
+                    bad(name, String.format("hostPacked=%016x palettePacked=%016x", hostPacked, palettePacked));
+                }
+            }
+        } catch (Throwable t) {
+            bad("HostSaltTheme.read → Palette 数值路径", brief(t));
+        }
+    }
+
+    private static Method findColorFromPacked(Class<?> bridge) throws Exception {
+        for (Method method : bridge.getDeclaredMethods()) {
+            if (method.getName().startsWith("colorFromPacked")
+                    && method.getParameterCount() == 1
+                    && method.getParameterTypes()[0] == long.class) {
+                method.setAccessible(true);
+                return method;
+            }
+        }
+        throw new NoSuchMethodException("HostSaltTheme.colorFromPacked(long)（旧构建不含；请先重新构建 .spmod）");
+    }
+
+    private static long invokePacked(Object instance, Method converter, long packed) throws Exception {
+        Object value = converter.invoke(instance, packed);
+        if (value instanceof Long) {
+            return ((Long) value).longValue();
+        }
+        if (value != null) {
+            try {
+                Field field = value.getClass().getDeclaredField("value");
+                field.setAccessible(true);
+                return ((Number) field.get(value)).longValue();
+            } catch (Throwable ignored) {
+                // 继续抛出统一错误
+            }
+        }
+        throw new IllegalStateException("colorFromPacked 未返回 long/Color：" + value);
+    }
+
+    private static long palettePacked(Object palette, String property) throws Exception {
+        String prefix = "get" + Character.toUpperCase(property.charAt(0)) + property.substring(1) + "-";
+        for (Method method : palette.getClass().getDeclaredMethods()) {
+            if (method.getName().startsWith(prefix) && method.getParameterCount() == 0) {
+                method.setAccessible(true);
+                return ((Number) method.invoke(palette)).longValue();
+            }
+        }
+        throw new NoSuchMethodException("Palette." + prefix);
+    }
+
+    private static Object defaultValue(Object local) throws Exception {
+        Class<?> compositionLocal = Class.forName("androidx.compose.runtime.CompositionLocal");
+        Object holder = compositionLocal.getMethod("getDefaultValueHolder$runtime").invoke(local);
+        Class<?> map = Class.forName("androidx.compose.runtime.PersistentCompositionLocalMap");
+        return Class.forName("androidx.compose.runtime.ValueHolder")
+            .getMethod("readValue", map)
+            .invoke(holder, new Object[] {null});
+    }
+
+    private static Object fieldOf(Object owner, String name) throws Exception {
+        Field field = owner.getClass().getDeclaredField(name);
+        field.setAccessible(true);
+        return field.get(owner);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<Method> asMethodList(Object value) {
+        return (List<Method>) value;
+    }
+
+    private static String brief(Throwable t) {
+        Throwable cause = t.getCause() == null ? t : t.getCause();
+        String message = cause.getMessage();
+        return cause.getClass().getSimpleName() + (message == null ? "" : "：" + message);
+    }
+
+    private static final class FakeComposer implements InvocationHandler {
+        @Override
+        public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+            String name = method.getName();
+            if ("consume".equals(name)) {
+                return defaultValue(args[0]);
+            }
+            if ("toString".equals(name)) {
+                return "FakeComposer";
+            }
+            if ("hashCode".equals(name)) {
+                return System.identityHashCode(proxy);
+            }
+            if ("equals".equals(name)) {
+                return proxy == args[0];
+            }
+            Class<?> type = method.getReturnType();
+            if (type == boolean.class) {
+                return Boolean.FALSE;
+            }
+            if (type == int.class) {
+                return Integer.valueOf(0);
+            }
+            if (type == long.class) {
+                return Long.valueOf(0L);
+            }
+            return null;
         }
     }
 
