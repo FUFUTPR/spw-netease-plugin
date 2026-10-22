@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     SPW 网易云插件 · 离线加载 harness 运行器。
 
@@ -69,7 +69,7 @@ $CacheDir   = Join-Path $RepoRoot 'tools\.cache'
 $DistDir    = Join-Path $RepoRoot 'build\dist'
 $BuildDir   = Join-Path $HarnessDir 'build'          # harness 的 .class 输出
 $SrcDir     = Join-Path $HarnessDir 'src'
-$WorkRoot   = Join-Path $HarnessDir 'work'           # 临时插件目录（harness 独占）
+$WorkRoot   = Join-Path $HarnessDir ('work/lifecycle-' + [guid]::NewGuid().ToString('N'))           # 临时插件目录（harness 独占）
 
 $Javac = 'javac'
 $Java  = 'java'
