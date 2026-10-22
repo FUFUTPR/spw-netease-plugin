@@ -285,6 +285,7 @@ final class P3Checks {
 
     /** 0.11.30：用户档（开发者模式关闭时的那一档）里应有的按钮接线。 */
     private static final List<String> USER_TARGETS = List.of(
+            PLUGIN_CLASS + ".openSearch", PLUGIN_CLASS + ".openPlaylist",
             PLUGIN_CLASS + ".currentAccount",
             PLUGIN_CLASS + ".openLoginDialog", PLUGIN_CLASS + ".logout",
             PLUGIN_CLASS + ".clearCoverCache", PLUGIN_CLASS + ".clearLyricCache",

@@ -28,6 +28,26 @@
       ]
     },
     {
+      "title": "音乐",
+      "config": "music_cfg.json",
+      "preferences": [
+        {
+          "type": "button",
+          "title": "搜索歌曲",
+          "summary": "搜索网易云歌曲并播放",
+          "arrow_type": "arrow",
+          "on_click": "com.example.netease.NeteasePlugin.openSearch"
+        },
+        {
+          "type": "button",
+          "title": "歌单与同步状态",
+          "summary": "浏览歌单、播放歌曲并查看同步进度",
+          "arrow_type": "arrow",
+          "on_click": "com.example.netease.NeteasePlugin.openPlaylist"
+        }
+      ]
+    },
+    {
       "title": "在线播放（实验）",
       "config": "online.json",
       "preferences": [
@@ -105,8 +125,24 @@
           "key": "audio_cache_gb",
           "title": "音乐缓存大小",
           "summary": "按最近使用顺序自动清理",
-          "entries": ["不缓存（切歌清理）", "1 GB", "2 GB", "5 GB", "10 GB", "20 GB", "50 GB"],
-          "entry_values": ["0", "1", "2", "5", "10", "20", "50"],
+          "entries": [
+            "不缓存（切歌清理）",
+            "1 GB",
+            "2 GB",
+            "5 GB",
+            "10 GB",
+            "20 GB",
+            "50 GB"
+          ],
+          "entry_values": [
+            "0",
+            "1",
+            "2",
+            "5",
+            "10",
+            "20",
+            "50"
+          ],
           "default_value": "10"
         },
         {
@@ -134,8 +170,18 @@
           "key": "log_level",
           "title": "日志级别",
           "summary": "写进日志目录，调试量大",
-          "entries": ["错误", "警告", "信息", "调试"],
-          "entry_values": ["error", "warn", "info", "debug"],
+          "entries": [
+            "错误",
+            "警告",
+            "信息",
+            "调试"
+          ],
+          "entry_values": [
+            "error",
+            "warn",
+            "info",
+            "debug"
+          ],
           "default_value": "info"
         },
         {
@@ -143,8 +189,28 @@
           "key": "audio_level",
           "title": "在线播放音质",
           "summary": "实际档位以账号权限为准",
-          "entries": ["标准 128k", "较高 192k", "极高 320k", "无损 FLAC", "Hi-Res", "高清臻音", "超清母带", "沉浸声", "杜比全景声"],
-          "entry_values": ["standard", "higher", "exhigh", "lossless", "hires", "sky", "jymaster", "jyeffect", "dolby"],
+          "entries": [
+            "标准 128k",
+            "较高 192k",
+            "极高 320k",
+            "无损 FLAC",
+            "Hi-Res",
+            "高清臻音",
+            "超清母带",
+            "沉浸声",
+            "杜比全景声"
+          ],
+          "entry_values": [
+            "standard",
+            "higher",
+            "exhigh",
+            "lossless",
+            "hires",
+            "sky",
+            "jymaster",
+            "jyeffect",
+            "dolby"
+          ],
           "default_value": "lossless"
         },
         {
