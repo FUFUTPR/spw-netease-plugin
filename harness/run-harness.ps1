@@ -132,7 +132,7 @@ if (-not $SkipVerify) {
         & pwsh -NoProfile -File $VerifyScript -Spmod $SpmodFull | Out-Null
         if ($LASTEXITCODE -ne 0) {
             Write-Host ''
-            Write-Host "  ! 结构校验未通过（退出码 $LASTEXITCODE）；仍继续跑 harness 以便看到运行期错误。" -ForegroundColor Yellow
+            Fail-Hard "结构校验未通过（退出码 $LASTEXITCODE）；停止验收，不能标为全部 PASS"
         } else {
             Write-Host '  前置：结构校验 PASS' -ForegroundColor DarkGray
         }

@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     SPW 网易云插件 · .spmod 产物结构校验器（纯 PowerShell，零外部依赖）。
 
@@ -53,7 +53,7 @@ $ForbiddenClassPrefixes = @('com/xuncorp/', 'org/pf4j/')
 # 「在线播放（实验）」整组（online.json）连同另外 9 个开发者入口一起搬进了
 # classes\preference_config.dev.json（开发者档）；用户档里不再有 online.json 组，
 # 所以这里同步收窄成 3 个文件名。两份档位文件的齐全性由 P10.21~P10.24 断言。
-$ExpectedConfigs = @('config.json', 'account_cfg.json', 'cache_cfg.json')
+$ExpectedConfigs = @('config.json', 'account_cfg.json', 'cache_cfg.json', 'music_cfg.json')
 
 # P3 新增实现类（docs/14 §3；必须在包内，见 P10.10）
 # 0.11.27：皮肤层拆出 ui/HostTheme（宿主同款样式令牌）与 LoginDialog 的绘制零件
@@ -1198,11 +1198,11 @@ try {
         # 0.11.46：「启动时自动登录」搬进开发者档维护组 ⇒ 13 → 14。
         $userRows   = 0
         foreach ($g in $p3Groups) { $userRows += @((Get-P3Prop $g 'preferences')).Count }
-        $devOk = ($null -ne $p3d) -and ($p3dGroups.Count -eq 4) -and ($devRows -eq ($userRows + 14)) `
+        $devOk = ($null -ne $p3d) -and ($p3dGroups.Count -eq ($ExpectedConfigs.Count + 1)) -and ($devRows -eq ($userRows + 14)) `
             -and ($devMissing.Count -eq 0) -and ($null -ne $devLogLv) -and $devEnabledOk
         $devHead = if ($null -ne $p3d) { "组数=$($p3dGroups.Count) 行数=$devRows（用户档 $userRows + 14）" } else { $p3dErr }
         $devDetail = "开发者档：$devHead；11 个开发者入口缺=$(if ($devMissing.Count) { ($devMissing -join '、') } else { '无' })；日志级别行=$(if ($null -ne $devLogLv) { '在' } else { '缺' })；启用插件行=$(if ($null -ne $devEnabled) { "type=$devEnTy key=$devEnKey default_value=$(Format-P3Val $devEnDef)" } else { '缺' })"
-        Add-Result 'P10.21' '开发者档 classes/preference_config.dev.json 存在且齐全：4 组、行数 = 用户档行数 + 14、11 个开发者入口接线齐全 + 「日志级别」list 行与「启用插件」switch 行在' $devOk $devDetail `
+        Add-Result 'P10.21' '开发者档 classes/preference_config.dev.json 存在且齐全：用户组 + 开发者播放组、行数 = 用户档行数 + 14、11 个开发者入口接线齐全 + 「日志级别」list 行与「启用插件」switch 行在' $devOk $devDetail `
             $(if ($devOk) { '' } else { '开发者档缺失或不齐：开关打开后用户看不到开发者行（需求③ 直接判 FAIL）；行数不符 = 开发者档不是「用户档 + 14 行」；缺「启用插件」= 用户档摘掉它后没有别处能关插件' })
 
         # ---------- P10.22 反向：开发者行不许留在用户档里（需求③「正常状态为关闭，普通用户不受干扰」；
