@@ -280,6 +280,32 @@ public final class NeteasePlugin extends SpwPlugin {
     }
 
     /**
+     * 只读结构化同步状态（原生页面直接映射 {@link com.example.netease.svc.SyncCoordinator.Phase}，见 docs/PLAN §7.4）。
+     *
+     * <p>与 {@link #syncStatus()} 读的是同一份 {@code Status}：不新增流程、不改触发策略，只把 {@code Phase}、
+     * 请求编号、已完成/总数原样交出去，避免页面靠解析一行中文来猜进度。绝不为 null。</p>
+     */
+    public static com.example.netease.svc.SyncCoordinator.Status syncStatusSnapshot() {
+        return SYNC.status();
+    }
+
+    /**
+     * 原生页面「立即同步」入口：只提交请求并把 {@link com.example.netease.svc.SyncCoordinator.RequestResult}
+     * 原样返回，不打开任何窗口、不弹 toast（{@link #syncNow()} 是给 Swing 配置页用的，路径不变）。
+     *
+     * <p>页面渲染规则：只有 {@code STARTED} 表示「已接收」；{@code BUSY} 表示已有任务在飞，必须显示「已有任务」
+     * 而不是再开第二轮；其它值把原因直接展示（未登录 / 关闭合并 / 已停用见 {@link #syncStatusSnapshot()} 的 message）。</p>
+     */
+    public static com.example.netease.svc.SyncCoordinator.RequestResult syncRequestFromNativeUi() {
+        try {
+            return SYNC.request(java.util.List.of(), "force:native-ui");
+        } catch (Throwable t) {
+            PluginLog.w(TAG, "原生页面提交同步请求失败：" + t);
+            return com.example.netease.svc.SyncCoordinator.RequestResult.FAILED;
+        }
+    }
+
+    /**
      * 待补挂的封面账（0.11.1）：{@link #onCoverBatch} 的增量投递与同步轮的离线收集都并进这里，
      * 由 {@link #scheduleCoverReassert} 的两波（+5s / +14s）统一写回。
      *

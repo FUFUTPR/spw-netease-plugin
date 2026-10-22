@@ -11,7 +11,7 @@
 | --- | --- | --- | --- |
 | 0 | 建立可复现基线 | 0 | 见下「已验证事实」 |
 | 1 | 构建迁移 + 最小原生 Compose 页面 | 0 | 构建/自动检查/真机验收全部完成；**用户已真机确认最小页面**（显示在主窗口内、关闭恢复宿主内容、重开正常） |
-| 2 | 业务控制器抽取、搜索与歌单迁移 | — | 未开始 |
+| 2 | 业务控制器抽取、搜索与歌单 / 同步页面 | 2 | 实现、构建与自动检查全部完成；已做部分真机取证（搜索/播放/歌单页/同步状态），**待用户真机验收** |
 | 3 | 登录、账号及附属界面迁移 | — | 未开始 |
 | 4 | WebView2 验证区域改造 | — | 未开始 |
 | 5 | 旧 UI 清理与双渠道交付 | — | 未开始 |
@@ -185,28 +185,99 @@
 | 停用后消失 | 停用 → `uninstall 完成：Hook 已摘除`，配置页无插件层、无入口 | `44`–`46` |
 | 重新启用 | 再次启用 → 重新 `install 成功`，配置页页面恢复（计数归 0） | `47`–`53` |
 
-## 三、已实现但未验收
+## 三、批次 2 已验证事实（业务控制器 + 搜索 / 歌单 / 同步页）
+
+### 1. 控制器抽取（行为等价，禁止顺带改语义）
+
+- 契约文件 build/_tmp/batch2-contracts.md 由 Lead 先行锁定公共签名与逐条语义（临时产物，不入库）；
+  两个控制器都**不 import Swing/AWT/Kotlin/Compose**，可 headless 运行。
+- src/main/java/com/example/netease/ui/controller/SearchController.java：
+  Phase{IDLE,SEARCHING,RESULTS,EMPTY,FAILED}、State(...)、LIMIT=30、PLAYBACK_TIMEOUT_MS=30_000；
+  异步用 LatestTask(name, 20_000, Runnable::run)（必须 3 参构造，默认构造器会 SwingUtilities::invokeLater）；
+  空关键词保留旧列表并取消在途请求、成功同时替换列表与来源并按 songId 恢复仍有效的选中、失败保留旧列表与旧来源、
+  重试搜索用上次关键词、重试播放用上次曲目（与当前选中无关）。
+- PlaylistController.java + PlaylistIds.java：SourceKind{MINE,LIKED,DAILY,PLAYLIST,LOCAL}、Request（原参数重试）、
+  State(...)、BRIEF_LIMIT=200；PlaylistWindow.parseId 改为 PlaylistIds.parse(text)（只改这一处，正则含义不变）。
+  A→B 快速切换时 A 的迟到成功按版本号丢弃；B 失败保留 A 的列表与来源且文案含 B；epoch 变化清 briefs、保 tracks；
+  **首次载入前**的账号 epoch 抖动只静默同步快照（不显示「账号状态变化」，避免插件启动早期打扰用户）。
+- **播放反馈窗口（本批修正过一次契约初稿）**：VoxzenBridge.playOnlineRequest 投递即写入首条反馈「正在解析音源…」，
+  若「report 非空即结束」会让后续「已提交给宿主播放器…」「取直链失败…」永远看不到，也偏离旧窗口 30 秒轮询行为。
+  现语义：窗口内每条不同的 report 都回显、同值不重复通知；到 30 秒才离开窗口，有反馈则保留最后一条、从未有反馈才用
+  「播放请求：等待宿主反馈超时（30 秒），可重试」；playRetryable = lastPlaySongId != null（窗口内也可重试）。
+  控制器永不把「已投递播放请求」写成「已实际出声」。
+
+### 2. 页面与同步状态入口
+
+- NativeUiSession.kt：安装 Hook 成功后创建两个控制器，单个后台 Timer("native-ui-tick", true) 250ms tick
+  （控制器 tick 只读宿主播放回报与账号 epoch，不做网络请求），每 4 次 tick 刷新一次只读同步状态；
+  停用插件时 stop() 取消定时器并 close() 两个控制器。
+- 同步只读入口（NeteasePlugin）：syncStatusSnapshot() 返回 SyncCoordinator.Status；syncRequestFromNativeUi()
+  调 SYNC.request(List.of(), "force:native-ui") 并把 RequestResult 映射成中文（STARTED=已接收 / BUSY=已有任务 /
+  DISABLED / UNAUTHENTICATED / STOPPED / FAILED），**不打开旧窗口、不另写同步流程**。
+- 页面（src/main/kotlin/com/example/netease/nativeui/）：NativeUiPage.kt（外壳/主题/首页/同步摘要 + trackNote/formatDuration）、
+  NativeSearchPage.kt（回车或按钮提交、播放所选在无选中时禁用、搜索重试与播放重试分开、新搜索保留旧列表并标明新关键词、
+  双击结果行播放、底部规则说明）、NativePlaylistPage.kt（左栏歌单分类/条目、ID 与链接载入、本地歌单展开载入、存为本地歌单、
+  右栏来源+曲目整单播放、页内同步状态区；窄窗 <760dp 左栏默认收起）、NativeSyncPage.kt（只读 Status 全字段 + 立即同步/刷新）。
+- 同步状态映射：IDLE 尚未同步 / WAITING 等待同步 / FETCHING 拉取中 / WRITING 写入中 / COMPLETED 同步完成 /
+  ABORTED 同步中止 / FAILED 同步失败；只有 STARTED 文案写「已提交（宿主已接收）」，不按动画时间伪造进度。
+
+### 3. 自动检查（全部 exit 0，证据目录 build/evidence/batch2/）
+
+| 检查 | 结果 | 证据 |
+| --- | --- | --- |
+| build.ps1 全链路 | 228 个 .class、资源 15 个，size 14249236 B，sha256 3014a0063d1f518947bd1bd553b30601d24650dedadfbb73cb363fc17542755c | 05-build.txt |
+| tools/verify-spmod.ps1 | 76 项 PASS | 06-verify-spmod.txt |
+| harness/run-harness.ps1 | PASS = 56 FAIL = 0 | 07-harness.txt |
+| harness/run-regression.ps1（批次 1–4 回归） | 12 / 6+7+3 / 9+7 / 4+10 PASS，全 0 FAIL | 08-regression.txt |
+| harness/run-regression.ps1（批次 5 = 新控制器探针） | SEARCH_CONTROLLER_RESULT=92 PASS、PLAYLIST_CONTROLLER_RESULT=146 PASS | 08-regression.txt |
+| harness/run-behavior.ps1 | HOST_TRANSACTION_RESULT=7 PASS、HOST_PROFILE_RESULT=1 PASS | 09-behavior.txt |
+| python -m unittest … | Ran 5 tests … OK | 10-unittest.txt |
+
+harness/run-regression.ps1 本批扩展：-Batch 5 编译并运行 SearchControllerProbe 与 PlaylistControllerProbe；
+-Batch all 现包含 5。PlaylistIds 的 10 条等价性断言已并入 PlaylistControllerProbe。
+
+### 4. 真机取证（部分，非完整验收；证据 build/evidence/batch2/）
+
+- 15:57 安装 0.11.60（旧包目录自动归档）后宿主自动加载；插件日志
+  「[native-ui] 原生页面控制器已启动（tick=250ms）」「install 成功 … 匹配数=1」。
+- 22：插件首页（标题/版本/密度 1.00×/字体 1.00×/深色、挂载状态、三个页面入口、同步摘要）。
+- 23：搜索页空态；24/25：输入 Jay 提交后 30 条结果（列表 5 列、来源「Jay」、消息「找到 30 条」、无选中时「播放所选」禁用）。
+- 26：点选一行（选中行高亮）；27：点「播放所选」后文案
+  「播放反馈（宿主回报，不代表已实际出声）：播放请求：已提交给宿主播放器：布拉格广场 - 蔡依林/周杰伦」，
+  宿主标题栏同步变为该曲 → 请求编号通道与反馈回显真实可用。
+- 28：歌单页渲染（分类按钮、ID/本地歌单输入、左右两栏、页内同步状态区）；同步区显示真实
+  「同步完成：歌单 4 / 曲目 3290 / 关联 5985（宿主间连接）；无曲目来源：0 首」。
+- 观察到的偏差：歌单页首次打开显示「账号状态变化，请重新载入；当前仍显示上次载入的曲目」（插件启动早期 epoch 抖动）。
+  已按 §1 末条改为「首次载入前静默同步快照」，并有探针断言覆盖；**该修正后的版本尚未再真机复测**（记入待验项）。
+
+## 四、已实现但未验收
 
 1. `tools/jdk.ps1` 的探测顺序与报错信息（自动化路径已实测，异常机器环境未覆盖）。
 2. `extract-api.ps1` 的宿主版本/SHA-256 输出与 37 类阈值（本机通过，换宿主版本时只警告不阻断）。
 3. 适配层在**其它宿主版本**上的行为（当前只对 1.19.0 记录锚点；换版本应表现为「目标类/方法不存在」并停在不动手状态）。
 4. 宿主机浅色模式的截图（本轮宿主处于深色；浅色分支由同一 `isSystemInDarkTheme()` 决定，未单独截图）。
+5. 批次 2 页面中**未在真机点过的路径**（自动化已覆盖控制器逻辑，UI 走查留给用户）：歌单页的「我喜欢的音乐 / 每日推荐 / 载入我的歌单 / ID 或链接载入 / 本地歌单载入 / 存为本地歌单 / 整单播放」；
+   窄窗（<760dp）自动收起左栏；同步页「立即同步 / 刷新状态」按钮的四种返回（STARTED / BUSY / UNAUTHENTICATED / DISABLED）。
+6. 账号 epoch 抖动修正（歌单页首次打开不再误报「账号状态变化」）只有探针断言覆盖，**尚未在真机上复看首开文案**。
+7. 播放失败路径的真机文案（取直链失败 / 超时 30 秒）未实测，只在探针里模拟过。
 
-## 四、尚待验证的技术方案
+## 五、尚待验证的技术方案
 
 1. **宿主品牌配色**：宿主不使用 `MaterialTheme`、也不暴露配色 CompositionLocal，
    插件页只能跟到系统深/浅色。后续若需要品牌色，只能解析宿主设置库（`spw.db`）或宿主自绘常量，属方案待定。
 2. **适配层锚点随宿主升级的稳定性**：1.19.0 已确认；1.20+ 需要重新核对锚点并更新适配层常量。
 
-## 五、明确阻塞项
+## 六、明确阻塞项
 
 1. ~~批次 1 硬关卡：最小原生 Compose 页面须用户真机确认~~ **已解除**：
    用户在宿主「配置」页确认「显示在主窗口内 / 关闭后宿主配置恢复可点 / 右下角入口可重开」三项均正常，
    批次 1 记为 0（通过），可进入批次 2。
 2. 网络限制：GitHub、jitpack.io 不可达（Gradle 发行版走腾讯镜像，依赖走 Maven Central），
    因此官方 Workshop Gradle 插件不可用；本批继续使用自有 Python 打包器。
+3. 批次 2 **无新增阻塞**：控制器语义由离线探针证明，页面已装到宿主 0.11.60 供用户自测；
+   本批交付不依赖用户当次确认（不像批次 1 的硬关卡），用户发现的问题记入下一轮修正。
 
-## 六、复跑方式
+## 七、复跑方式
 
 在工程根目录（0.12.0 目标包名 `plugin-com.example.netease-0.11.60.spmod`，批次 5 才升到 0.12.0）：
 
@@ -215,6 +286,10 @@
     pwsh -NoProfile -File tools/verify-spmod.ps1 -Spmod build/dist/plugin-com.example.netease-0.11.60.spmod
     pwsh -NoProfile -File harness/run-harness.ps1 -Spmod build/dist/plugin-com.example.netease-0.11.60.spmod
     pwsh -NoProfile -File harness/run-regression.ps1 -Spmod build/dist/plugin-com.example.netease-0.11.60.spmod
+    pwsh -NoProfile -File harness/run-regression.ps1 -Batch 5 -Spmod build/dist/plugin-com.example.netease-0.11.60.spmod   # 两个控制器探针
+
+`run-regression.ps1` 的 `-Batch` 取值 1–5 或 all；批次 5 会编译并运行 `SearchControllerProbe`（92 条断言）
+与 `PlaylistControllerProbe`（146 条断言 + PlaylistIds 10 条等价性）。
     pwsh -NoProfile -File harness/run-behavior.ps1 -Spmod build/dist/plugin-com.example.netease-0.11.60.spmod
     python -m unittest discover -s harness/regression -p test_acceptance.py -v
 
@@ -230,15 +305,17 @@
 截图坐标 = 窗口左上为原点，点击换算 `virtual = (windowRect.Left + X) * 1.25`。
 按钮位置建议用像素颜色扫描确定，不要凭缩略图估算（会偏 40–60 px）。
 
-## 七、回退
+## 八、回退
 
 本批新增 Gradle 构建链与 Kotlin/Compose 源码，但**未改**插件 ID、主类、扩展类、包内布局与数据格式。
 回退即：`git revert` 本批提交（恢复 `build.ps1`/`tools/build.py` 的纯 javac 路径），
 并用 `build/baseline/0.11.59/` 里的 0.11.59 包重新安装。
 运行时副作用：插件停用/卸载时会执行 `HostUiBridge.uninstall()`；若进程被强杀，Hook 随宿主进程消失，无残留。
 
-## 八、本批提交
+## 九、本批提交
 
 - 批次 0 独立提交：`f1bd594 0.12.0 批次 0：建立 JDK 25 可复现基线与宿主 1.19 API 核对`。
-- 批次 1 独立提交：见 `git log` 中「批次 1」条目（Gradle 构建链 + 原生 UI 适配层 + 最小页面）。
+- 批次 1 独立提交：`git log --grep='批次 1'`（Gradle 构建链 + 原生 UI 适配层 + 最小页面）。
+- 批次 2 独立提交：`git log --grep='批次 2'`（搜索/歌单/同步控制器 + 原生搜索/歌单/同步页 + 批次 5 探针）。
+  该提交只含源码、脚本与本记录；不含 `build/`、`docs/`、日志、截图、真实数据。
 - 之后批次各自独立提交；`docs/`、`build/` 不入库。

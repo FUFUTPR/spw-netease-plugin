@@ -106,6 +106,7 @@ internal object HostUiAdapter {
                 PanelHook,
             )
             handle = h
+            NativeUiSession.start()
             NativeUiState.visible = true
             NativeUiState.status =
                 "已挂载（唯一匹配，宿主 " + hostVersion + "，priority=" + PRIORITY + "）"
@@ -128,6 +129,7 @@ internal object HostUiAdapter {
             return
         }
         handle = null
+        NativeUiSession.stop()
         try {
             h.unhook()
             NativeUiState.status = "已卸载"

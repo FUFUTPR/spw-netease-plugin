@@ -11,6 +11,7 @@ import com.example.netease.net.NeteaseApi;
 import com.example.netease.svc.AccountService;
 import com.example.netease.svc.LocalPlaylists;
 import com.example.netease.svc.LyricService;
+import com.example.netease.ui.controller.PlaylistIds;
 
 import javax.swing.BorderFactory;
 import javax.swing.ImageIcon;
@@ -701,24 +702,9 @@ public final class PlaylistWindow {
         });
     }
 
-    /** 从用户输入里解析歌单 id（支持纯数字、带 id= 的链接、#/playlist/ 链接）。 */
+    /** 从用户输入里解析歌单 id（支持纯数字、带 id= 的链接、#/playlist/ 链接）；实现见 PlaylistIds。 */
     static long parseId(String text) {
-        if (text == null) {
-            return -1;
-        }
-        String s = text.trim();
-        if (s.isEmpty()) {
-            return -1;
-        }
-        Matcher m = ID_PATTERN.matcher(s);
-        if (m.find()) {
-            try {
-                return Long.parseLong(m.group(1));
-            } catch (NumberFormatException ignored) {
-                return -1;
-            }
-        }
-        return -1;
+        return PlaylistIds.parse(text);
     }
 
     // ------------------------------------------------------------------ 渲染 / 模型
