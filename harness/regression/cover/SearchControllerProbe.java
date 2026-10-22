@@ -52,6 +52,7 @@ public final class SearchControllerProbe {
         playbackFlow();
         playbackTimeout();
         retries();
+        accountChanged();
         snapshotAndWiring();
         closeSemantics();
         System.out.println("SEARCH_CONTROLLER_RESULT=" + passed + " PASS");
@@ -341,6 +342,81 @@ public final class SearchControllerProbe {
         check("没有可重试的搜索".equals(fresh.state().message()), "没有搜索时重试提示");
         fresh.controller.retryPlayback();
         check("没有可重试的播放请求".equals(fresh.state().message()), "没有播放请求时重试提示");
+    }
+
+    // ------------------------------------------------------------------ 账号变化
+
+    private static void accountChanged() {
+        // 1) 在途搜索结果必须作废，且不能永久停在「搜索中…」
+        Fixture f = new Fixture();
+        f.controller.search("旧账号");
+        int request = f.lastCall();
+        f.controller.onAccountChanged();
+        SearchController.State s = f.state();
+        check(s.phase() == IDLE, "账号变化时无旧列表 → 回到 IDLE，不停留在搜索中");
+        check("账号状态已变化，旧的搜索请求与播放反馈已作废".equals(s.message()), "账号变化给出说明文案");
+        check(f.async.cancels == 1, "账号变化取消在途搜索请求");
+        int marks = f.states.size();
+        f.async.succeed(request, List.of(song(500, "迟到", true)));
+        check(f.state().rows().isEmpty() && f.state().phase() == IDLE && f.states.size() == marks,
+                "账号变化后迟到的搜索结果被丢弃，不覆盖列表");
+        int runs = f.async.runs;
+        f.controller.search("新账号");
+        f.async.succeed(f.lastCall(), List.of(song(501, "新的", true)));
+        check(f.async.runs == runs + 1 && f.state().rows().size() == 1, "账号变化后仍可发起新搜索");
+
+        // 2) 有旧列表 + 播放中：列表/选中保留，播放反馈作废
+        Fixture g = new Fixture();
+        g.controller.search("保留");
+        g.async.succeed(g.lastCall(), List.of(song(600, "甲", true), song(601, "乙", true)));
+        g.controller.selectRow(1);
+        g.controller.playSelected();
+        int playRequest = g.state().pendingPlayRequest();
+        g.playback.reply(playRequest, "已提交给宿主播放器");
+        g.controller.tick();
+        check(g.state().playing() && g.state().pendingPlayRequest() == playRequest, "账号变化前窗口内有反馈");
+
+        g.controller.onAccountChanged();
+        SearchController.State after = g.state();
+        check(after.rows().size() == 2 && after.selectedSongId() == 601L && after.selectedRow() == 1,
+                "账号变化保留已拿到的列表与选中");
+        check(after.pendingPlayRequest() == 0 && !after.playing() && !after.playRetryable()
+                && after.playbackText().isEmpty(), "账号变化清空旧播放请求与反馈");
+        check("账号状态已变化，旧的搜索请求与播放反馈已作废".equals(after.message()),
+                "有播放记录时也给出账号变化文案");
+        int marksAfter = g.states.size();
+        g.controller.tick();
+        check(g.states.size() == marksAfter, "账号变化后 tick 不再轮询旧播放请求");
+        g.controller.retryPlayback();
+        check("没有可重试的播放请求".equals(g.state().message()), "账号变化后旧播放重试失效");
+
+        // 3) 搜索中且有旧列表：回退 RESULTS，不丢旧列表
+        Fixture h = new Fixture();
+        h.controller.search("第一");
+        h.async.succeed(h.lastCall(), List.of(song(700, "旧", true)));
+        h.controller.search("第二");
+        int inflight = h.lastCall();
+        check(h.state().phase() == SEARCHING, "第二个搜索在途");
+        h.controller.onAccountChanged();
+        check(h.state().phase() == RESULTS && h.state().rows().size() == 1,
+                "账号变化时有旧列表 → 回退 RESULTS 并保留旧列表");
+        check("第一".equals(h.state().sourceKeyword()) && "第二".equals(h.state().requestedKeyword()),
+                "回退后来源仍是已成功的关键词");
+        check(h.state().searchRetryable(), "回退后允许重试搜索");
+        h.async.succeed(inflight, List.of(song(701, "迟到二", true)));
+        check(h.state().rows().size() == 1 && h.state().rows().get(0).id() == 700L,
+                "第二个搜索的迟到结果同样作废");
+
+        // 4) close 之后 onAccountChanged 无副作用
+        Fixture d = new Fixture();
+        d.controller.search("关闭");
+        d.controller.close();
+        SearchController.State atClose = d.state();
+        int closes = d.async.closes;
+        int cancels = d.async.cancels;
+        d.controller.onAccountChanged();
+        check(d.state().equals(atClose) && d.async.cancels == cancels && d.async.closes == closes,
+                "close 后账号变化不改状态、不再取消");
     }
 
     // ------------------------------------------------------------------ 快照与装配

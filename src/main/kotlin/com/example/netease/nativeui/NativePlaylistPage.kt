@@ -102,28 +102,50 @@ private fun PlaylistToolbar(
 
 @Composable
 private fun PlaylistInputs(controller: PlaylistController) {
-    Row(
-        Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        OutlinedTextField(
-            value = NativeUiState.playlistInput,
-            onValueChange = { NativeUiState.playlistInput = it },
-            singleLine = true,
-            modifier = Modifier.weight(1f),
-            placeholder = { Text("歌单 ID 或链接（如 https://music.163.com/playlist?id=123456）") },
-        )
-        Button(onClick = { controller.loadPlaylistText(NativeUiState.playlistInput) }) { Text("载入歌单") }
-        OutlinedTextField(
-            value = NativeUiState.saveName,
-            onValueChange = { NativeUiState.saveName = it },
-            singleLine = true,
-            modifier = Modifier.width(180.dp),
-            placeholder = { Text("本地歌单名") },
-        )
-        OutlinedButton(onClick = { NativeUiSession.saveCurrentAsLocal(NativeUiState.saveName) }) {
-            Text("存为本地歌单")
+    val save = NativeUiState.localSave
+    val busy = save?.busy() == true
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            OutlinedTextField(
+                value = NativeUiState.playlistInput,
+                onValueChange = { NativeUiState.playlistInput = it },
+                singleLine = true,
+                modifier = Modifier.weight(1f),
+                placeholder = { Text("歌单 ID 或链接（如 https://music.163.com/playlist?id=123456）") },
+            )
+            Button(onClick = { controller.loadPlaylistText(NativeUiState.playlistInput) }) { Text("载入歌单") }
+            OutlinedTextField(
+                value = NativeUiState.saveName,
+                onValueChange = { NativeUiState.saveName = it },
+                singleLine = true,
+                modifier = Modifier.width(200.dp),
+                placeholder = {
+                    val def = save?.defaultName().orEmpty()
+                    Text(if (def.isBlank()) "本地歌单名" else "默认：" + def)
+                },
+            )
+            OutlinedButton(
+                onClick = { NativeUiSession.submitLocalSave(NativeUiState.saveName) },
+                enabled = !busy,
+            ) {
+                Text(if (busy) "保存中…" else "存为本地歌单")
+            }
+            OutlinedButton(onClick = { NativeUiSession.cancelLocalSave() }, enabled = !busy) {
+                Text("取消命名")
+            }
+        }
+        val msg = save?.message().orEmpty()
+        if (msg.isNotBlank()) {
+            Text(
+                text = "本地命名：" + msg + "（待保存 " + (save?.trackCount() ?: 0) + " 首）",
+                style = MaterialTheme.typography.labelSmall,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }

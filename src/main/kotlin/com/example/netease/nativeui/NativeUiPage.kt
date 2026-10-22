@@ -31,6 +31,9 @@ import androidx.compose.ui.unit.dp
 import com.example.netease.net.Dto
 import com.example.netease.svc.LocalPlaylists
 import com.example.netease.svc.SyncCoordinator
+import com.example.netease.svc.AccountService
+import com.example.netease.ui.controller.LocalSaveController
+import com.example.netease.ui.controller.LoginController
 import com.example.netease.ui.controller.PlaylistController
 import com.example.netease.ui.controller.SearchController
 
@@ -62,6 +65,8 @@ internal enum class NativePage(val title: String) {
     SEARCH("搜索歌曲"),
     PLAYLIST("歌单与同步"),
     SYNC("同步状态"),
+    LOGIN("登录"),
+    ACCOUNT("账号"),
 }
 
 /**
@@ -86,6 +91,16 @@ internal object NativeUiState {
     var localEntries by mutableStateOf<List<LocalPlaylists.Entry>>(emptyList())
     var localNote by mutableStateOf("")
     var saveName by mutableStateOf("")
+    var localSave by mutableStateOf<LocalSaveController.State?>(null)
+
+    /** 登录页状态：唯一登录流程的界面快照（账号事实仍只在 AccountService）。 */
+    var login by mutableStateOf<LoginController.State?>(null)
+    var loginPhone by mutableStateOf("")
+    var loginCode by mutableStateOf("")
+
+    /** 账号页快照：直接取 AccountService.status()，页面不另算一套。 */
+    var account by mutableStateOf<AccountService.LoginStatus?>(null)
+    var accountNote by mutableStateOf("")
 
     /** 打开歌单页时按需刷新一次本地歌单列表（读盘在后台线程）。 */
     var localRefreshRequested by mutableStateOf(false)
@@ -136,6 +151,8 @@ private fun NativeUiShell() {
                     NativePage.SEARCH -> NativeSearchPage()
                     NativePage.PLAYLIST -> NativePlaylistPage()
                     NativePage.SYNC -> NativeSyncPage()
+                    NativePage.LOGIN -> NativeLoginPage()
+                    NativePage.ACCOUNT -> NativeAccountPage()
                 }
             }
         }
@@ -147,7 +164,15 @@ private fun NativeUiHeader(density: Float, fontScale: Float) {
     val page = NativeUiState.page
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
         if (page != NativePage.HOME) {
-            OutlinedButton(onClick = { NativeUiState.page = NativePage.HOME }) {
+            OutlinedButton(
+                onClick = {
+                    // 离开登录页 = 关闭登录流程：停二维码轮询、关验证窗（恢复语义在 AccountService 内）。
+                    if (page == NativePage.LOGIN) {
+                        NativeUiSession.closeLogin()
+                    }
+                    NativeUiState.page = NativePage.HOME
+                },
+            ) {
                 Text("← 返回")
             }
         }
@@ -164,7 +189,14 @@ private fun NativeUiHeader(density: Float, fontScale: Float) {
                 style = MaterialTheme.typography.labelMedium,
             )
         }
-        OutlinedButton(onClick = { NativeUiState.visible = false }) {
+        OutlinedButton(
+            onClick = {
+                if (page == NativePage.LOGIN) {
+                    NativeUiSession.closeLogin()
+                }
+                NativeUiState.visible = false
+            },
+        ) {
             Text("关闭并返回宿主配置")
         }
     }
@@ -190,6 +222,19 @@ private fun NativeHomePage() {
             }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Button(onClick = { NativeUiSession.openLogin() }) {
+                Text("登录")
+            }
+            Button(
+                onClick = {
+                    NativeUiSession.refreshAccount()
+                    NativeUiState.page = NativePage.ACCOUNT
+                },
+            ) {
+                Text("账号")
+            }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             OutlinedButton(onClick = { NativeUiState.clicks += 1 }) {
                 Text("状态自检 +1（" + NativeUiState.clicks + "）")
             }
@@ -201,7 +246,9 @@ private fun NativeHomePage() {
         Text(
             text = "验证点：关闭后宿主原有配置内容应照常显示与操作；再次进入配置页时，" +
                 "右下角会保留「打开原生 UI 测试区域」入口，不会重复注册 Hook。" +
-                "搜索与歌单页的请求超时仍为 20 秒，播放反馈只回显宿主回报，界面不伪造进度。",
+                "搜索与歌单页的请求超时仍为 20 秒，播放反馈只回显宿主回报，界面不伪造进度。" +
+                "登录页与账号页都消费 AccountService 的同一份快照，不新增 cookie 或账号状态；" +
+                "关闭登录页会停掉二维码轮询并走 AccountService 原有的取消/恢复语义。",
             style = MaterialTheme.typography.bodySmall,
         )
     }

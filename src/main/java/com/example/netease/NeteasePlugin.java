@@ -1329,9 +1329,19 @@ public final class NeteasePlugin extends SpwPlugin {
     // ------------------------------------------------- 配置页 on_click 入口
     // ⚠️ 宿主通过反射调用：必须是 public static、无参、不得抛异常。
 
-    /** 搜索（P2）：搜到的曲目可直接在线播放（0.5.0 起不再提供下载）。 */
+    /**
+     * 搜索（P2）：搜到的曲目可直接在线播放（0.5.0 起不再提供下载）。
+     *
+     * <p>批次 3 起优先打开主窗口内的原生搜索页（{@link HostUiBridge#openNativePage(String)}）；
+     * 原生层未就绪（Hook 未装 / 适配层失配）时回退旧的 {@link SearchWindow}，保证入口永远可用。</p>
+     */
     public static void openSearch() {
-        guard(SearchWindow::open);
+        guard(() -> {
+            if (HostUiBridge.openNativePage("search")) {
+                return;
+            }
+            SearchWindow.open();
+        });
     }
 
     /**
@@ -1344,6 +1354,9 @@ public final class NeteasePlugin extends SpwPlugin {
      */
     public static void showLoginDialog() {
         guard(() -> {
+            if (HostUiBridge.openNativePage("login")) {
+                return;
+            }
             String phone = PluginConfig.freshPhone();
             LoginDialog.open(phone == null ? "" : phone);
         });
@@ -1363,6 +1376,9 @@ public final class NeteasePlugin extends SpwPlugin {
      */
     public static void openLoginDialog() {
         guard(() -> {
+            if (HostUiBridge.openNativePage("login")) {
+                return;
+            }
             String phone = PluginConfig.freshPhone();
             PluginLog.i(TAG, "配置页请求打开登录对话框（预填号码="
                     + (phone == null || phone.isBlank() ? "无" : phone.trim().length() + " 位（值不进日志）") + "）");
@@ -1386,9 +1402,17 @@ public final class NeteasePlugin extends SpwPlugin {
         });
     }
 
-    /** 我的歌单 / 每日推荐（P3）：打开歌单窗口，选中项可直接在线播放。 */
+    /**
+     * 我的歌单 / 每日推荐（P3）：批次 3 起优先打开主窗口内的原生歌单页；
+     * 原生层未就绪时回退旧的 {@link PlaylistWindow}。
+     */
     public static void openPlaylist() {
-        guard(PlaylistWindow::open);
+        guard(() -> {
+            if (HostUiBridge.openNativePage("playlist")) {
+                return;
+            }
+            PlaylistWindow.open();
+        });
     }
 
     // ------------------------------------------------- 「账号」组（0.11.7 / W1；D1-A + D2-b；0.11.26 登录对话框）
@@ -1411,7 +1435,10 @@ public final class NeteasePlugin extends SpwPlugin {
      */
     public static void currentAccount() {
         guard(() -> {
-            AccountStatusWindow.open();
+            boolean nativePage = HostUiBridge.openNativePage("account");
+            if (!nativePage) {
+                AccountStatusWindow.open();
+            }
             // 顺手把盘上的登录态落点对齐一次（0.11.32 起它是 freshCurrentAccount 的真源，
             // H9.14 幂等探针也在盯着它），不写配置页。
             com.example.netease.svc.SmsLogin.refreshAccountRow();

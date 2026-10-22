@@ -17,4 +17,22 @@ object NativeUiHost {
     fun uninstall() {
         HostUiAdapter.uninstall()
     }
+
+    /**
+     * 宿主配置页入口路由（批次 3）：打开主窗口内的原生页面。
+     * 返回 false 表示原生层未就绪，Java 侧回退旧 Swing 窗口。
+     */
+    @JvmStatic
+    fun openPage(page: String): Boolean {
+        val target = when (page) {
+            "home" -> NativePage.HOME
+            "search" -> NativePage.SEARCH
+            "playlist" -> NativePage.PLAYLIST
+            "sync" -> NativePage.SYNC
+            "login" -> NativePage.LOGIN
+            "account" -> NativePage.ACCOUNT
+            else -> return false
+        }
+        return NativeUiSession.openPage(target)
+    }
 }

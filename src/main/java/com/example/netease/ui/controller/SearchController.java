@@ -57,6 +57,7 @@ public final class SearchController {
     private static final String TEXT_PLAY_GONE = "上次播放的歌曲已不在当前结果中，无法重试";
     private static final String TEXT_PLAYBACK_TIMEOUT = "播放请求：等待宿主反馈超时（30 秒），可重试";
     private static final String TEXT_FALLBACK_ERROR = "网络或服务暂不可用，请重试";
+    private static final String TEXT_ACCOUNT_CHANGED = "账号状态已变化，旧的搜索请求与播放反馈已作废";
 
     /** 搜索页阶段。 */
     public enum Phase { IDLE, SEARCHING, RESULTS, EMPTY, FAILED }
@@ -443,6 +444,45 @@ public final class SearchController {
             }
         }
         search(keyword); // 锁外：search 自己会加锁，并把投递放到锁外
+    }
+
+    /**
+     * 账号状态发生变化（批次 3；docs/PLAN.md §8.2）：作废在途搜索结果与旧播放反馈。
+     *
+     * <p>旧窗口在账号 epoch 变化时会整页重载；原生页保留已拿到的列表与选中（搜索结果本身是匿名数据），
+     * 但把「在途请求的回调」和「旧播放请求编号」清零：它们属于旧账号，继续展示会被误读成本账号的结果。
+     * 若搜索仍在途，phase 回退（有旧列表回 RESULTS，否则 IDLE），避免永久停在「搜索中…」。</p>
+     */
+    public void onAccountChanged() {
+        synchronized (lock) {
+            if (closed) {
+                return;
+            }
+            version++; // 在途回调对不上版本 → onSearchOk/onSearchFail 直接丢弃
+            boolean searchInFlight = phase == Phase.SEARCHING;
+            if (searchInFlight) {
+                phase = rows.isEmpty() ? Phase.IDLE : Phase.RESULTS;
+                searchRetryable = !lastSearchKeyword.isEmpty();
+            }
+            boolean hadPlayback = playing || pendingPlayRequest > 0
+                    || lastPlaySongId != null || playRetryable;
+            pendingPlayRequest = 0;
+            playing = false;
+            lastPlaySongId = null;
+            lastPlaybackReport = null;
+            playbackText = "";
+            playRetryable = false;
+            if (searchInFlight || hadPlayback) {
+                message = TEXT_ACCOUNT_CHANGED;
+                publishLocked();
+            }
+        }
+        // 锁外取消（与 search/close 相同的锁序理由）。
+        try {
+            async.cancel();
+        } catch (Throwable cancelError) {
+            PluginLog.w(TAG, "账号变化时取消搜索请求失败：" + cancelError);
+        }
     }
 
     /** 关闭：此后回调与 tick 都不再改状态、不再通知。 */

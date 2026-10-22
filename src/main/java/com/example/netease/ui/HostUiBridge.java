@@ -31,6 +31,22 @@ public final class HostUiBridge {
         invoke("uninstall");
     }
 
+    /**
+     * 原生页面路由（批次 3）：宿主配置页的「搜索歌曲 / 歌单与同步状态 / 登录 / 当前账号」先尝试
+     * 打开主窗口内的原生页；返回 false 表示原生层未就绪（Hook 未装、Kotlin 类缺失等），调用方回退旧窗口。
+     */
+    public static boolean openNativePage(String page) {
+        try {
+            Class<?> impl = Class.forName(IMPL);
+            Method method = impl.getMethod("openPage", String.class);
+            Object result = method.invoke(null, nz(page));
+            return result instanceof Boolean && (Boolean) result;
+        } catch (Throwable t) {
+            PluginLog.d(TAG, "原生页面路由不可用（回退旧窗口）：" + t);
+            return false;
+        }
+    }
+
     private static void invoke(String name, String... args) {
         try {
             Class<?> impl = Class.forName(IMPL);

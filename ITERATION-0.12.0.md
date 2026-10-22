@@ -12,7 +12,7 @@
 | 0 | 建立可复现基线 | 0 | 见下「已验证事实」 |
 | 1 | 构建迁移 + 最小原生 Compose 页面 | 0 | 构建/自动检查/真机验收全部完成；**用户已真机确认最小页面**（显示在主窗口内、关闭恢复宿主内容、重开正常） |
 | 2 | 业务控制器抽取、搜索与歌单 / 同步页面 | 2 | 实现、构建与自动检查全部完成；已做部分真机取证（搜索/播放/歌单页/同步状态），**待用户真机验收** |
-| 3 | 登录、账号及附属界面迁移 | — | 未开始 |
+| 3 | 登录、账号及附属界面迁移 | 2 | 实现、构建与自动检查全部完成（登录/账号/本地命名控制器 + 原生页）；**待用户真机验收** |
 | 4 | WebView2 验证区域改造 | — | 未开始 |
 | 5 | 旧 UI 清理与双渠道交付 | — | 未开始 |
 
@@ -250,7 +250,68 @@ harness/run-regression.ps1 本批扩展：-Batch 5 编译并运行 SearchControl
 - 观察到的偏差：歌单页首次打开显示「账号状态变化，请重新载入；当前仍显示上次载入的曲目」（插件启动早期 epoch 抖动）。
   已按 §1 末条改为「首次载入前静默同步快照」，并有探针断言覆盖；**该修正后的版本尚未再真机复测**（记入待验项）。
 
-## 四、已实现但未验收
+## 四、批次 3 已验证事实（登录 / 账号 / 本地命名，含账号变化失效）
+
+### 1. 控制器抽取（离线探针，不联网、不碰 Swing）
+
+- `LoginController`（885 行）：`Mode{QR,SMS,RISK}`、`Phase{IDLE,WAITING_QR,QR_READY,SCANNED,EXPIRED,ERROR,SENDING,CODE_SENT,LOGGING_IN,RISK,LOGGED_IN,CLOSED}`，
+  `Ports` 把二维码/短信/风控/验证窗/账号快照全部外置；常量 `QR_TICK_MS=1000`、`QR_MIN_GAP_MS=2000`、`COOLDOWN_SEC=60`、
+  `PHONE_RE=^1[3-9]\d{9}$`、`CODE_RE=^\d{4,6}$`。扫码成功 `loginVia="扫码"`、短信成功 `loginVia="验证码"`；
+  风控迁移自动打开验证页并给出「我已完成，重试」路径；`close()` 幂等且**绝不退出账号**（只停轮询、关验证窗）。
+  探针 `LoginControllerProbe`：**LOGIN_CONTROLLER_RESULT=253 PASS**。
+- `LocalSaveController`（389 行）：命名去空白、无曲目/空名/忙碌三种拒绝、提交时固定 `finalName+finalSongs` 快照、
+  成功后刷新本地歌单条目；`close()` 于 :346（取消在途但不撤销已提交写盘，与 `cancelPending` 语义一致）。
+  探针 `LocalSaveControllerProbe`：**LOCAL_SAVE_CONTROLLER_RESULT=156 PASS**（含 `closeLifecycle` 用例）。
+- `SearchController.onAccountChanged()`（本批新增，PLAN §8.2「账号变化使旧搜索回调失效」）：
+  锁内 `version++` 作废在途回调；若 `phase==SEARCHING` 回退为 `IDLE`（无旧列表）或 `RESULTS`（有旧列表），
+  避免永久停在「搜索中…」；清空 `pendingPlayRequest/playing/lastPlaySongId/lastPlaybackReport/playbackText/playRetryable`，
+  保留已拿到的列表与选中（搜索结果是匿名数据）；`async.cancel()` 在锁外调用（同一锁序理由）。
+  文案「账号状态已变化，旧的搜索请求与播放反馈已作废」。探针由 92 → **109 PASS**（新增 17 条断言）。
+
+### 2. 页面与会话
+
+- `NativeUiSession` 现在维护 4 个控制器（搜索/歌单/登录/本地命名）+ 250ms tick；每 tick 比对
+  `AccountService.sessionEpoch()`，变化即调 `SearchController.onAccountChanged()`（PLAN §8.2）；
+  `stop()` 依次 `close()` 四个控制器。
+- `NativeLoginPage`：扫码/短信分段切换、二维码图片按 `qrKey` 缓存解码、60 秒冷却倒计时、
+  风控面板（打开验证窗 / 我已完成，重试 / 返回扫码，注「批次 4 迁 WebView2」）；
+  登录成功 `LaunchedEffect(phase, loginVia)` 自动切到账号页。
+- `NativeAccountPage`：账号行复用 `AccountStatusWindow.lineForTest()`（单一算法），显示 `state/sessionEpoch`；
+  刷新快照、切换账号（→登录页）、退出登录（二次确认后走 `NeteasePlugin.logout()` 原路径）。
+- 本地命名内联进歌单页：`defaultName` 取自当前来源名，占位符显示默认名；保存/取消按钮与「待保存 N 首」行。
+- 宿主配置页四个入口（搜索/歌单/登录/当前账号）已改为**先开原生页、失败回退旧窗口**：
+  `HostUiBridge.openNativePage("search"/"playlist"/"login"/"account")` 为 `false` 才调用旧窗口。
+
+### 3. Swing 自建窗口迁移对照
+
+| 旧入口 | 位置 | 现在 |
+| --- | --- | --- |
+| 搜索窗 JFrame | `src/main/java/com/example/netease/ui/SearchWindow.java:85` | 原生 SEARCH 页（旧窗口保留 fallback） |
+| 歌单窗 JFrame | `src/main/java/com/example/netease/ui/PlaylistWindow.java:124` | 原生 PLAYLIST 页（同上） |
+| 登录窗 JDialog | `src/main/java/com/example/netease/ui/LoginDialog.java:318` | 原生 LOGIN 页（同上） |
+| 当前账号 JDialog | `src/main/java/com/example/netease/ui/AccountStatusWindow.java:265` | 原生 ACCOUNT 页（同上） |
+| WebView2 验证窗 JDialog | `src/main/java/com/example/netease/ui/VerifyWindow.java:199` | **批次 4 范围**，本批仍走旧窗口 |
+| 本地歌单命名 JOptionPane | `src/main/java/com/example/netease/ui/PlaylistWindow.java:471` | 已内联进原生歌单页 |
+| 打开数据目录 / 打开浏览器 | `NeteasePlugin.java:1568`、`LoginDialog.java:948` | 非自建窗口（系统资源管理器/浏览器），保留 |
+| 开发者诊断按钮 | `preference_config.dev.json` | 宿主配置页按钮 + `Notifier` toast/日志，无自建窗口 |
+
+### 4. 自动检查（全部 exit 0，证据 `build/evidence/batch3/`）
+
+| 检查 | 结果 |
+| --- | --- |
+| `build.ps1 -SkipApi` | 254 个 `.class`、资源 15、产物自检通过；size **14338291 B**、sha256 **ef9f0f1c…ece7e89** |
+| `verify-spmod.ps1` | 全部通过（76 项 PASS） |
+| `run-harness.ps1` | HARNESS_RESULT=ALL_PASS（56 项） |
+| `run-regression.ps1` | 批次 1–4：12 / 6+7+3 / 9+7 / 4+10 PASS；批次 5：搜索 **109** / 歌单 146；批次 6：登录 **253** / 本地命名 **156** |
+| `run-behavior.ps1` | BEHAVIOR 27 + ASYNC 18 + HOST_TRANSACTION 7 + HOST_PROFILE 1 PASS |
+| `test_acceptance.py` | Ran 5 tests OK（10.4s） |
+
+### 5. 真机状态
+
+本批**未做新的真机取证**（按用户要求停止鼠标自动化；批次 2 的页面已在宿主上运行过）。
+待用户验收项见下一节；批次 5 会统一升版本号并交付最终预览包。
+
+## 五、已实现但未验收
 
 1. `tools/jdk.ps1` 的探测顺序与报错信息（自动化路径已实测，异常机器环境未覆盖）。
 2. `extract-api.ps1` 的宿主版本/SHA-256 输出与 37 类阈值（本机通过，换宿主版本时只警告不阻断）。
@@ -260,14 +321,21 @@ harness/run-regression.ps1 本批扩展：-Batch 5 编译并运行 SearchControl
    窄窗（<760dp）自动收起左栏；同步页「立即同步 / 刷新状态」按钮的四种返回（STARTED / BUSY / UNAUTHENTICATED / DISABLED）。
 6. 账号 epoch 抖动修正（歌单页首次打开不再误报「账号状态变化」）只有探针断言覆盖，**尚未在真机上复看首开文案**。
 7. 播放失败路径的真机文案（取直链失败 / 超时 30 秒）未实测，只在探针里模拟过。
+8. 批次 3 原生登录页的**真机流程**（扫码出码/扫码成功跳账号页、短信发送与 60 秒冷却、风控打开验证窗与「我已完成，重试」）未走查；
+   验证窗仍是旧 `VerifyWindow`，批次 4 才迁 WebView2。
+9. 原生账号页（切换账号/刷新快照/退出登录二次确认）与登录页「取消登录」的真机行为未验收。
+10. 歌单页内联「存为本地歌单 / 取消命名」的真机路径（含默认名占位符）未走查。
+11. `SearchController.onAccountChanged()` 的**真实触发**（宿主里真正退出/切换账号时旧搜索被作废）只在探针里模拟过，
+    真机需要配合账号切换才能看到；`NativeUiSession` 的 epoch 比对按 250ms 轮询。
+12. 宿主配置页四个入口的**回退分支**（原生层未就绪时回退旧 Swing 窗口）未人为制造失败验证。
 
-## 五、尚待验证的技术方案
+## 六、尚待验证的技术方案
 
 1. **宿主品牌配色**：宿主不使用 `MaterialTheme`、也不暴露配色 CompositionLocal，
    插件页只能跟到系统深/浅色。后续若需要品牌色，只能解析宿主设置库（`spw.db`）或宿主自绘常量，属方案待定。
 2. **适配层锚点随宿主升级的稳定性**：1.19.0 已确认；1.20+ 需要重新核对锚点并更新适配层常量。
 
-## 六、明确阻塞项
+## 七、明确阻塞项
 
 1. ~~批次 1 硬关卡：最小原生 Compose 页面须用户真机确认~~ **已解除**：
    用户在宿主「配置」页确认「显示在主窗口内 / 关闭后宿主配置恢复可点 / 右下角入口可重开」三项均正常，
@@ -276,8 +344,10 @@ harness/run-regression.ps1 本批扩展：-Batch 5 编译并运行 SearchControl
    因此官方 Workshop Gradle 插件不可用；本批继续使用自有 Python 打包器。
 3. 批次 2 **无新增阻塞**：控制器语义由离线探针证明，页面已装到宿主 0.11.60 供用户自测；
    本批交付不依赖用户当次确认（不像批次 1 的硬关卡），用户发现的问题记入下一轮修正。
+4. 批次 3 **无新增阻塞**：登录/账号/本地命名控制器均有离线探针（253/156 条断言），构建与全部自动检查 exit 0；
+   本批未做新的真机取证（按用户要求停止鼠标自动化），真机项记入上一节待验清单。
 
-## 七、复跑方式
+## 八、复跑方式
 
 在工程根目录（0.12.0 目标包名 `plugin-com.example.netease-0.11.60.spmod`，批次 5 才升到 0.12.0）：
 
@@ -286,10 +356,12 @@ harness/run-regression.ps1 本批扩展：-Batch 5 编译并运行 SearchControl
     pwsh -NoProfile -File tools/verify-spmod.ps1 -Spmod build/dist/plugin-com.example.netease-0.11.60.spmod
     pwsh -NoProfile -File harness/run-harness.ps1 -Spmod build/dist/plugin-com.example.netease-0.11.60.spmod
     pwsh -NoProfile -File harness/run-regression.ps1 -Spmod build/dist/plugin-com.example.netease-0.11.60.spmod
-    pwsh -NoProfile -File harness/run-regression.ps1 -Batch 5 -Spmod build/dist/plugin-com.example.netease-0.11.60.spmod   # 两个控制器探针
+    pwsh -NoProfile -File harness/run-regression.ps1 -Batch 5 -Spmod build/dist/plugin-com.example.netease-0.11.60.spmod   # 搜索/歌单控制器探针
+    pwsh -NoProfile -File harness/run-regression.ps1 -Batch 6 -Spmod build/dist/plugin-com.example.netease-0.11.60.spmod   # 登录/本地命名控制器探针
 
-`run-regression.ps1` 的 `-Batch` 取值 1–5 或 all；批次 5 会编译并运行 `SearchControllerProbe`（92 条断言）
-与 `PlaylistControllerProbe`（146 条断言 + PlaylistIds 10 条等价性）。
+`run-regression.ps1` 的 `-Batch` 取值 1–6 或 all；批次 5 运行 `SearchControllerProbe`（**109** 条断言）
+与 `PlaylistControllerProbe`（146 条断言 + PlaylistIds 10 条等价性）；
+批次 6 运行 `LoginControllerProbe`（253 条断言）与 `LocalSaveControllerProbe`（156 条断言）。
     pwsh -NoProfile -File harness/run-behavior.ps1 -Spmod build/dist/plugin-com.example.netease-0.11.60.spmod
     python -m unittest discover -s harness/regression -p test_acceptance.py -v
 
@@ -305,17 +377,18 @@ harness/run-regression.ps1 本批扩展：-Batch 5 编译并运行 SearchControl
 截图坐标 = 窗口左上为原点，点击换算 `virtual = (windowRect.Left + X) * 1.25`。
 按钮位置建议用像素颜色扫描确定，不要凭缩略图估算（会偏 40–60 px）。
 
-## 八、回退
+## 九、回退
 
 本批新增 Gradle 构建链与 Kotlin/Compose 源码，但**未改**插件 ID、主类、扩展类、包内布局与数据格式。
 回退即：`git revert` 本批提交（恢复 `build.ps1`/`tools/build.py` 的纯 javac 路径），
 并用 `build/baseline/0.11.59/` 里的 0.11.59 包重新安装。
 运行时副作用：插件停用/卸载时会执行 `HostUiBridge.uninstall()`；若进程被强杀，Hook 随宿主进程消失，无残留。
 
-## 九、本批提交
+## 十、本批提交
 
 - 批次 0 独立提交：`f1bd594 0.12.0 批次 0：建立 JDK 25 可复现基线与宿主 1.19 API 核对`。
 - 批次 1 独立提交：`git log --grep='批次 1'`（Gradle 构建链 + 原生 UI 适配层 + 最小页面）。
 - 批次 2 独立提交：`git log --grep='批次 2'`（搜索/歌单/同步控制器 + 原生搜索/歌单/同步页 + 批次 5 探针）。
-  该提交只含源码、脚本与本记录；不含 `build/`、`docs/`、日志、截图、真实数据。
+- 批次 3 独立提交：`git log --grep='批次 3'`（登录/账号/本地命名控制器 + 原生登录/账号页 + 账号变化失效 + 批次 6 探针）。
+  上述提交只含源码、脚本与本记录；不含 `build/`、`docs/`、日志、截图、真实数据。
 - 之后批次各自独立提交；`docs/`、`build/` 不入库。
