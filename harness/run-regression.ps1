@@ -1,6 +1,6 @@
 <# Formal offline cover regressions. All generated data stays under harness/work. #>
 [CmdletBinding()]
-param([string] $Spmod, [ValidateSet('all','1','2','3','4','5','6')] [string] $Batch = 'all')
+param([string] $Spmod, [ValidateSet('all','1','2','3','4','5','6','7')] [string] $Batch = 'all')
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $OutputEncoding = [System.Text.Encoding]::UTF8
@@ -21,7 +21,7 @@ $HostJars = @('spw-workshop-api-host.jar','pf4j-3.12.0.jar','kotlin-stdlib-host.
     ForEach-Object { Join-Path $Repo "tools/.cache/$_" }
 $Libs = @(Get-ChildItem (Join-Path $Extract 'lib') -Filter '*.jar' | ForEach-Object FullName)
 $Cp = (@($Build,$Cls) + $Libs + $HostJars) -join ';'
-$batches = if ($Batch -eq 'all') { @(1,2,3,4,5,6) } else { @([int]$Batch) }
+$batches = if ($Batch -eq 'all') { @(1,2,3,4,5,6,7) } else { @([int]$Batch) }
 foreach ($n in $batches) {
     # 批次 5/6 = 原生 UI 控制器（搜索/歌单、登录/本地命名）的离线语义探针，各自独立 main，分开编译。
     $sources = if ($n -eq 5) {
@@ -33,6 +33,11 @@ foreach ($n in $batches) {
         @(
             (Join-Path $PSScriptRoot 'regression/cover/LoginControllerProbe.java'),
             (Join-Path $PSScriptRoot 'regression/cover/LocalSaveControllerProbe.java')
+        )
+    } elseif ($n -eq 7) {
+        @(
+            (Join-Path $PSScriptRoot 'regression/cover/VerifyEmbedControllerProbe.java'),
+            (Join-Path $PSScriptRoot 'regression/cover/FakeVerifyHost.java')
         )
     } else {
         @((Join-Path $PSScriptRoot "regression/cover/Batch${n}Probe.java"))
@@ -51,6 +56,7 @@ try {
             4 { @('f8a','f8b') }
             5 { @('search','playlist') }
             6 { @('login','local-save') }
+            7 { @('verify') }
         }
         foreach ($phase in $phases) {
             $Sandbox = Join-Path $Work "sandbox-$n-$phase"
@@ -62,6 +68,8 @@ try {
                 if ($phase -eq 'search') { 'SearchControllerProbe' } else { 'PlaylistControllerProbe' }
             } elseif ($n -eq 6) {
                 if ($phase -eq 'login') { 'LoginControllerProbe' } else { 'LocalSaveControllerProbe' }
+            } elseif ($n -eq 7) {
+                'com.example.netease.ui.controller.VerifyEmbedControllerProbe'
             } else {
                 "Batch${n}Probe"
             }

@@ -1,6 +1,5 @@
 package com.example.netease.ui;
 
-import com.example.netease.core.DataPaths;
 import com.example.netease.core.PluginLog;
 import com.example.netease.svc.AccountService;
 
@@ -28,7 +27,6 @@ import java.awt.event.WindowEvent;
 import java.awt.image.BufferedImage;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
-import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -595,52 +593,12 @@ public final class VerifyWindow {
      * 插件从 {@code <pluginPath>\plugin-*.jar} 加载 ⇒ 兄弟目录 {@code <pluginPath>\classes\verify-host}。
      */
     private static Path helperDir() {
-        String override = System.getProperty(OVERRIDE_PROP);
-        if (override != null && !override.isBlank()) {
-            Path p = Path.of(override);
-            if (Files.isDirectory(p)) {
-                return p;
-            }
-            PluginLog.w(TAG, "-D" + OVERRIDE_PROP + " 指的不是目录：" + override);
-        }
-        try {
-            URL loc = VerifyWindow.class.getProtectionDomain().getCodeSource().getLocation();
-            Path p = Path.of(loc.toURI());
-            Path dir = Files.isDirectory(p) ? p : p.getParent();
-            Path[] candidates = Files.isDirectory(p)
-                    ? new Path[] {p.resolve("classes").resolve("verify-host"), p.resolve("verify-host")}
-                    : new Path[] {dir.resolve("classes").resolve("verify-host"), dir.resolve("verify-host")};
-            for (Path c : candidates) {
-                if (Files.isDirectory(c)) {
-                    return c;
-                }
-            }
-            PluginLog.w(TAG, "按 code source 没找到助手目录（codeSource=" + p + "）");
-        } catch (Throwable t) {
-            PluginLog.w(TAG, "定位助手目录失败：" + t.getClass().getSimpleName());
-        }
-        return null;
+        return VerifyHostPaths.helperDir();
     }
 
     /** WebView2 的用户数据目录（放插件数据目录下的 verify-webview；拿不到数据目录就退到临时目录）。 */
     private static Path dataDir() {
-        try {
-            Path d = DataPaths.data();
-            if (d != null) {
-                Path target = d.resolve("verify-webview");
-                DataPaths.ensure(target);
-                return target;
-            }
-        } catch (Throwable t) {
-            PluginLog.w(TAG, "取插件数据目录失败：" + t.getClass().getSimpleName());
-        }
-        Path fallback = Path.of(System.getProperty("java.io.tmpdir", "."), "spw-verify-webview");
-        try {
-            Files.createDirectories(fallback);
-        } catch (Throwable ignored) {
-            // 建不出来就让 WebView2 自己去抱怨（会走 degrade）
-        }
-        return fallback;
+        return VerifyHostPaths.dataDir();
     }
 
     private static String fmt(Rectangle r) {

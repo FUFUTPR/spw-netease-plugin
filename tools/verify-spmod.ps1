@@ -1320,6 +1320,39 @@ try {
         Add-Result 'P10.24' '用户档主本 classes/preference_config.user.json 存在，且与 classes/preference_config.json 逐字节相同（0.11.35：DevMode 自读缺陷的修复资源）' $umOk $umDetail `
             $(if ($umOk) { '' } else { '缺少用户档主本 / 与用户档不一致 —— DevMode「关」方向会再次空转（装机文件停在开发者档，用户报障会复现）' })
 
+        # ---------- P10.39 内嵌验证助手（0.12.0 批次 4）：exe 与托管 dll 随包，且与资源目录逐字节一致
+        #  批次 4 把风控验证从「盖住登录窗的 JDialog」改成嵌入宿主主窗口的 WebView2 区域，
+        #  助手进程必须真的在包里、且是当前源码构建出来的（VerifyHost.exe 只是 apphost，
+        #  托管代码在 VerifyHost.dll，两个都要比）。
+        $vhOk = $true
+        $vhParts = @()
+        foreach ($vhName in @('classes/verify-host/VerifyHost.exe', 'classes/verify-host/VerifyHost.dll')) {
+            $vhBytes = Get-EntryBytes $zip $vhName
+            $vhLeaf = Split-Path -Leaf $vhName
+            $vhSrc = Join-Path $RepoRoot ('src\main\resources\verify-host\' + $vhLeaf)
+            if ($null -eq $vhBytes) {
+                $vhOk = $false
+                $vhParts += "$vhLeaf 不在包内"
+                continue
+            }
+            if (-not (Test-Path -LiteralPath $vhSrc)) {
+                $vhOk = $false
+                $vhParts += "$vhLeaf 资源目录缺失（$vhSrc）"
+                continue
+            }
+            $vhSrcBytes = [System.IO.File]::ReadAllBytes($vhSrc)
+            $vhSame = ($vhSrcBytes.Length -eq $vhBytes.Length)
+            if ($vhSame) {
+                for ($i = 0; $i -lt $vhBytes.Length; $i++) {
+                    if ($vhSrcBytes[$i] -ne $vhBytes[$i]) { $vhSame = $false; break }
+                }
+            }
+            if (-not $vhSame) { $vhOk = $false }
+            $vhParts += ("$vhLeaf {0} 字节{1}" -f $vhBytes.Length, $(if ($vhSame) { '、与资源目录逐字节相同' } else { '、与资源目录不一致' }))
+        }
+        $vhOff = if ($vhOk) { '' } else { '助手缺失或与资源目录不一致 —— 原生登录页的风控验证区域起不来（批次 4 会退回失败提示）' }
+        Add-Result 'P10.39' '内嵌验证助手随包：classes/verify-host 下有 VerifyHost.exe 与 VerifyHost.dll，且与 src/main/resources/verify-host 逐字节相同（0.12.0 批次 4）' $vhOk ($vhParts -join '；') $vhOff
+
         # ---------- P10.25 退役不留痕（0.11.30 需求②）：独立扫码窗 ui/LoginWindow 整类不得回潮
         #  0.11.30 用户需求②「扫码登录与验证码登录使用完全相同的样式，不允许再弹出独立窗口」⇒
         #  扫码并入 ui/LoginDialog 的分段切换，ui.LoginWindow 整类退役；它的接线路标（showLoginDialog）

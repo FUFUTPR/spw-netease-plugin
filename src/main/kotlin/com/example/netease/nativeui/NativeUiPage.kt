@@ -1,3 +1,5 @@
+@file:OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
+
 package com.example.netease.nativeui
 
 import androidx.compose.foundation.background
@@ -20,11 +22,13 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.awt.LocalAwtWindow
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
@@ -36,6 +40,7 @@ import com.example.netease.ui.controller.LocalSaveController
 import com.example.netease.ui.controller.LoginController
 import com.example.netease.ui.controller.PlaylistController
 import com.example.netease.ui.controller.SearchController
+import com.example.netease.ui.controller.VerifyEmbedController
 
 /**
  * 深浅色适配：宿主 1.19.0 的界面是自绘配色，没有使用 Material3 的 MaterialTheme，
@@ -95,6 +100,9 @@ internal object NativeUiState {
 
     /** 登录页状态：唯一登录流程的界面快照（账号事实仍只在 AccountService）。 */
     var login by mutableStateOf<LoginController.State?>(null)
+
+    /** 行为验证内嵌区域状态（VerifyHost 助手进程 + WebView2，批次 4）。 */
+    var verify by mutableStateOf<VerifyEmbedController.State?>(null)
     var loginPhone by mutableStateOf("")
     var loginCode by mutableStateOf("")
 
@@ -119,6 +127,10 @@ internal fun NativeUiPanel() = NativeUiTheme { NativeUiShell() }
 private fun NativeUiShell() {
     // 宿主提供的密度/字体缩放：页面不加任何自己的 Density 提供者，直接用宿主的 CompositionLocals。
     val density = LocalDensity.current
+    // 先于任何登录动作捕获真实宿主窗口（内容区/缩放）：验证助手要先核对窗口身份，
+    // 而风控可能由后台 tick 在登录页第一次组合前后触发，不能等验证区域自己组合时才拿。
+    val awtWindow = LocalAwtWindow.current
+    SideEffect { VerifyHostWindow.capture(awtWindow) }
     if (!NativeUiState.visible) {
         // 关闭后仅保留入口；Box 本身不拦截指针事件，宿主配置页照常可操作。
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.BottomEnd) {

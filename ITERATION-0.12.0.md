@@ -13,7 +13,7 @@
 | 1 | 构建迁移 + 最小原生 Compose 页面 | 0 | 构建/自动检查/真机验收全部完成；**用户已真机确认最小页面**（显示在主窗口内、关闭恢复宿主内容、重开正常） |
 | 2 | 业务控制器抽取、搜索与歌单 / 同步页面 | 2 | 实现、构建与自动检查全部完成；已做部分真机取证（搜索/播放/歌单页/同步状态），**待用户真机验收** |
 | 3 | 登录、账号及附属界面迁移 | 2 | 实现、构建与自动检查全部完成（登录/账号/本地命名控制器 + 原生页）；**待用户真机验收** |
-| 4 | WebView2 验证区域改造 | — | 未开始 |
+| 4 | WebView2 验证区域改造 | 2 | 助手严格挂载 + 控制器 + 内嵌验证面板 + 构建/自动检查全部完成；**待用户真机验收**（真实风控可见可操作、移动缩放、停用关闭） |
 | 5 | 旧 UI 清理与双渠道交付 | — | 未开始 |
 
 ---
@@ -311,7 +311,80 @@ harness/run-regression.ps1 本批扩展：-Batch 5 编译并运行 SearchControl
 本批**未做新的真机取证**（按用户要求停止鼠标自动化；批次 2 的页面已在宿主上运行过）。
 待用户验收项见下一节；批次 5 会统一升版本号并交付最终预览包。
 
-## 五、已实现但未验收
+## 五、批次 4 已验证事实（WebView2 内嵌验证区域）
+
+### 1. 助手进程（`tools/verify-host`，C# + WebView2）
+
+- 严格挂载模式新增参数：`--session`、`--parent-hwnd`、`--parent-class`、`--parent-title`、`--expect-client`。
+  父窗定位要求**顶层（GetParent==0）+ 同 pid + 同类名 + 可见**；候选 ≥2 且标题无法唯一命中时输出
+  `parent-ambiguous count=N` 并退出（**拒绝挂载，绝不取第一个**）；`--parent-hwnd` 无效时输出
+  `parent-invalid <reason>`；超时输出 `parent-timeout`。采用后输出
+  `parent <hwnd> class=<cls> pid=<pid> title-match=… count=… session=<sid>`、`adopted rect=0,0,1,1`
+  （严格模式不先闪）与 `client w=<物理宽> h=<物理高>`；`--expect-client` 与实测差 >12px 输出
+  `parent-client-mismatch` 并退出。
+- 进程协议（stdin UTF-8 逐行）：`rect x y w h`（**物理像素**，只 MoveWindow）、`show` / `hide`
+  （SW_SHOWNA / SW_HIDE，相同可见性不重复回报）、`close`（有界清理后退出）、`info`（回显 rect/visible/
+  adopted/ready/session），未知命令 `ignore-cmd`；每条 rect/show 前复核 `IsWindow(parent)`。
+- 父窗监视改为**独立后台线程（200ms）**：宿主销毁子窗口时消息循环可能先结束，WinForms Timer 收不到
+  tick；`FormClosed` 与 `Application.Run` 返回后只要 `_adopted && !_closing` 就回报 `parent-gone exit`，
+  让 Java 侧能区分「宿主关窗」与「助手崩溃」。
+- `tools/verify-host/build.ps1`：先 publish 到 `build/_tmp/verify-host-publish-<时间>` 临时目录 →
+  校验 exe 存在且 >1024 B、exe 写入时间不早于 `tools/verify-host` 下最新源码（容差 2s）→ 跑 `--selftest`
+  失败则保留旧资源目录并退出 → 成功才替换 `src/main/resources/verify-host`（12 文件 / 2,052,265 B）→
+  最后校验 exe **与 VerifyHost.dll** 的 sha256 都与临时产物一致（exe 只是 apphost，托管代码在 dll）。
+  本次：exe `19fd1d88…0236`，dll `7c222cf3…1c3`。
+- 真实协议探针 `tools/smoke/VerifyHostProtocolProbe.java`（`harness/run-verifyhost-probe.ps1` 编译运行）：
+  真实 `VerifyHost.exe` + 真实 AWT 父窗 7 组场景 **41 PASS，exit 0**（正常握手/rect/show/hide/info/close、
+  候选歧义拒绝、指定 HWND 无效、父窗超时、父窗销毁 `parent-gone`、stdin EOF、旧 `SunAwtDialog` 模式）。
+  证据 `build/evidence/batch4/01-verifyhost-build.txt`、`02-verifyhost-protocol.txt`。
+
+### 2. 控制器（`VerifyEmbedController`，Java，离线探针）
+
+- `Phase{IDLE,STARTING,READY,FAILED,CLOSED}`；`State{phase,message,sessionId,embedded,retryable,width,height}`；
+  监听器只收状态快照，异常被吞掉，不反噬调用方。
+- `open` 幂等；cookie 最多等 1500ms（迟到回调不启动进程）；每次 open/retry 生成新的 8 位十六进制
+  sessionId，**旧 session 的所有输出一律丢弃**；账号 epoch 变化后旧行不回灌 cookie、不改状态；
+- `setBounds(逻辑坐标×4, scale)`：逻辑 → 物理只在控制器里 `Math.round` **换算一次**，重复值不发，
+  READY 前缓存、adopted 后补发；`setVisible` 去重；`retry()` 关旧进程开新会话；
+  `close()` 有界（发 close → 等 600ms → destroy → 等 400ms → destroyForcibly）、幂等、只通知一次 CLOSED。
+- 失败语义逐字映射（parent-ambiguous / parent-invalid / parent-client-mismatch / parent-timeout / nav-done
+  false / 进程提前退出 / 父窗消失 / WebView2 失败），全部 `retryable` 且**不跳到外部浏览器**。
+- 探针 `harness/regression/cover/VerifyEmbedControllerProbe.java` + `FakeVerifyHost.java`：
+  **VERIFY_EMBED_RESULT=185 PASS**，连续 3 次一致（A–J：构造/open 41、关闭 16、rect 15、可见性 16、
+  失败映射 44、retry 16、epoch 6、迟到 cookie 10、清理 6）。证据 `build/evidence/batch4/03-regression-batch7.txt`。
+
+### 3. 原生页接线（登录页风控面板）
+
+- `NativeLoginPage.RiskPane` 不再起旧 `VerifyWindow` JDialog：内嵌 `EmbeddedVerifyArea`（400.dp 占位，
+  `onGloballyPositioned` 取 `boundsInWindow` → `NativeUiSession.updateEmbeddedVerify` → `setBounds`），
+  显示助手状态、失败原因与「重试」按钮；说明「本机 WebView2 渲染，不会打开外部浏览器」。
+- 宿主窗口信息由 `NativeUiShell` 用 `LocalAwtWindow.current` 捕获（标题、内容区逻辑尺寸、
+  `graphicsConfiguration.defaultTransform.scaleX`；125% 下为 1.25），确保风控由后台 tick 触发时也有父窗信息。
+- 可见性规则：只有 `READY` 且页面可见且 `page==LOGIN` 才 `setVisible(true)`；关闭登录、切页、
+  停用插件都会先 hide/close（`DisposableEffect` 兜底），网页区域不会残留压住其它面板。
+- `parentTitle` 传空串：宿主窗口标题是当前播放曲名、随时会变，拿标题核对会永久错过唯一窗口；
+  身份核对退化为「同进程 + 顶层 SunAwtFrame + 唯一」，不唯一时助手拒绝挂载并回报原因。
+- 旧 `ui/VerifyWindow` 只被旧 Swing `LoginDialog` 自己的风控路径引用（`LoginDialog.java:1688` 等），
+  批次 5 清理旧 UI 时一并删除；原生页已不再调用它。
+- 构建：268 个 `.class`、资源 15 个、size **14,384,220 B**、sha256 `64528f65c11b2b95756312f73d0da8e88ad10d3c568fe99aff091b2d200d4ac1`。
+
+### 4. 自动检查（全部 exit 0，证据 `build/evidence/batch4/`）
+
+| 检查 | 结果 | 证据 |
+| --- | --- | --- |
+| `build.ps1 -SkipApi` | 268 class / 15 资源 / 自检通过 / 14,384,220 B | `04-build.txt` |
+| `verify-spmod` | **77 项 PASS**（新增 P10.39：助手 exe+dll 随包且与资源目录逐字节一致） | `05-verify-spmod.txt` |
+| `run-harness` | **PASS = 56 / FAIL = 0** | `06-harness.txt` |
+| `run-regression -Batch all` | 批次 1–4 = 12 / 6+7+3 / 9+7 / 4+10；批次 5 = 109+146；批次 6 = 253+156；批次 7 = **185** | `07-regression.txt` |
+| `run-behavior` | BEHAVIOR 27 + ASYNC 18 + HOST_TRANSACTION 7 + HOST_PROFILE 1 PASS | `08-behavior.txt` |
+| `python -m unittest … test_acceptance` | Ran 5 tests，OK | `09-unittest.txt` |
+
+### 5. 真机状态
+
+本批**未做真机取证**：内嵌验证区域需要真实网易云风控触发，且用户已要求停止鼠标自动化、由用户自测（m01954）。
+自动侧已覆盖助手协议 41 条与控制器 185 条；真机项记入下一节待验清单。
+
+## 六、已实现但未验收
 
 1. `tools/jdk.ps1` 的探测顺序与报错信息（自动化路径已实测，异常机器环境未覆盖）。
 2. `extract-api.ps1` 的宿主版本/SHA-256 输出与 37 类阈值（本机通过，换宿主版本时只警告不阻断）。
@@ -321,21 +394,30 @@ harness/run-regression.ps1 本批扩展：-Batch 5 编译并运行 SearchControl
    窄窗（<760dp）自动收起左栏；同步页「立即同步 / 刷新状态」按钮的四种返回（STARTED / BUSY / UNAUTHENTICATED / DISABLED）。
 6. 账号 epoch 抖动修正（歌单页首次打开不再误报「账号状态变化」）只有探针断言覆盖，**尚未在真机上复看首开文案**。
 7. 播放失败路径的真机文案（取直链失败 / 超时 30 秒）未实测，只在探针里模拟过。
-8. 批次 3 原生登录页的**真机流程**（扫码出码/扫码成功跳账号页、短信发送与 60 秒冷却、风控打开验证窗与「我已完成，重试」）未走查；
-   验证窗仍是旧 `VerifyWindow`，批次 4 才迁 WebView2。
+8. 批次 3 原生登录页的**真机流程**（扫码出码/扫码成功跳账号页、短信发送与 60 秒冷却、风控打开验证区域与「我已完成，重试」）未走查；
+   验证区域已在批次 4 改为内嵌 WebView2，其真机行为见本节 13–18 条。
 9. 原生账号页（切换账号/刷新快照/退出登录二次确认）与登录页「取消登录」的真机行为未验收。
 10. 歌单页内联「存为本地歌单 / 取消命名」的真机路径（含默认名占位符）未走查。
 11. `SearchController.onAccountChanged()` 的**真实触发**（宿主里真正退出/切换账号时旧搜索被作废）只在探针里模拟过，
     真机需要配合账号切换才能看到；`NativeUiSession` 的 epoch 比对按 250ms 轮询。
 12. 宿主配置页四个入口的**回退分支**（原生层未就绪时回退旧 Swing 窗口）未人为制造失败验证。
+13. 内嵌验证区域（批次 4）的**真机可见、可操作**：需要在真实网易云风控下触发（扫码/短信登录被风控），
+    自动侧只覆盖到助手协议（41 条）与控制器（185 条）；400.dp 占位区在 125% 缩放下与父窗客户区的像素对齐仍需真机确认。
+14. 宿主**移动 / 缩放 / 最大化 / 还原 / 最小化 / 跨显示器与缩放变化**时网页区域的跟随：
+    rect 由 `onGloballyPositioned` 驱动、逻辑→物理只在控制器换算一次，真机表现待测；层级冲突时「先隐藏网页区域」的行为同待观察。
+15. 关闭登录、切页、停用插件时助手的**有界关闭**（600ms + 400ms）与网页消失；离开登录页后迟到回调不得重新显示验证区域。
+16. 三类失败在面板内**显示原因并可重试**：助手进程崩溃、父窗口消失、WebView2 不可用（自动侧覆盖协议，真机需人为 kill 助手或禁用 WebView2）。
+17. Cookie 初始化与回传在**真实风控流程**中生效（自动侧只验证管道格式、旧 session/旧 epoch 丢弃与日志脱敏）。
+18. 旧 Swing `LoginDialog` 的风控路径仍使用旧 `VerifyWindow`（批次 5 才清理），两套验证路径并存期间未在真机对比。
 
-## 六、尚待验证的技术方案
+
+## 七、尚待验证的技术方案
 
 1. **宿主品牌配色**：宿主不使用 `MaterialTheme`、也不暴露配色 CompositionLocal，
    插件页只能跟到系统深/浅色。后续若需要品牌色，只能解析宿主设置库（`spw.db`）或宿主自绘常量，属方案待定。
 2. **适配层锚点随宿主升级的稳定性**：1.19.0 已确认；1.20+ 需要重新核对锚点并更新适配层常量。
 
-## 七、明确阻塞项
+## 八、明确阻塞项
 
 1. ~~批次 1 硬关卡：最小原生 Compose 页面须用户真机确认~~ **已解除**：
    用户在宿主「配置」页确认「显示在主窗口内 / 关闭后宿主配置恢复可点 / 右下角入口可重开」三项均正常，
@@ -346,8 +428,11 @@ harness/run-regression.ps1 本批扩展：-Batch 5 编译并运行 SearchControl
    本批交付不依赖用户当次确认（不像批次 1 的硬关卡），用户发现的问题记入下一轮修正。
 4. 批次 3 **无新增阻塞**：登录/账号/本地命名控制器均有离线探针（253/156 条断言），构建与全部自动检查 exit 0；
    本批未做新的真机取证（按用户要求停止鼠标自动化），真机项记入上一节待验清单。
+5. 批次 4 **无新增阻塞**：助手协议 41 条、控制器 185 条探针全过，构建与全部自动检查 exit 0；
+   但本批有**技术关卡**——内嵌验证区域必须由用户在真实风控下确认「网页在主窗口内可见可操作」，
+   未确认前批次 4 保持状态 2，不进入批次 5 的旧 UI 删除。
 
-## 八、复跑方式
+## 九、复跑方式
 
 在工程根目录（0.12.0 目标包名 `plugin-com.example.netease-0.11.60.spmod`，批次 5 才升到 0.12.0）：
 
@@ -358,10 +443,18 @@ harness/run-regression.ps1 本批扩展：-Batch 5 编译并运行 SearchControl
     pwsh -NoProfile -File harness/run-regression.ps1 -Spmod build/dist/plugin-com.example.netease-0.11.60.spmod
     pwsh -NoProfile -File harness/run-regression.ps1 -Batch 5 -Spmod build/dist/plugin-com.example.netease-0.11.60.spmod   # 搜索/歌单控制器探针
     pwsh -NoProfile -File harness/run-regression.ps1 -Batch 6 -Spmod build/dist/plugin-com.example.netease-0.11.60.spmod   # 登录/本地命名控制器探针
+    pwsh -NoProfile -File harness/run-regression.ps1 -Batch 7 -Spmod build/dist/plugin-com.example.netease-0.11.60.spmod   # 内嵌验证控制器探针（185 条）
+    pwsh -NoProfile -File harness/run-verifyhost-probe.ps1 -Out build/evidence/batch4/10-verifyhost-protocol.txt  # 真实助手协议（41 条）
 
-`run-regression.ps1` 的 `-Batch` 取值 1–6 或 all；批次 5 运行 `SearchControllerProbe`（**109** 条断言）
+`run-regression.ps1` 的 `-Batch` 取值 1–7 或 all；批次 5 运行 `SearchControllerProbe`（**109** 条断言）
 与 `PlaylistControllerProbe`（146 条断言 + PlaylistIds 10 条等价性）；
-批次 6 运行 `LoginControllerProbe`（253 条断言）与 `LocalSaveControllerProbe`（156 条断言）。
+批次 6 运行 `LoginControllerProbe`（253 条断言）与 `LocalSaveControllerProbe`（156 条断言）；
+批次 7 运行 `VerifyEmbedControllerProbe` + `FakeVerifyHost`（**185** 条断言，假助手，不需要桌面）。
+
+助手本体（C#）重建与验真：
+
+    pwsh -NoProfile -File tools/verify-host/build.ps1   # 先发布到临时目录→自检→成功才替换 src/main/resources/verify-host
+
     pwsh -NoProfile -File harness/run-behavior.ps1 -Spmod build/dist/plugin-com.example.netease-0.11.60.spmod
     python -m unittest discover -s harness/regression -p test_acceptance.py -v
 
@@ -373,22 +466,28 @@ harness/run-regression.ps1 本批扩展：-Batch 5 编译并运行 SearchControl
     pwsh -NoProfile -File harness/shot-window.ps1 -Out build/evidence/batch1/x.png
     pwsh -NoProfile -File tools/host-click.ps1 -X <截图X> -Y <截图Y>   # 125% 缩放下的坐标换算点击
 
+内嵌验证区域真机复核要点：登录页进入风控后网页应出现在「验证区域」占位框内（不弹外部浏览器），
+拖动/缩放宿主窗口后网页随之移动且不错位，关闭登录后网页立即消失；失败时面板内显示原因与「重试」。
+
 注意：宿主为 Compose/AWT 自绘，UIA 拿不到按钮，只能截图 + 坐标点击；
 截图坐标 = 窗口左上为原点，点击换算 `virtual = (windowRect.Left + X) * 1.25`。
 按钮位置建议用像素颜色扫描确定，不要凭缩略图估算（会偏 40–60 px）。
 
-## 九、回退
+## 十、回退
 
 本批新增 Gradle 构建链与 Kotlin/Compose 源码，但**未改**插件 ID、主类、扩展类、包内布局与数据格式。
 回退即：`git revert` 本批提交（恢复 `build.ps1`/`tools/build.py` 的纯 javac 路径），
 并用 `build/baseline/0.11.59/` 里的 0.11.59 包重新安装。
 运行时副作用：插件停用/卸载时会执行 `HostUiBridge.uninstall()`；若进程被强杀，Hook 随宿主进程消失，无残留。
+批次 4 另含 C# 助手二进制：`src/main/resources/verify-host/` 由 `tools/verify-host/build.ps1` 从源码重建，
+回退时随提交一并 revert 即可恢复旧助手；旧 `VerifyWindow` 尚未删除，回退代码后旧验证窗路径仍然可用。
 
-## 十、本批提交
+## 十一、本批提交
 
 - 批次 0 独立提交：`f1bd594 0.12.0 批次 0：建立 JDK 25 可复现基线与宿主 1.19 API 核对`。
 - 批次 1 独立提交：`git log --grep='批次 1'`（Gradle 构建链 + 原生 UI 适配层 + 最小页面）。
 - 批次 2 独立提交：`git log --grep='批次 2'`（搜索/歌单/同步控制器 + 原生搜索/歌单/同步页 + 批次 5 探针）。
 - 批次 3 独立提交：`git log --grep='批次 3'`（登录/账号/本地命名控制器 + 原生登录/账号页 + 账号变化失效 + 批次 6 探针）。
+- 批次 4 独立提交：`git log --grep='批次 4'`（WebView2 内嵌验证：助手严格挂载与协议 41 条、控制器与批次 7 探针 185 条、内嵌验证面板接线、打包自检 77 项）。
   上述提交只含源码、脚本与本记录；不含 `build/`、`docs/`、日志、截图、真实数据。
 - 之后批次各自独立提交；`docs/`、`build/` 不入库。

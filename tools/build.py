@@ -423,6 +423,18 @@ def verify_spmod(spmod: Path, project: dict) -> list[str]:
             except Exception as exc:  # noqa: BLE001
                 problems.append(f"preference_config.json 不是合法 JSON：{exc}")
 
+        # --- 批次 4：内嵌验证助手必须真的随包，且就是资源目录里的那份字节 ---
+        for helper in ("VerifyHost.exe", "VerifyHost.dll"):
+            entry = "classes/verify-host/" + helper
+            if entry not in names:
+                problems.append(f"缺少内嵌验证助手：{entry}（先跑 tools/verify-host/build.ps1）")
+                continue
+            src_helper = ROOT / project["resourceDir"] / "verify-host" / helper
+            if not src_helper.exists():
+                problems.append(f"资源目录没有 verify-host/{helper}")
+            elif hashlib.sha256(z.read(entry)).digest() != hashlib.sha256(src_helper.read_bytes()).digest():
+                problems.append(f"包内 {entry} 与 src 资源不一致（打包的不是新版助手）")
+
         # --- 批次 1 起的打包污染检查（Gradle 编译 Java+Kotlin+Compose）---
         # 宿主 API / PF4J / Kotlin / Compose 运行时都是 compileOnly，绝不能进包。
         forbidden_prefixes = (

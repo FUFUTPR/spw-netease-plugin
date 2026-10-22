@@ -9,11 +9,11 @@ import com.example.netease.svc.LocalPlaylists
 import com.example.netease.svc.SmsLogin
 import com.example.netease.svc.SyncCoordinator
 import com.example.netease.ui.LatestTask
-import com.example.netease.ui.VerifyWindow
 import com.example.netease.ui.controller.LocalSaveController
 import com.example.netease.ui.controller.LoginController
 import com.example.netease.ui.controller.PlaylistController
 import com.example.netease.ui.controller.SearchController
+import com.example.netease.ui.controller.VerifyEmbedController
 import java.util.Timer
 import java.util.TimerTask
 import java.util.concurrent.Callable
@@ -46,6 +46,14 @@ internal object NativeUiSession {
 
     @Volatile
     private var localSaveController: LocalSaveController? = null
+
+    /** 批次 4：内嵌验证区域（VerifyHost 助手进程 + WebView2），登录风控时启动。 */
+    @Volatile
+    private var verifyController: VerifyEmbedController? = null
+
+    /** 验证区域的 Compose 占位当前是否在屏幕上（决定 show/hide）。 */
+    @Volatile
+    private var verifyAreaLaidOut: Boolean = false
 
     @Volatile
     private var timer: Timer? = null
@@ -95,10 +103,12 @@ internal object NativeUiSession {
                     NativeUiState.saveName = ""
                 }
             }
+            verifyController = VerifyEmbedController(VerifyListener)
             NativeUiState.search = searchController?.state()
             NativeUiState.playlist = playlistController?.state()
             NativeUiState.login = loginController?.state()
             NativeUiState.localSave = localSaveController?.state()
+            NativeUiState.verify = verifyController?.state()
             lastAccountEpoch = sessionEpoch()
             val t = Timer("native-ui-tick", true)
             t.scheduleAtFixedRate(
@@ -127,10 +137,13 @@ internal object NativeUiSession {
         val playlist = playlistController
         val login = loginController
         val localSave = localSaveController
+        val verify = verifyController
         searchController = null
         playlistController = null
         loginController = null
         localSaveController = null
+        verifyController = null
+        verifyAreaLaidOut = false
         started = false
         try {
             search?.close()
@@ -153,6 +166,12 @@ internal object NativeUiSession {
         } catch (t: Throwable) {
             PluginLog.d(TAG, "关闭本地命名控制器失败（已忽略）：$t")
         }
+        try {
+            // 有界关闭助手进程（close 内部 600ms + 400ms 后强制结束），失败也不影响停用流程。
+            verify?.close()
+        } catch (t: Throwable) {
+            PluginLog.d(TAG, "关闭内嵌验证控制器失败（已忽略）：$t")
+        }
     }
 
     fun search(): SearchController? = searchController
@@ -162,6 +181,8 @@ internal object NativeUiSession {
     fun login(): LoginController? = loginController
 
     fun localSave(): LocalSaveController? = localSaveController
+
+    fun verify(): VerifyEmbedController? = verifyController
 
     /** 宿主配置页入口路由：打开指定原生页；返回 false 表示原生层未就绪，调用方回退旧窗口。 */
     @Synchronized
@@ -344,6 +365,98 @@ internal object NativeUiSession {
         NativeUiState.localNote = "已取消，未写入任何文件"
     }
 
+    // ------------------------------------------------------------ 内嵌验证（批次 4）
+
+    /**
+     * 打开验证区域：父窗标题/内容尺寸/缩放来自 [VerifyHostWindow]（Compose 侧捕获的真实宿主窗口）。
+     * 助手会先做「进程 + 窗口身份」唯一性核对；采用后由 [updateEmbeddedVerify] 送出客户区物理矩形。
+     */
+    internal fun openEmbeddedVerify(url: String, source: String) {
+        val vc = verifyController ?: return
+        if (url.isBlank()) {
+            NativeUiState.verify = vc.state()
+            return
+        }
+        try {
+            vc.open(
+                url,
+                source,
+                // 宿主窗口标题是当前播放曲名、随时会变：拿它做身份核对会因标题过期而错过唯一窗口。
+                // 身份核对退化为「同进程 + 顶层 SunAwtFrame + 唯一」，匹配不唯一时助手会拒绝挂载并回报原因。
+                "",
+                VerifyHostWindow.contentWidth,
+                VerifyHostWindow.contentHeight,
+                VerifyHostWindow.scale,
+            )
+            NativeUiState.verify = vc.state()
+        } catch (t: Throwable) {
+            PluginLog.w(TAG, "启动内嵌验证区域失败（已隔离）：$t")
+        }
+    }
+
+    /**
+     * Compose 布局变化：逻辑坐标（window 内）只在这里交给控制器换算一次物理像素；
+     * 网页区域就绪后按「页面开着 且 仍停在登录页」决定显示。
+     */
+    internal fun updateEmbeddedVerify(left: Float, top: Float, width: Float, height: Float, scale: Double) {
+        val vc = verifyController ?: return
+        verifyAreaLaidOut = true
+        try {
+            vc.setBounds(
+                Math.round(left),
+                Math.round(top),
+                Math.round(width),
+                Math.round(height),
+                scale,
+            )
+            applyVerifyVisibility()
+        } catch (t: Throwable) {
+            PluginLog.d(TAG, "更新验证区域位置失败（已忽略）：$t")
+        }
+    }
+
+    /** 页面切走/关闭时隐藏网页区域（不关闭助手进程，返回登录页可以再显示）。 */
+    internal fun hideEmbeddedVerify() {
+        verifyAreaLaidOut = false
+        try {
+            verifyController?.setVisible(false)
+        } catch (t: Throwable) {
+            PluginLog.d(TAG, "隐藏验证区域失败（已忽略）：$t")
+        }
+    }
+
+    /** 关闭登录流程/停用插件时关闭验证区域（有界退出助手进程）。 */
+    internal fun closeEmbeddedVerify() {
+        verifyAreaLaidOut = false
+        try {
+            verifyController?.close()
+        } catch (t: Throwable) {
+            PluginLog.d(TAG, "关闭验证区域失败（已忽略）：$t")
+        }
+        NativeUiState.verify = verifyController?.state()
+    }
+
+    private fun applyVerifyVisibility() {
+        val vc = verifyController ?: return
+        if (vc.state().phase() != VerifyEmbedController.Phase.READY) {
+            return
+        }
+        val show = verifyAreaLaidOut && NativeUiState.visible && NativeUiState.page == NativePage.LOGIN
+        try {
+            vc.setVisible(show)
+        } catch (t: Throwable) {
+            PluginLog.d(TAG, "切换验证区域可见性失败（已忽略）：$t")
+        }
+    }
+
+    private object VerifyListener : VerifyEmbedController.Listener {
+        override fun onStateChanged(state: VerifyEmbedController.State) {
+            NativeUiState.verify = state
+            // 就绪/失败都可能发生在后台线程，这里只更新 Compose state 并同步可见性（控制器内部有锁）。
+            applyVerifyVisibility()
+        }
+    }
+
     // ------------------------------------------------------------ 生产端口
 
     private object AccountLoginPorts : LoginController.Ports {
@@ -371,12 +484,13 @@ internal object NativeUiSession {
             SmsLogin.loginNow(phone, code, source)
 
         override fun openVerify(url: String, fromQr: Boolean, onRetry: Runnable) {
-            // 批次 3 暂沿用宿主已有的验证窗（批次 4 迁 WebView2）；源码只在适配层出现。
-            VerifyWindow.open(null, url, null, null, if (fromQr) "扫码" else "验证码登录", onRetry)
+            // 批次 4：验证页改在登录页内部由 WebView2 助手渲染，不再创建独立验证窗口。
+            // onRetry 是旧验证窗按钮的回调；原生页直接调 controller.retryAfterVerify()，这里不需要它。
+            openEmbeddedVerify(url, if (fromQr) "扫码" else "验证码登录")
         }
 
         override fun closeVerify() {
-            VerifyWindow.closeIfOpen()
+            closeEmbeddedVerify()
         }
 
         override fun maskPhone(phone: String): String = AccountService.maskPhone(phone)

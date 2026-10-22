@@ -242,21 +242,22 @@ private fun SmsPane(controller: LoginController, st: LoginController.State) {
 private fun RiskPane(controller: LoginController, st: LoginController.State) {
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(
-            text = "网易云要求先完成一次行为验证才能继续登录。验证地址由宿主/服务端返回，完成后回到这里点「我已完成，重试」。",
+            text = "网易云要求先完成一次行为验证才能继续登录。验证网页在下方区域内渲染（宿主主窗口内的 WebView2），" +
+                "完成后点「我已完成，重试」。不会跳到外部浏览器。",
             style = MaterialTheme.typography.bodyMedium,
         )
-        Text(
-            text = if (st.riskUrl().isBlank()) "（当前没有验证地址）" else st.riskUrl(),
-            style = MaterialTheme.typography.labelSmall,
-            maxLines = 3,
-            overflow = TextOverflow.Ellipsis,
-        )
+        EmbeddedVerifyArea(
+            url = st.riskUrl(),
+            source = if (st.riskFromQr()) "扫码" else "验证码登录",
+        ) { controller.openVerify() }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Button(onClick = { controller.openVerify() }) { Text("打开验证窗") }
-            OutlinedButton(onClick = { controller.retryAfterVerify() }) { Text("我已完成，重试") }
+            Button(onClick = { controller.retryAfterVerify() }) { Text("我已完成，重试") }
             OutlinedButton(onClick = { controller.switchTo(LoginController.Mode.QR) }) { Text("返回扫码") }
             if (st.verifyOpened()) {
-                Text("验证窗已打开；这一步沿用宿主已有的验证窗口，批次 4 再迁到 WebView2。", style = MaterialTheme.typography.labelSmall)
+                Text(
+                    text = "验证区域已请求打开；若未显示，请看区域内的原因并重试。",
+                    style = MaterialTheme.typography.labelSmall,
+                )
             }
         }
     }
