@@ -176,6 +176,11 @@ public final class NeteasePlugin extends SpwPlugin {
      */
     private static volatile String syncNote = "尚未同步";
     private static volatile String syncFailure;
+    private static final com.example.netease.svc.SyncCoordinator SYNC =
+            new com.example.netease.svc.SyncCoordinator(PluginConfig::mergePlaylists, NeteasePlugin::currentUid,
+                    NeteasePlugin::beginMergedSync, NeteasePlugin::mergedSyncStillValid,
+                    NeteasePlugin::runNativeSync, NeteasePlugin::syncStatus, NativeLibrary::autoSyncEnd);
+
 
     // ----------------------------------------------------- 合并歌单（0.11.46，默认开）
 
@@ -867,45 +872,7 @@ public final class NeteasePlugin extends SpwPlugin {
 
     /** 起一条<b>非宿主线程</b>跑同步：这活要联网、要写库，绝不占宿主回调线程。 */
     private static void spawnNativeSync(java.util.List<String[]> list, String why) {
-        java.util.List<String[]> snapshot = list == null ? java.util.List.of() : java.util.List.copyOf(list);
-        String reason = why == null || why.isBlank() ? "未说明" : why;
-        // 0.11.46（合并歌单，默认开）：关闭后一切同步入口（手动 flag / 配置页按钮 / 登录后 /
-        // 30 分钟增量）都不再写宿主曲库（写进去也不显示，过滤见 host/HostTrackListGate）。重新
-        // 打开时由 onMergePlaylistsChanged 再 force 跑一轮。取闸与开关检查都在 beginMergedSync 里原子完成。
-        if (!PluginConfig.mergePlaylists()) {
-            PluginLog.i(TAG, "原生同步（" + reason + "）跳过：合并歌单已关闭（歌曲里只显示本地歌单）");
-            return;
-        }
-        if (snapshot.isEmpty() && currentUid() <= 0) {
-            PluginLog.w(TAG, "原生同步（" + reason + "）跳过：手动清单为空且当前未登录");
-            return;
-        }
-        // 0.11.7（§6.21 自动同步闸）：一切同步都先取闸，取不到就本轮不跑（被挡原因由 autoSyncBegin 写进日志）。
-        // 「force:」前缀 = 显式请求（手动 flag / 运行期请求 / 配置页 / 登录后），只绕 30 分钟间隔闸、不绕在飞闸；
-        // 「启动自动」「30 分钟增量」走普通闸。
-        long mergeGen = beginMergedSync(reason);
-        if (mergeGen < 0L) {
-            return;
-        }
-        try {
-            Thread t = new Thread(() -> {
-                try {
-                    if (!mergedSyncStillValid(mergeGen)) {
-                        PluginLog.i(TAG, "原生同步（" + reason + "）在开写前被「合并歌单」关闭叫停：本轮不写库");
-                        return;
-                    }
-                    runNativeSync(snapshot);
-                } finally {
-                    // 放闸必须在 finally：异常路径不放闸会把之后所有同步永久挡在「在飞」闸外。
-                    NativeLibrary.autoSyncEnd(syncNote + (syncFailure == null ? "" : "（失败：" + syncFailure + "）"));
-                }
-            }, "netease-native-sync");
-            t.setDaemon(true);
-            t.start();
-        } catch (Throwable t) {
-            NativeLibrary.autoSyncEnd("线程未能启动：" + t);
-            PluginLog.e(TAG, "原生同步线程启动失败（已放闸）", t);
-        }
+        SYNC.request(list, why);
     }
 
     /**
