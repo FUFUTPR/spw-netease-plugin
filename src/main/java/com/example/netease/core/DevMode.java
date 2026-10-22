@@ -44,7 +44,7 @@ import java.util.Arrays;
  *
  * <p><b>0.11.35 起不再管账号行</b>：0.11.32–0.11.34 曾把登录态替换进账号行标题（{@code {{ACCOUNT}}}
  * 占位），但用户 m00001 明确要求账号信息**不得常驻**在配置页上——账号行已改成按钮「当前账号」，
- * 点开 {@code ui.AccountStatusWindow} 才展示名字 / id / 会员。配置页里再没有任何承载账号文本的位置，
+ * 点开 {@code 原生账号页} 才展示名字 / id / 会员。配置页里再没有任何承载账号文本的位置，
  * 于是占位替换与 {@code setAccountText(...)} 一并退役：本类现在只做一件事——切档。</p>
  *
  * <p>可见性：本类按 {@code core} 包其余工具类（{@link PluginLog} / {@link DataPaths} / {@link PluginVersions}）

@@ -24,7 +24,7 @@ import java.util.function.Consumer;
 /**
  * 内嵌验证控制器（批次 4，契约 {@code build/_tmp/batch4-contracts.md}，需求 docs/PLAN.md §9）。
  *
- * <p>本类把旧 {@code ui.VerifyWindow}（JDialog 承载）里「起助手 / 等 ready / 摆 rect / 显隐 /
+ * <p>本类把旧的 JDialog 承载实现（0.12.0 已删除）里「起助手 / 等 ready / 摆 rect / 显隐 /
  * 收 cookie / 有界关闭」那套跨进程逻辑抽成<b>无 UI 依赖</b>的状态机：不 import Swing / AWT / Kotlin /
  * Compose，也不自己起界面；只把 {@link State} 不可变快照交给 {@link Listener}，由 Compose 页面按快照
  * 渲染。助手仍然是 {@code classes\verify-host\VerifyHost.exe}（C# + WebView2），协议见契约 §2。</p>

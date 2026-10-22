@@ -10,7 +10,7 @@ import java.net.URL;
 /**
  * 内嵌验证组件（VerifyHost）的资源定位：可执行目录与 WebView2 用户数据目录。
  *
- * <p>批次 4 起由 {@link VerifyWindow}（旧 JDialog 承载）与
+ * <p>批次 4 起由 旧的 JDialog 承载实现（0.12.0 已删除）与
  * {@code com.example.netease.ui.controller.VerifyEmbedController}（原生页面内嵌）共用，
  * 避免两套定位逻辑漂移。</p>
  */

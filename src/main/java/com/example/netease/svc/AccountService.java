@@ -183,7 +183,7 @@ public final class AccountService {
      *
      * <p>真机 2026-10-03 21:26:33：轮询 800 把「扫码前已登录」的会话**当场**回滚成 LOGGED_IN，
      * 开着的登录窗下一拍读到 LOGGED_IN 就当成「扫码成功」自动 dispose（用户没碰任何按键）。
-     * 现在 {@code ui.LoginDialog} 只在这之后**真的**登录成功过（{@link #loginSerial} 变了）时才关窗。</p>
+     * 现在 原生登录页 只在这之后**真的**登录成功过（{@link #loginSerial} 变了）时才关窗。</p>
      */
     private static volatile LoginStatus statusAtOpen;
     private static volatile long loginSerialAtOpen;
@@ -615,7 +615,7 @@ public final class AccountService {
     /**
      * 本次登录窗打开时账号是否**已经登录**，且此后没有发生新的登录成功（0.11.44）。
      *
-     * <p>界面（{@code ui.LoginDialog.tickQr}）靠它决定「读到 LOGGED_IN 要不要自动关窗」：
+     * <p>界面（原生登录页的 tick）靠它决定「读到 LOGGED_IN 要不要自动关窗」：
      * 真机 2026-10-03 21:26:33 的缺陷是轮询 800 把扫码前的 LOGGED_IN 当场放回来，界面误当成
      * 「本次扫码成功」把窗自己关了（用户没碰任何按键）。只有本方法为 false（开窗时未登录，或
      * 开窗后真的登录成功过）才允许自动关窗。</p>
@@ -629,7 +629,7 @@ public final class AccountService {
      * 风控待验证期要交给**电脑浏览器**打开的行为验证地址（0.11.32 需求①；0.11.33 改为电脑上完成；
      * 空串 = 没有）。
      *
-     * <p>界面（{@code ui.LoginDialog}）只读快照、不问来源 —— 与二维码本身同一套「冻结 API」口径。</p>
+     * <p>界面（原生登录页）只读快照、不问来源 —— 与二维码本身同一套「冻结 API」口径。</p>
      */
     public static String qrVerifyUrl() {
         String v = qrVerifyUrl;
@@ -847,7 +847,7 @@ public final class AccountService {
      * 发送短信验证码（0.2.4，docs/00 §6.3 修正第 11 条）。**会阻塞**（最长 {@value #SMS_TIMEOUT_SEC} 秒）。
      *
      * <p>真实网络调用在 {@code netease-account} 线程上做（{@code Http} 的 cookie jar 是进程级静态单例，
-     * 只有该线程能碰）；调用方（UI）只需保证自己没在 EDT 上干等 —— 见 {@code ui.LoginDialog}
+     * 只有该线程能碰）；调用方（UI）只需保证自己没在 EDT 上干等 —— 见 原生登录页
      * 的 offThread（0.11.30 起扫码窗 ui.LoginWindow 已退役，对话框是唯一登录窗）。</p>
      *
      * @param phone 11 位手机号；格式非法时直接返回 {@code code=-2}，不发请求
@@ -912,7 +912,7 @@ public final class AccountService {
      * 手机号 + 短信验证码登录（**兼容入口**，0.2.4 的布尔语义）。
      *
      * <p>0.11.7 起新代码请用 {@link #loginByCaptcha(String, String)}。本方法保留给既有调用点
-     * （{@code ui/LoginDialog}；0.11.30 起扫码窗 ui/LoginWindow 已退役）。</p>
+     * （原生登录页；0.11.30 起扫码窗 ui/LoginWindow 已退役）。</p>
      *
      * @return 是否登录成功
      */

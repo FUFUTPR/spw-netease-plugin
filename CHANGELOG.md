@@ -1,5 +1,18 @@
 # 迭代记录
 
+## 0.12.0（2026-10-22）
+
+- 界面整体搬进宿主主窗口：搜索、歌单与同步、登录、账号、本地歌单命名改用 Compose 渲染在「插件配置」内容区之上的原生页面，安全验证改为登录页内嵌 WebView2 区域，不再打开独立窗口。
+- 删除 8 个旧 UI 类（`AccountStatusWindow`、`HostTheme`、`LoginDialog`、`PlaylistWindow`、`SearchWindow`、`TableButtons`、`UiRegistry`、`VerifyWindow`），旧窗口探针同步清理（`DialogSkinProbe`、`LayoutDump`、`VerifyEmbedProbe` 删除，`LoginShapeProbe` 改为断言旧类不存在）；配置页五个入口不再回退旧窗口，原生层不可用时只给原因提示；停用统一走 `HostUiBridge.uninstall()`。
+- 业务语义抽到控制器：`SearchController`（最新请求优先、20 秒超时、账号变化作废旧结果）、`PlaylistController`（来源与曲目数、整单播放）、`LoginController`（扫码 / 短信 / 风控、60 秒冷却、取消登录不退出账号）、`LocalSaveController`（本地歌单命名）、`VerifyEmbedController`（助手生命周期与有界关闭）。
+- 构建链：JDK 25 + Gradle 9.2.1 + Kotlin 2.4.20 + Compose 运行时 1.12.2；Python 只做组装与自检，产物 `build/dist/plugin-com.example.netease-0.12.0.spmod`。
+- 宿主要求 Salt Player for Windows 1.19.0（Steam 版亦可）；权限只用 `class-transform`，首次启用需勾选「允许修改应用行为与界面」；插件 ID、主类、扩展类、包布局和数据格式不变，0.11.59 的数据目录可直接沿用。
+- 自动检查：0.12.0 最终包复跑全部 exit 0——包检查 78 PASS、加载检查 56 PASS、回归批次 1–7 为 12 / 6+7+3 / 9+7 / 4+10 / 109+146 / 253+156 / 185、行为 27+18+7+1 PASS、unittest 5 PASS、助手协议 41 PASS、LoginShape 40 PASS、DevMode 67 PASS；证据在 `build/evidence/batch5/01–09`（不入库）。
+- 用户真机：批次 1 的最小原生页面已由用户确认（显示、关闭恢复、重开、主题、密度、停用消失、重启用）；批次 2–4 的真实搜索播放、登录风控与内嵌验证区域仍待用户走查，未标为验收通过。
+- 版本演进：PLAN 原计划 0.11.60 / 0.11.61 / 0.11.62 / 0.12.0 四步，按用户要求一次性完成；0.11.60 只作为内部验证包承载批次 1–5，对外从 0.11.59 直接到 0.12.0。
+- 发布材料见 `RELEASE-0.12.0.md`：GitHub 清单、Steam 同包与同 ID 切换步骤、权限说明、回退基线与已知问题。
+- 回退：退出宿主后恢复 `build/baseline/0.11.59/`，保留数据目录；没有数据迁移，不要求清空账号、缓存或数据库。
+
 ## 0.11.59
 
 - 歌单载入采用最新请求优先机制；乱序、超时、关窗及账号变化使旧结果失效。失败保留有效列表、来源和曲目数，窗口内提供重试。

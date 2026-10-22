@@ -18,7 +18,7 @@ import java.util.function.Supplier;
 /**
  * 搜索页业务控制器（批次 2；契约 build/_tmp/batch2-contracts.md，需求 docs/PLAN.md §7.1/§7.2）。
  *
- * <p>把 {@code SearchWindow} 里的搜索、选中、播放反馈逻辑抽成<b>无 UI 依赖</b>的状态机：
+ * <p>把 旧 {@code SearchWindow}（0.12.0 已删除） 里的搜索、选中、播放反馈逻辑抽成<b>无 UI 依赖</b>的状态机：
  * 本类不 import 任何 Swing / AWT / Kotlin / Compose 类型，只把 {@link State} 快照交给 UI 渲染。</p>
  *
  * <p>线程规则：

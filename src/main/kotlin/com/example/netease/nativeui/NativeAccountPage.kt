@@ -21,12 +21,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.netease.svc.AccountService
-import com.example.netease.ui.AccountStatusWindow
+import com.example.netease.ui.AccountReport
 
 /**
  * 账号页（docs/PLAN.md §8.3）：直接消费 AccountService.status() 的同一份快照，
- * 展示行复用 [AccountStatusWindow.lineForTest]（旧窗口的渲染入口），保证「测试文本」与
- * 「实际显示」不是两套算法；本页不新增任何 cookie / 登录状态 / 会员状态。
+ * 展示行复用 [AccountReport]（纯 Java 的文案唯一真源，旧 Swing 窗口已在 0.12.0 删除），
+ * 保证「自动检查的文本」与「实际显示」不是两套算法；本页不新增任何 cookie / 登录状态 / 会员状态。
  */
 @Composable
 internal fun NativeAccountPage() {
@@ -36,7 +36,7 @@ internal fun NativeAccountPage() {
         return
     }
     var confirmLogout by remember { mutableStateOf(false) }
-    val rows = remember(st) { AccountStatusWindow.lineForTest(st).split("\n") }
+    val rows = remember(st) { AccountReport.render(st).split("\n") }
     Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text(
             text = "账号信息来自 AccountService.status() 的同一份快照（状态 " + st.state().name +

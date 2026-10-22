@@ -22,12 +22,7 @@ import com.example.netease.svc.LyricService;
 import com.example.netease.svc.NativeLibrary;
 import com.example.netease.svc.NativeStreamServer;
 import com.example.netease.svc.NetCheck;
-import com.example.netease.ui.AccountStatusWindow;
 import com.example.netease.ui.HostUiBridge;
-import com.example.netease.ui.LoginDialog;
-import com.example.netease.ui.PlaylistWindow;
-import com.example.netease.ui.SearchWindow;
-import com.example.netease.ui.UiRegistry;
 import com.xuncorp.spw.workshop.api.Channel;
 import com.xuncorp.spw.workshop.api.PluginContext;
 import com.xuncorp.spw.workshop.api.SpwPlugin;
@@ -62,19 +57,6 @@ public final class NeteasePlugin extends SpwPlugin {
 
     /** 整单试播延迟：比单曲试播再晚一些，避免两条取证链互相抢队列。 */
     private static final long ONLINE_AUTOTEST_PLAYLIST_DELAY_MS = 30000L;
-
-    /**
-     * 0.6.0 UI 取证开关：数据目录存在该文件时，启动后自动开歌单窗口 →
-     * 载入第一个歌单 → 从第 1 首整单连播（{@link PlaylistWindow#__testLoadFirstAndPlay()}）。
-     *
-     * <p>为什么需要它：封面列、表头「歌单切换 ▾」、以及 0.6.0 修掉的「第一首没歌词」，
-     * 三件事都只有在<b>真的有曲目进了曲目表</b>时才看得见；而曲目表要用户手点左侧歌单或点播放
-     * 才会有数据。无人值守取证必须自己能走到那一步（用户偏好：装机、启动、取证由插件方全包）。</p>
-     */
-    private static final String UI_AUTOTEST_PLAYLIST_FLAG = "ui-autotest-playlist.flag";
-
-    /** 开窗延迟：晚于「已就绪」提示、早于 30 秒的整单试播，避免两条链抢队列。 */
-    private static final long UI_AUTOTEST_DELAY_MS = 10000L;
 
     /** 0.3.9：自动试播里「本地文件对照」相对在线试播再延后的毫秒数（等在线那几次读回先跑完）。 */
     private static final long ONLINE_AUTOTEST_LOCAL_DELAY_MS = 20000L;
@@ -522,7 +504,6 @@ public final class NeteasePlugin extends SpwPlugin {
                 }
                 scheduleOnlineSelfTest();
                 schedulePlaylistSelfTest();
-                scheduleUiSelfTest();
                 scheduleNativeArm();
                 migrateLegacyAudioCache();
                 scheduleNativeSync();
@@ -580,28 +561,6 @@ public final class NeteasePlugin extends SpwPlugin {
             Timers.later(ONLINE_AUTOTEST_PLAYLIST_DELAY_MS, VoxzenBridge::tryPlaylist);
         } catch (Throwable t) {
             PluginLog.d(TAG, "整单试播调度失败（忽略）：" + t);
-        }
-    }
-
-    /**
-     * 0.6.0 UI 取证：标记文件驱动的一次性「开窗 + 载首单 + 整单连播」（只为真机取证，默认不触发）。
-     *
-     * <p>数据目录里存在 {@code ui-autotest-playlist.flag} 时，启动后 10 秒开歌单窗口，
-     * 再 5 秒后载入第一个歌单并从第 1 首整单连播。与另两条试播链用不同标记文件分开，
-     * 保证「点一首只放一首」「整单连播」「UI 上真能看见封面/切歌单/第一首就有词」三件事各自独立可判。</p>
-     */
-    private static void scheduleUiSelfTest() {
-        try {
-            Path flag = DataPaths.data().resolve(UI_AUTOTEST_PLAYLIST_FLAG);
-            if (!Files.isRegularFile(flag)) {
-                return;
-            }
-            PluginLog.i(TAG, "检测到 " + UI_AUTOTEST_PLAYLIST_FLAG + "："
-                    + (UI_AUTOTEST_DELAY_MS / 1000L) + " 秒后开歌单窗口，随后自动载单并整单连播");
-            Timers.later(UI_AUTOTEST_DELAY_MS, PlaylistWindow::open);
-            Timers.later(UI_AUTOTEST_DELAY_MS + 5000L, PlaylistWindow::__testLoadFirstAndPlay);
-        } catch (Throwable t) {
-            PluginLog.d(TAG, "UI 自检调度失败（忽略）：" + t);
         }
     }
 
@@ -1284,10 +1243,9 @@ public final class NeteasePlugin extends SpwPlugin {
         SYNC.stop();
         VoxzenBridge.stop();
         try {
-            // ① 先摘原生 UI Hook（宿主升级导致的失效也只记日志），再销毁旧窗口
+            // ① 摘原生 UI Hook：宿主页面不再渲染，250ms tick 与各控制器由 Kotlin 侧 stop() 统一收尾。
+            // 0.12.0 起不再有插件自建 Swing 窗口，也不需要窗口注册表。
             HostUiBridge.uninstall();
-            // ①′ 销毁插件窗口：窗口若留着，插件停用后仍会滞留在宿主进程里（验收 A9）
-            UiRegistry.disposeAll();
             // ② 停业务：账号线程收工（0.4.0 起 stop() 是终态；先断 IO 再有界 join，见 docs/00 §5）
             stopLegacyAudioMigration();
             com.example.netease.svc.CoverPrimer.stop();
@@ -1332,57 +1290,45 @@ public final class NeteasePlugin extends SpwPlugin {
     /**
      * 搜索（P2）：搜到的曲目可直接在线播放（0.5.0 起不再提供下载）。
      *
-     * <p>批次 3 起优先打开主窗口内的原生搜索页（{@link HostUiBridge#openNativePage(String)}）；
-     * 原生层未就绪（Hook 未装 / 适配层失配）时回退旧的 {@link SearchWindow}，保证入口永远可用。</p>
+     * <p>0.12.0 起只打开宿主主窗口内的原生搜索页（{@link HostUiBridge#openNativePage(String)}）；
+     * 原生层未就绪（Hook 未装 / 适配层失配）时给出明确提示，<b>不再回退到插件自建窗口</b>。</p>
      */
     public static void openSearch() {
         guard(() -> {
-            if (HostUiBridge.openNativePage("search")) {
-                return;
+            if (!HostUiBridge.openNativePage("search")) {
+                nativePageUnavailable("搜索");
             }
-            SearchWindow.open();
         });
     }
 
     /**
-     * 扫码登录（P3；<b>0.11.30 起并入登录对话框</b>）：打开登录对话框并直接停在<b>扫码档</b> ——
-     * 0.11.22–0.11.29 那个独立的 {@code ui.LoginWindow} 已整类退役（需求②：不再弹第二个窗口）。
+     * 扫码登录（P3；0.11.30 起并入登录页）：打开宿主主窗口内的原生登录页并停在扫码档。
      *
      * <p>方法名保留：{@code harness\src\spw\harness\P3Checks.java} 的入口清单与配置页历史接线都按
-     * 这个 {@code on_click} 名字找。配置页那一行「扫码登录」在 0.11.30 已从用户档撤走（DevMode 档里
-     * 也不再列它）——它现在只作为「对话框取不到码」时的兜底入口存在。</p>
+     * 这个 {@code on_click} 名字找。0.12.0 起不再创建独立窗口；原生层未就绪时提示用户。</p>
      */
     public static void showLoginDialog() {
         guard(() -> {
-            if (HostUiBridge.openNativePage("login")) {
-                return;
+            if (!HostUiBridge.openNativePage("login")) {
+                nativePageUnavailable("扫码登录");
             }
-            String phone = PluginConfig.freshPhone();
-            LoginDialog.open(phone == null ? "" : phone);
         });
     }
 
     /**
-     * 登录（P3；<b>0.11.26 用户规格 = 账号组里那个「登录」按钮</b>）：打开登录对话框 ——
-     * 0.11.30 起卡片内自带<b>分段切换</b>「扫码 | 验证码」（默认扫码），扫码态 = 260×260 二维码 +
-     * 「刷新二维码」，验证码态 = 手机号框 + （验证码框 + 「获取验证码」）+「登录」；被风控要求行为验证时
-     * 当场在窗内给出验证二维码（需求①②）。
+     * 登录（P3；0.11.26 用户规格 = 账号组里那个「登录」按钮）：打开宿主主窗口内的原生登录页 ——
+     * 页内自带「扫码 | 验证码」分段切换（默认扫码），扫码态 = 二维码 + 刷新，验证码态 = 手机号 +
+     * 验证码 + 获取验证码 + 登录；被风控要求行为验证时，验证网页在宿主主窗口内的 WebView2 区域显示
+     * （批次 4 内嵌验证）。0.12.0 起不再创建独立 Swing 窗口。
      *
-     * <p>为什么必须自绘：宿主配置页的 {@code edittext} 行点开只会给<b>一个</b>输入框（宿主自绘模态，
-     * 插件既改不了它的结构、也拿不到第二次输入），「两个输入框 + 一个按钮同屏」只能由插件开窗
-     * （宿主不提供对话框 API，见 docs/00 §6.27）。</p>
-     *
-     * <p>预填号码必须在宿主交互线程上从内部键读（配置读取的线程规矩），窗口本身交给 EDT 建。</p>
+     * <p>宿主配置页的 {@code edittext} 行只能给一个输入框，「两个输入框 + 一个按钮同屏」由原生页承载；
+     * 原生层未就绪时给出明确提示。</p>
      */
     public static void openLoginDialog() {
         guard(() -> {
-            if (HostUiBridge.openNativePage("login")) {
-                return;
+            if (!HostUiBridge.openNativePage("login")) {
+                nativePageUnavailable("登录");
             }
-            String phone = PluginConfig.freshPhone();
-            PluginLog.i(TAG, "配置页请求打开登录对话框（预填号码="
-                    + (phone == null || phone.isBlank() ? "无" : phone.trim().length() + " 位（值不进日志）") + "）");
-            LoginDialog.open(phone == null ? "" : phone);
         });
     }
 
@@ -1403,15 +1349,14 @@ public final class NeteasePlugin extends SpwPlugin {
     }
 
     /**
-     * 我的歌单 / 每日推荐（P3）：批次 3 起优先打开主窗口内的原生歌单页；
-     * 原生层未就绪时回退旧的 {@link PlaylistWindow}。
+     * 我的歌单 / 每日推荐（P3）：0.12.0 起只打开宿主主窗口内的原生歌单页；
+     * 原生层未就绪时给出明确提示，不再回退到插件自建窗口。
      */
     public static void openPlaylist() {
         guard(() -> {
-            if (HostUiBridge.openNativePage("playlist")) {
-                return;
+            if (!HostUiBridge.openNativePage("playlist")) {
+                nativePageUnavailable("歌单");
             }
-            PlaylistWindow.open();
         });
     }
 
@@ -1424,20 +1369,18 @@ public final class NeteasePlugin extends SpwPlugin {
     // 粘号码 / 验证码不再触发任何登录）——判据见 docs/00 §6.27、docs/51-登录对话框-0.11.30.md。
 
     /**
-     * 当前账号（0.11.35，用户 m00001 问题1）：点开 {@link AccountStatusWindow} **才**展示
-     * 账号名字 / 账号 id / 会员信息；配置页那一行本身不含任何账号信息，未登录时窗里只有一句
+     * 当前账号（0.11.35，用户 m00001 问题1）：打开宿主主窗口内的原生账号页展示
+     * 账号名字 / 账号 id / 会员信息；配置页那一行本身不含任何账号信息，未登录时只有一句
      * 「当前未登录」。
      *
-     * <p><b>不设开发者闸</b>：这是普通用户要看的账号信息，不是排查入口（0.11.30 起它原先是开发者档
-     * 的「账号状态」按钮，本轮按用户要求撤掉那个按钮、职责并到这一行）。</p>
+     * <p><b>不设开发者闸</b>：这是普通用户要看的账号信息，不是排查入口。</p>
      *
      * <p><b>只读</b>：不启停任何进程、不碰本机客户端、不改任何配置值；只把瞬时登录态渲染出来。</p>
      */
     public static void currentAccount() {
         guard(() -> {
-            boolean nativePage = HostUiBridge.openNativePage("account");
-            if (!nativePage) {
-                AccountStatusWindow.open();
+            if (!HostUiBridge.openNativePage("account")) {
+                nativePageUnavailable("当前账号");
             }
             // 顺手把盘上的登录态落点对齐一次（0.11.32 起它是 freshCurrentAccount 的真源，
             // H9.14 幂等探针也在盯着它），不写配置页。
@@ -1597,11 +1540,14 @@ public final class NeteasePlugin extends SpwPlugin {
     public static void syncNow() {
         guard(() -> {
             var result = SYNC.request(java.util.List.of(), "force:配置页手动");
-            com.example.netease.ui.PlaylistWindow.open();
-            if (result == com.example.netease.svc.SyncCoordinator.RequestResult.STARTED) {
-                Notifier.success("已提交同步请求，进度见歌单窗口");
+            boolean shown = HostUiBridge.openNativePage("sync");
+            PluginLog.i(TAG, "配置页手动同步：请求结果=" + result + "，原生同步页=" + (shown ? "已打开" : "不可用"));
+            if (!shown) {
+                Notifier.warn("原生界面不可用：同步请求结果=" + result + "；请重新启用插件后再看状态");
+            } else if (result == com.example.netease.svc.SyncCoordinator.RequestResult.STARTED) {
+                Notifier.success("已提交同步请求（宿主已接收），进度见同步页");
             } else if (result == com.example.netease.svc.SyncCoordinator.RequestResult.BUSY) {
-                Notifier.warn("已有同步任务或尚未到自动同步间隔，进度见歌单窗口");
+                Notifier.warn("已有同步任务在运行，不能再创建第二轮；进度见同步页");
             } else { Notifier.warn(SYNC.status().describe()); }
         });
     }
@@ -1740,6 +1686,18 @@ public final class NeteasePlugin extends SpwPlugin {
      * <p>⚠️ 登录相关入口（openLoginDialog / showLoginDialog）**不得**加这道闸：登录是普通
      * 用户功能，不是开发者功能。</p>
      */
+    /**
+     * 原生页面打不开时的统一提示（0.12.0 起没有回退窗口）：写日志 + toast。
+     *
+     * <p>具体原因（Hook 未挂载 / 宿主版本失配 / 页面路由未知）由 {@link HostUiBridge} 与
+     * Kotlin 适配层各自记录，tag {@code native-ui}；这里只保证用户不会「点了没反应」。</p>
+     */
+    private static void nativePageUnavailable(String label) {
+        PluginLog.w(TAG, "原生页面不可用：" + label
+                + "（Hook 未挂载或宿主适配层失配；详见日志 tag native-ui）");
+        Notifier.warn("原生界面不可用：" + label + " —— 请确认插件已启用并允许修改应用行为与界面");
+    }
+
     private static boolean devGate(String label) {
         if (DevMode.on()) {
             return true;

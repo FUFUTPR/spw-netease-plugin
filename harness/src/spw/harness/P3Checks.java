@@ -68,9 +68,9 @@ final class P3Checks {
     }
 
     /**
-     * 跑完 EDT 上已排队的任务。P3 跑在非 EDT 线程上，而 {@code currentAccount()} 这类开窗入口只是把
-     * 建窗动作 {@code invokeLater} 投递出去 ⇒ 投递后必须先把 EDT 队列跑干净，窗口「到底建起来没有」
-     * 才是可观测事实（否则断言会读到一个还没开始的空窗）。
+     * 跑完 EDT 上已排队的任务。P3 跑在非 EDT 线程上，而 Swing 入口只把动作 {@code invokeLater} 投递出去
+     * ⇒ 投递后必须先把 EDT 队列跑干净，「有没有遗留窗体 / 队列里还排着什么」才是可观测事实
+     * （0.12.0 批次 5 起账号页是宿主内的原生页，本方法仅用于排空任何遗留的 EDT 任务）。
      */
     private static void flushEdt() {
         try {
@@ -78,7 +78,8 @@ final class P3Checks {
                 javax.swing.SwingUtilities.invokeAndWait(() -> { });
             }
         } catch (Throwable ignored) {
-            // EDT 起不来（headless / 已死）时不在这里失败：窗口是否真的建起来由 textForTest() 判定
+            // EDT 起不来（headless / 已死）时不在这里失败：0.12.0 批次 5 起「当前账号」不再建 Swing 窗体，
+            // 账号文案断言走纯函数 ui.AccountReport，不依赖 EDT
         }
     }
 
@@ -87,6 +88,11 @@ final class P3Checks {
             return join(l);
         }
         return join(l.subList(0, max)) + " …（共 " + l.size() + " 项）";
+    }
+
+    /** H9.16 用：按名字取插件类里的枚举常量（harness 不编译 src/main/java，只能反射取字段）。 */
+    private static Object enumConst(Class<?> enumClz, String name) throws Exception {
+        return enumClz.getField(name).get(null);
     }
 
     /**
@@ -133,35 +139,6 @@ final class P3Checks {
         } catch (Throwable t) {
             return "?(比对失败 " + t.getClass().getSimpleName() + ")";
         }
-    }
-
-    /** H9.16 用：按「先父后子」递归收集组件树（顺序 = 构造顺序，与窗内视觉顺序一致）。 */
-    private static void collectComponents(java.awt.Component c, List<java.awt.Component> out) {
-        if (c == null) {
-            return;
-        }
-        out.add(c);
-        if (c instanceof java.awt.Container) {
-            for (java.awt.Component k : ((java.awt.Container) c).getComponents()) {
-                collectComponents(k, out);
-            }
-        }
-    }
-
-    /**
-     * H9.16 用：这个组件是不是「可编辑控件」（只读信息窗里必须一个都没有）。
-     *
-     * <p>{@code JButton} 不算（它是本窗唯一的交互件，且不改任何值）；{@code JToggleButton} 系
-     * （含 {@code JCheckBox} / {@code JRadioButton}）算。
-     */
-    private static boolean isEditableControl(java.awt.Component c) {
-        return c instanceof javax.swing.text.JTextComponent
-                || c instanceof javax.swing.JComboBox
-                || c instanceof javax.swing.JSpinner
-                || c instanceof javax.swing.JSlider
-                || c instanceof javax.swing.JToggleButton
-                || c instanceof javax.swing.JFormattedTextField
-                || c instanceof java.awt.TextComponent;
     }
 
     // ------------------------------------------------------------ JSON 取值
@@ -253,12 +230,13 @@ final class P3Checks {
             // 0.11.22：登录整组搬到配置页原生控件（用户规格）——独立模态窗 ui.LoginPrompt 退役。
             // 0.11.23：登录块收成「一行」（值形态分步）——「获取验证码 smsSend」「确定登录 smsLoginNow」
             // 两个入口随之删除（登录侧零入口）。
-            // 0.11.26：用户规格「点开登录弹出一个框，里面能分别填手机号和验证码」⇒ 单行输入让位给
-            // **自绘对话框** ui.LoginDialog，入口 = 配置页「登录」按钮 → openLoginDialog（见 docs/00 §6.27）。
+            // 0.11.26：用户规格「点开登录弹出一个框，里面能分别填手机号和验证码」⇒ 入口 = 配置页「登录」按钮
+            // → openLoginDialog（见 docs/00 §6.27）。0.12.0 批次 5 起载体是宿主主窗口内的原生 Compose 页
+            // （HostUiBridge 路由），旧自绘 Swing 框 ui.LoginDialog 已整类删除。
             "openLoginDialog",
-            // 0.11.35（用户 m00001 问题1）：账号行从 edittext 改成**按钮**，点开自绘只读窗
-            // ui.AccountStatusWindow 才展示名字 / id / 会员；开发者档那个「账号状态」按钮与
-            // NeteasePlugin.accountStatus() 一并删除，职责由本入口接管。
+            // 0.11.35（用户 m00001 问题1）：账号行从 edittext 改成**按钮**；0.12.0 批次 5 起点开的是宿主
+            // 主窗口内的原生账号页（HostUiBridge.openNativePage("account")），文案唯一真源 = 纯函数
+            // ui.AccountReport；旧自绘只读窗 ui.AccountStatusWindow 连同 UiRegistry 一并删除。
             "currentAccount",
             // 0.11.7：状态与缓存组（三条管线总览 + 三态 + 两个独立清理按钮）
             "pipelineStatus", "coverStats", "lyricStats", "clearCoverCache", "clearLyricCache",
@@ -739,9 +717,10 @@ final class P3Checks {
             List<String> callBad = new ArrayList<>();
             // 0.5.0 瘦身版：clearCache / retagCurrent 已随歌词·匹配·打标功能删除；
             // 0.11.7 起 clientStatus() 随客户端接入一起删除；
-            // 0.11.35（用户 m00001 问题1）：accountStatus() 删除，只读入口换成 currentAccount()
-            // （它只**开一个只读窗**：窗口内容取瞬时登录态，不发起登录、不联网、不碰本机客户端；
-            // 窗体登记在 UiRegistry 里，由 stop() 的 disposeAll() 收尾）。
+            // 0.11.35（用户 m00001 问题1）：accountStatus() 删除，只读入口换成 currentAccount()。
+            // 0.12.0 批次 5：旧 Swing 窗口整组删除（AccountStatusWindow / UiRegistry 等），本入口只把账号页
+            // 路由到宿主主窗口内的原生页（HostUiBridge.openNativePage("account")）；
+            // 「当前账号」文案的唯一真源是纯函数 ui.AccountReport（不再有可反射读文本的窗体对象）。
             for (String name : new String[]{"currentAccount"}) {
                 try {
                     pluginClz.getMethod(name).invoke(null);
@@ -749,31 +728,70 @@ final class P3Checks {
                     callBad.add(name + "() 抛异常：" + oneLine(t));
                 }
             }
-            // 「不抛异常」本身不构成证据：open() 里 catch (Throwable) 会把构造途中的异常吞掉，
-            // 窗口一个都没建起来也照样返回（0.11.35 真机就是如此）。这里补「窗口真被建起来」的正面证据。
             flushEdt();
-            String winText = "";
+            // ① 不再建标题「当前账号」的 Swing 对话框（0.11.35 的只读窗已退役）。窗口枚举必须 try/catch：
+            //    headless JVM 里 Window.getWindows() 可能抛 HeadlessException —— 那是环境限制、不是功能坏掉，
+            //    不许因此直接判 FAIL（本条的正面证据由下面的文案断言给）。
+            List<String> dialogs = new ArrayList<>();
             try {
-                Class<?> winClz = Class.forName("com.example.netease.ui.AccountStatusWindow", false, pcl);
-                Object txt = winClz.getMethod("textForTest").invoke(null);
-                winText = txt == null ? "" : String.valueOf(txt);
+                for (java.awt.Window w : java.awt.Window.getWindows()) {
+                    if (w instanceof java.awt.Dialog && "当前账号".equals(((java.awt.Dialog) w).getTitle())) {
+                        dialogs.add("\"" + ((java.awt.Dialog) w).getTitle() + "\"");
+                    }
+                }
             } catch (Throwable t) {
-                callBad.add("AccountStatusWindow.textForTest() 调用失败：" + oneLine(t));
+                info("窗口枚举不可用（headless 属正常，不影响账号文案断言）：" + oneLine(t));
             }
-            if (winText.trim().isEmpty()) {
-                callBad.add("账号明细窗没被建起来（0.11.35 真机 IAE 复现点）：currentAccount() 返回后 "
-                        + "AccountStatusWindow.textForTest() 仍为空串"
-                        + (java.awt.GraphicsEnvironment.isHeadless() ? "（JVM headless=true，窗口无法创建）" : ""));
+            if (!dialogs.isEmpty()) {
+                callBad.add("仍出现标题「当前账号」的 Swing 对话框 " + dialogs.size() + " 个：" + join(dialogs)
+                        + "（0.12.0 批次 5 起账号信息只走原生账号页 HostUiBridge.openNativePage(\"account\")）");
             }
-            rep.check("H9.9", "幂等只读入口 currentAccount() 可调用且不抛异常，且账号明细窗真被建起来"
-                            + "（0.11.35：accountStatus 已删除；textForTest() 非空）",
+            // ② 文案真源：AccountReport.render(AccountService.status()) —— 非空，且行数与登录态严格对齐
+            //    （未登录 / 非 LOGGED_IN 恰 1 行「当前未登录」；LOGGED_IN 恰 3 行「标签：值」）。
+            String acctText = "";
+            try {
+                Class<?> as = Class.forName("com.example.netease.svc.AccountService", false, pcl);
+                Class<?> stClz = Class.forName("com.example.netease.svc.AccountService$LoginStatus", false, pcl);
+                Class<?> reportClz = Class.forName("com.example.netease.ui.AccountReport", false, pcl);
+                Object st = as.getMethod("status").invoke(null);
+                if (st == null) {
+                    callBad.add("AccountService.status() 返回 null：唯一真源渲染不出任何账号文案");
+                } else {
+                    Object txt = reportClz.getMethod("render", stClz).invoke(null, st);
+                    acctText = txt == null ? "" : String.valueOf(txt);
+                    String state = String.valueOf(st.getClass().getMethod("state").invoke(st));
+                    boolean loggedIn = "LOGGED_IN".equals(state);
+                    int want = loggedIn ? 3 : 1;
+                    int got = acctText.isEmpty() ? 0 : acctText.split("\n", -1).length;
+                    if (acctText.trim().isEmpty()) {
+                        callBad.add("AccountReport.render(AccountService.status()) 是空串：点开「当前账号」没有任何"
+                                + "可显示文案（state=" + state + "）");
+                    } else if (got != want) {
+                        callBad.add("AccountReport 文案行数=" + got + "（state=" + state + " 应恰 " + want
+                                + " 行：未登录/非 LOGGED_IN ⇒ 1 行，LOGGED_IN ⇒ 3 行）："
+                                + acctText.replace('\n', '｜'));
+                    }
+                    if (acctText.contains("{{ACCOUNT}}")) {
+                        callBad.add("AccountReport 文案残留模板占位 {{ACCOUNT}}：" + acctText.replace('\n', '｜'));
+                    }
+                    if (loggedIn && !acctText.startsWith("账号名字：")) {
+                        callBad.add("LOGGED_IN 时文案首行不是「账号名字：…」：" + acctText.replace('\n', '｜'));
+                    }
+                }
+            } catch (Throwable t) {
+                callBad.add("反射读 AccountReport.render(AccountService.status()) 失败：" + oneLine(t));
+            }
+            rep.check("H9.9", "幂等只读入口 currentAccount() 可调用且不抛异常；不再弹出标题「当前账号」的 Swing 对话框，"
+                            + "账号文案改由唯一真源 AccountReport.render(AccountService.status()) 产出"
+                            + "（非空、行数与登录态一致：未登录/非 LOGGED_IN 恰 1 行、LOGGED_IN 恰 3 行、无 {{ACCOUNT}} 占位）",
                     callBad.isEmpty(),
                     callBad.isEmpty()
-                            ? "入口正常返回；账号明细窗已建立，文案=" + winText.replace('\n', '｜')
+                            ? ("入口正常返回；无「当前账号」Swing 对话框；AccountReport 文案="
+                            + acctText.replace('\n', '｜'))
                             : join(callBad));
         } else {
             rep.check("H9.8", "未登录态调用 logout() 不抛异常", false, PLUGIN_CLASS + " 未加载，无法调用");
-            rep.check("H9.9", "幂等只读入口 currentAccount() 可调用且账号明细窗真被建起来",
+            rep.check("H9.9", "幂等只读入口 currentAccount() 可调用，且账号文案唯一真源 AccountReport.render() 非空、行数与登录态一致",
                     false, PLUGIN_CLASS + " 未加载");
         }
 
@@ -852,180 +870,177 @@ final class P3Checks {
                     bad.isEmpty() ? evi : join(bad) + " ｜现场：" + evi);
         }
 
-        // ---------- H9.16 账号明细窗「真身」的只读性（读真实组件树，不看 render()）
-        // 为什么必须有这条：H9.9 只断 AccountStatusWindow.textForTest() 非空，而 textForTest() 走 render()
-        // = join("\n", rows()) ⇒ 它**不读窗里的真实 JLabel**。产品承诺是「窗内只有只读标签 + 一颗关闭按钮，
-        // 未登录只给一行『当前未登录』」，这条原本在自动门禁里零覆盖（0.11.35 真机正是「入口不抛异常、
-        // 构造途中出岔子被 open() 的 catch(Throwable) 吞掉」那种失败形态：探针全绿而窗没建起来）。
-        // headless 处置与 H9.9 保持一致：给提示并判 FAIL（窗口无法创建时这条本就无法验证，不许静默通过）。
+        // ---------- H9.16 「当前账号」文案唯一真源 ui.AccountReport + 旧 Swing 窗口类已删除（0.12.0 批次 5）
+        // 为什么必须有这条：0.12.0 批次 5 把 SearchWindow / PlaylistWindow / LoginDialog / AccountStatusWindow /
+        // VerifyWindow / HostTheme / TableButtons / UiRegistry 整组删除，「当前账号」文案规则搬到
+        // ui.AccountReport（public static NOT_LOGGED_IN / FACT_LABELS / rows / values / vipText / render / oneLine，
+        // 无 Swing / AWT 依赖）。新的原生账号页是 Compose 实现、不在 harness 的 classpath 上 ⇒ 若这里不对三种
+        // 登录态各渲染一遍，「未登录恰一行 / 已登录恰三行、标签顺序、无 {{ACCOUNT}} 占位」在自动门禁里就是零覆盖；
+        // 旧类删除也只能靠 Class.forName(..., false, pcl) 抛 ClassNotFoundException 正面取证。
         if (pluginClz != null) {
-            final String winTitle = "当前账号";
             List<String> bad = new ArrayList<>();
             String evi = "(无)";
             try {
-                flushEdt();
-                // 幂等：H9.9 已开过 ⇒ 只置前；若已被关掉则这里重开（不依赖既有断言的副作用）
-                pluginClz.getMethod("currentAccount").invoke(null);
-                flushEdt();
-
-                List<java.awt.Dialog> hit = new ArrayList<>();
-                List<String> allWin = new ArrayList<>();
-                for (java.awt.Window w : java.awt.Window.getWindows()) {
-                    boolean disp;
-                    try {
-                        disp = w.isDisplayable();
-                    } catch (Throwable ignored) {
-                        disp = false;
-                    }
-                    if (w instanceof java.awt.Dialog) {
-                        String title = ((java.awt.Dialog) w).getTitle();
-                        allWin.add("\"" + title + "\"(displayable=" + disp + ")");
-                        if (winTitle.equals(title) && disp) {
-                            hit.add((java.awt.Dialog) w);
-                        }
+                Class<?> reportClz = Class.forName("com.example.netease.ui.AccountReport", false, pcl);
+                Class<?> stateClz = Class.forName("com.example.netease.svc.AccountService$State", false, pcl);
+                Class<?> stClz = Class.forName("com.example.netease.svc.AccountService$LoginStatus", false, pcl);
+                java.lang.reflect.Method mRows = reportClz.getMethod("rows", stClz);
+                java.lang.reflect.Method mValues = reportClz.getMethod("values", stClz);
+                java.lang.reflect.Method mVip = reportClz.getMethod("vipText", stClz);
+                java.lang.reflect.Method mRender = reportClz.getMethod("render", stClz);
+                java.lang.reflect.Method mOneLine = reportClz.getMethod("oneLine", stClz);
+                for (java.lang.reflect.Method m
+                        : new java.lang.reflect.Method[]{mRows, mValues, mVip, mRender, mOneLine}) {
+                    int mod = m.getModifiers();
+                    if (!(Modifier.isPublic(mod) && Modifier.isStatic(mod))) {
+                        bad.add("AccountReport." + m.getName()
+                                + " 不是 public static：原生页与 harness 必须共用同一份纯函数");
                     }
                 }
-
-                if (hit.isEmpty()) {
-                    bad.add("「" + winTitle + "」明细窗没建起来：currentAccount() 返回后，Window.getWindows() 里没有"
-                            + "标题=\"" + winTitle + "\"且 isDisplayable() 的 Dialog"
-                            + (java.awt.GraphicsEnvironment.isHeadless()
-                                    ? "（JVM headless=true，窗口无法创建）"
-                                    : "（复现：AccountStatusWindow 构造途中出岔子会被 open() 的 catch(Throwable) 吞掉，"
-                                      + "点「当前账号」该出现的东西不出现）")
-                            + "；现场窗口=" + (allWin.isEmpty() ? "(无 Dialog)" : join(allWin)));
-                } else if (hit.size() > 1) {
-                    bad.add("「" + winTitle + "」明细窗重复建窗：" + hit.size() + " 个可显示 Dialog —— open() 必须幂等只置前"
-                            + "（复现：连点两次「当前账号」按钮）；现场窗口=" + join(allWin));
-                } else {
-                    java.awt.Dialog d = hit.get(0);
-                    List<java.awt.Component> comps = new ArrayList<>();
-                    collectComponents(d, comps);
-                    List<String> labels = new ArrayList<>();
-                    List<String> buttons = new ArrayList<>();
-                    List<String> editable = new ArrayList<>();
-                    for (java.awt.Component c : comps) {
-                        if (isEditableControl(c)) {
-                            editable.add(c.getClass().getName());
-                        } else if (c instanceof javax.swing.JLabel) {
-                            String s = ((javax.swing.JLabel) c).getText();
-                            if (s != null && !s.trim().isEmpty()) {
-                                labels.add(s);
-                            }
-                        } else if (c instanceof javax.swing.AbstractButton) {
-                            String s = ((javax.swing.AbstractButton) c).getText();
-                            buttons.add(s == null ? "(null)" : s);
-                        }
+                // 「未登录」那一行文案与三个标签的顺序，是原生页与探针同源的合同 —— 硬编码在探针里才钉得住。
+                Object notLoggedIn = reportClz.getField("NOT_LOGGED_IN").get(null);
+                if (!"当前未登录".equals(String.valueOf(notLoggedIn))) {
+                    bad.add("AccountReport.NOT_LOGGED_IN=" + notLoggedIn + "，应为「当前未登录」");
+                }
+                List<String> labels = new ArrayList<>();
+                Object labelsObj = reportClz.getField("FACT_LABELS").get(null);
+                if (labelsObj instanceof List) {
+                    for (Object o : (List<?>) labelsObj) {
+                        labels.add(String.valueOf(o));
                     }
-
-                    // ① 零可编辑控件（只读信息窗：不许出现可改字段）
-                    if (!editable.isEmpty()) {
-                        bad.add("窗内出现可编辑控件 " + editable.size() + " 个：" + join(editable)
-                                + "（承诺：只读信息窗、零输入控件；复现：给 AccountStatusWindow 加任何文本框/下拉/勾选框）");
-                    }
-                    // ② 恰一颗「关闭」
-                    if (buttons.size() != 1) {
-                        bad.add("按钮数量=" + buttons.size() + "（必须恰一颗「关闭」）：" + buttons);
-                    } else if (!"关闭".equals(buttons.get(0).trim())) {
-                        bad.add("唯一按钮文本=\"" + buttons.get(0) + "\"（必须恰为「关闭」）");
-                    }
-                    // ③ 模板占位符不许漏进 UI
-                    for (String s : labels) {
-                        if (s.contains("{{ACCOUNT}}")) {
-                            bad.add("标签里残留模板占位符 {{ACCOUNT}}：\"" + s + "\"（配置页的动态尾巴不许进窗）");
-                        }
-                    }
-                    // ④ 标签与登录态一致（以真实组件树里的 JLabel 文本为准）
-                    List<String> facts = new ArrayList<>(labels);
-                    if (!facts.remove(winTitle)) {
-                        bad.add("窗内没有标题标签「" + winTitle + "」：实际标签=" + labels);
-                    } else if (facts.contains(winTitle)) {
-                        bad.add("标题标签「" + winTitle + "」出现多次：" + labels);
-                    }
-                    Object loggedIn = null;
+                }
+                List<String> wantLabels = List.of("账号名字", "账号 ID", "会员信息");
+                if (!wantLabels.equals(labels)) {
+                    bad.add("AccountReport.FACT_LABELS=" + labels + "，应为 " + wantLabels
+                            + "（顺序 = 已登录三行的顺序）");
+                }
+                // 三个必测登录态 + 一个「非 LOGGED_IN」对照组（EXPIRED）：语义是「只有 LOGGED_IN 才给三行」。
+                java.lang.reflect.Constructor<?> ctor = stClz.getConstructor(
+                        stateClz, String.class, String.class, long.class, boolean.class, String.class, long.class);
+                Object[] cases = {
+                        ctor.newInstance(enumConst(stateClz, "NONE"), "未登录", "", 0L, false, "", 0L),
+                        ctor.newInstance(enumConst(stateClz, "LOGGED_IN"), "已登录", "小椒", 12345L, false, "", 0L),
+                        ctor.newInstance(enumConst(stateClz, "LOGGED_IN"), "已登录", "小椒", 12345L, true, "黑胶VIP", 0L),
+                        ctor.newInstance(enumConst(stateClz, "EXPIRED"), "登录已过期", "", 0L, false, "", 0L)};
+                String[] caseTags = {"未登录（NONE）", "已登录·无会员", "已登录·黑胶VIP", "已过期（EXPIRED）"};
+                List<String> rendered = new ArrayList<>();
+                for (int ci = 0; ci < cases.length; ci++) {
+                    Object st = cases[ci];
+                    String tag = caseTags[ci];
+                    boolean loggedIn = ci == 1 || ci == 2;
                     try {
-                        Class<?> as = Class.forName("com.example.netease.svc.AccountService", false, pcl);
-                        loggedIn = as.getMethod("loggedIn").invoke(null);
-                    } catch (Throwable t) {
-                        bad.add("读 AccountService.loggedIn() 失败，无法判定该给几行：" + oneLine(t));
-                    }
-                    if (Boolean.TRUE.equals(loggedIn)) {
-                        String[] keys = {"账号名字：", "账号 ID：", "会员信息："};
-                        if (facts.size() != 6) {
-                            bad.add("已登录态：除标题外应恰为 6 个标签（3 键 + 3 值，键值紧邻成对），实际 "
-                                    + facts.size() + " 个：" + facts);
+                        List<String> rowS = new ArrayList<>();
+                        Object rowsObj = mRows.invoke(null, st);
+                        if (!(rowsObj instanceof List)) {
+                            bad.add(tag + "：AccountReport.rows() 返回 "
+                                    + (rowsObj == null ? "null" : rowsObj.getClass().getName()) + "（应为 List）");
+                            continue;
+                        }
+                        for (Object o : (List<?>) rowsObj) {
+                            rowS.add(String.valueOf(o));
+                        }
+                        rendered.add(tag + "=" + rowS);
+                        int wantN = loggedIn ? 3 : 1;
+                        String render = String.valueOf(mRender.invoke(null, st));
+                        String one = String.valueOf(mOneLine.invoke(null, st));
+                        // ① 行数合法：未登录/非 LOGGED_IN 恰 1 行；LOGGED_IN 恰 3 行
+                        if (rowS.size() != wantN) {
+                            bad.add(tag + "：rows() 行数=" + rowS.size() + "（应恰 " + wantN + " 行）：" + rowS);
+                            continue;
+                        }
+                        // ② 模板占位符不许漏进文案
+                        for (String s : rowS) {
+                            if (s.contains("{{ACCOUNT}}")) {
+                                bad.add(tag + "：文案残留模板占位 {{ACCOUNT}}：\"" + s + "\"（0.11.32 的占位机制已退役）");
+                            }
+                        }
+                        if (loggedIn) {
+                            List<String> wantVals = List.of("小椒", "12345", ci == 1 ? "无会员" : "黑胶VIP");
+                            List<String> valsS = new ArrayList<>();
+                            Object valsObj = mValues.invoke(null, st);
+                            if (valsObj instanceof List) {
+                                for (Object o : (List<?>) valsObj) {
+                                    valsS.add(String.valueOf(o));
+                                }
+                            }
+                            if (valsS.size() != 3) {
+                                bad.add(tag + "：values() 应恰 3 个值，实际 " + valsS);
+                            } else {
+                                for (int i = 0; i < 3; i++) {
+                                    if (!wantVals.get(i).equals(valsS.get(i))) {
+                                        bad.add(tag + "：values()[" + i + "]=\"" + valsS.get(i)
+                                                + "\"，应为 \"" + wantVals.get(i) + "\"");
+                                    }
+                                    String wantLine = wantLabels.get(i) + "：" + wantVals.get(i);
+                                    if (!wantLine.equals(rowS.get(i))) {
+                                        bad.add(tag + "：第 " + (i + 1) + " 行=\"" + rowS.get(i)
+                                                + "\"，应为 \"" + wantLine + "\"（标签顺序 = " + wantLabels + "）");
+                                    }
+                                }
+                            }
+                            // ③ 会员信息单独成入口，探针也钉住（第三行的值必须 = vipText()）
+                            String vipText = String.valueOf(mVip.invoke(null, st));
+                            if (!wantVals.get(2).equals(vipText)) {
+                                bad.add(tag + "：vipText()=\"" + vipText + "\"，应为 \"" + wantVals.get(2) + "\"");
+                            }
                         } else {
-                            for (int i = 0; i < 3; i++) {
-                                if (!keys[i].equals(facts.get(i * 2))) {
-                                    bad.add("已登录态：第 " + (i + 1) + " 组键标签=\"" + facts.get(i * 2)
-                                            + "\"，应为 \"" + keys[i] + "\"（实际标签=" + facts + "）");
-                                } else if (facts.get(i * 2 + 1).trim().isEmpty()) {
-                                    bad.add("已登录态：\"" + keys[i] + "\" 后没有值标签（标签=" + facts + "）");
+                            // 非 LOGGED_IN：唯一一行必须是 NOT_LOGGED_IN，且不许出现「账号名字：」这类半截字段
+                            if (!rowS.equals(List.of(String.valueOf(notLoggedIn)))) {
+                                bad.add(tag + "：唯一一行=\"" + rowS.get(0) + "\"，应为 \"" + notLoggedIn + "\"");
+                            }
+                            for (String s : rowS) {
+                                for (String k : wantLabels) {
+                                    if (s.contains(k + "：")) {
+                                        bad.add(tag + "：非登录态出现明细字段 \"" + s + "\"（只许一行「"
+                                                + notLoggedIn + "」）");
+                                        break;
+                                    }
                                 }
                             }
                         }
-                    } else if (Boolean.FALSE.equals(loggedIn)) {
-                        if (!facts.equals(List.of("当前未登录"))) {
-                            bad.add("未登录态：除标题外应恰为一行「当前未登录」，实际 " + facts.size() + " 个标签：" + facts
-                                    + "（未登录时不许给「账号名字：/账号 ID：/会员信息：」半截字段）");
+                        // ④ render / oneLine 必须与 rows 同源（不许各写一套 join / 换行规则）
+                        if (!String.join("\n", rowS).equals(render)) {
+                            bad.add(tag + "：render()=\"" + render + "\" ≠ join(rows())（必须同源）");
                         }
-                        for (String s : labels) {
-                            for (String k : new String[]{"账号名字：", "账号 ID：", "会员信息："}) {
-                                if (s.contains(k)) {
-                                    bad.add("未登录态却出现账号明细标签 \"" + s + "\"（不许给半截字段）");
-                                    break;
-                                }
-                            }
+                        if (!render.replace("\n", " ｜ ").equals(one)) {
+                            bad.add(tag + "：oneLine()=\"" + one + "\" 不是 render() 的单行化（行间应为「 ｜ 」）");
                         }
-                    }
-                    evi = "窗=JDialog(\"" + d.getTitle() + "\"，displayable=" + d.isDisplayable() + ")，组件 " + comps.size()
-                            + " 个；标签=" + labels + "；按钮=" + buttons + "；可编辑控件=" + editable.size()
-                            + "；loggedIn()=" + loggedIn;
-
-                    // ⑤ 收尾必须把窗关掉（harness JVM 里不留窗）
-                    try {
-                        d.dispatchEvent(new java.awt.event.WindowEvent(d, java.awt.event.WindowEvent.WINDOW_CLOSING));
-                        flushEdt();
                     } catch (Throwable t) {
-                        bad.add("关窗 dispatchEvent(WINDOW_CLOSING) 抛异常：" + oneLine(t));
+                        bad.add(tag + "：渲染/断言抛异常：" + oneLine(t));
                     }
-                    boolean still;
-                    try {
-                        still = d.isDisplayable();
-                    } catch (Throwable ignored) {
-                        still = true;
-                    }
-                    if (still) {
-                        try {
-                            d.dispose();   // 兜底：DISPOSE_ON_CLOSE 之外的路径
-                            flushEdt();
-                        } catch (Throwable t) {
-                            bad.add("dispose() 兜底也失败：" + oneLine(t));
-                        }
-                        try {
-                            still = d.isDisplayable();
-                        } catch (Throwable ignored) {
-                            still = false;
-                        }
-                    }
-                    if (still) {
-                        bad.add("关窗失败：dispatchEvent(WINDOW_CLOSING) + dispose() 之后 isDisplayable() 仍为 true"
-                                + "（本窗是 DISPOSE_ON_CLOSE，必须关得掉；harness JVM 里不许留窗）");
-                    }
-                    evi = evi + "；关窗后 isDisplayable=" + still;
                 }
+                // ⑤ 旧 Swing 窗口类必须从插件类加载器里彻底消失（0.12.0 批次 5 删除清单，8 个）
+                List<String> gone = new ArrayList<>();
+                for (String cls : new String[]{"SearchWindow", "PlaylistWindow", "LoginDialog", "AccountStatusWindow",
+                        "VerifyWindow", "HostTheme", "TableButtons", "UiRegistry"}) {
+                    String fq = "com.example.netease.ui." + cls;
+                    try {
+                        Class.forName(fq, false, pcl);
+                        bad.add("已删除的旧窗口类仍可加载：" + fq + "（0.12.0 批次 5：旧 Swing 窗口整组退役，"
+                                + "文案唯一真源改为 ui.AccountReport）");
+                    } catch (ClassNotFoundException expected) {
+                        // 期望路径：类应随旧窗口一起消失
+                        gone.add(cls);
+                    } catch (Throwable t) {
+                        bad.add("加载 " + fq + " 时异常：" + oneLine(t));
+                    }
+                }
+                evi = "AccountReport 文案=" + rendered + "；NOT_LOGGED_IN=\"" + notLoggedIn + "\"；FACT_LABELS="
+                        + labels + "；旧类不可加载 " + gone.size() + "/8"
+                        + (gone.isEmpty() ? "" : "（" + join(gone) + "）");
             } catch (Throwable t) {
-                bad.add("H9.16 组件树检查抛异常：" + oneLine(t));
+                bad.add("AccountReport / 旧窗口类退役检查抛异常：" + oneLine(t));
             }
-            rep.check("H9.16", "「当前账号」明细窗真身只读：恰一个可显示窗、零可编辑控件、恰一颗「关闭」、标签与登录态一致"
-                            + "（未登录恰一行「当前未登录」/已登录三键各带值）、无 {{ACCOUNT}} 残留，且收尾能关掉",
+            rep.check("H9.16", "「当前账号」文案唯一真源 ui.AccountReport：未登录/非 LOGGED_IN 恰一行「当前未登录」、"
+                            + "LOGGED_IN 恰三行「账号名字 / 账号 ID / 会员信息」且值与顺序正确、无 {{ACCOUNT}} 占位、"
+                            + "render/oneLine 与 rows 同源；旧 Swing 窗口类（SearchWindow…UiRegistry 共 8 个）"
+                            + "已从插件类加载器消失",
                     bad.isEmpty(),
                     bad.isEmpty() ? evi : join(bad) + " ｜现场：" + evi);
         } else {
-            rep.check("H9.16", "「当前账号」明细窗真身只读性（读真实组件树而非 render()）", false,
-                    PLUGIN_CLASS + " 未加载，无法调用 currentAccount()");
+            rep.check("H9.16", "「当前账号」文案唯一真源 ui.AccountReport + 旧 Swing 窗口类已删除", false,
+                    PLUGIN_CLASS + " 未加载，无法断言 AccountReport 与旧窗口类退役");
         }
-
         // ---------- H9.10 start() 后插件自有线程正证据（H10.1 的阳性对照；空集永远「通过」是假证据）
         List<String> p3Threads = new ArrayList<>();
         for (Thread t : Thread.getAllStackTraces().keySet()) {

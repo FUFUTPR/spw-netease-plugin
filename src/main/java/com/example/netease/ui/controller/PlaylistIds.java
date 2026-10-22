@@ -4,9 +4,9 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * 歌单 ID / 链接解析（从 {@code PlaylistWindow} 抽出的纯逻辑，无 UI 依赖）。
+ * 歌单 ID / 链接解析（从 旧 PlaylistWindow（0.12.0 已删除） 抽出的纯逻辑，无 UI 依赖）。
  *
- * <p>语义与 {@code PlaylistWindow.parseId} 的旧实现逐字等价：</p>
+ * <p>语义与 旧 PlaylistWindow.parseId（0.12.0 已删除） 的旧实现逐字等价：</p>
  * <ul>
  *   <li>{@code null} / 空白 → -1；</li>
  *   <li>命中 {@code (?&amp;...)} 形式的三段式正则且能解析成 long → 该 id；</li>
@@ -15,7 +15,7 @@ import java.util.regex.Pattern;
  */
 public final class PlaylistIds {
 
-    /** 与 {@code PlaylistWindow.ID_PATTERN} 完全一致的正则。 */
+    /** 与 旧 PlaylistWindow.ID_PATTERN（0.12.0 已删除） 完全一致的正则。 */
     private static final Pattern ID_PATTERN =
             Pattern.compile("(?:[?&]id=|/playlist/|^)(\\d{3,})");
 

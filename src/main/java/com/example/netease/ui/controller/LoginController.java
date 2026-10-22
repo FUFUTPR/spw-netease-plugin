@@ -12,7 +12,7 @@ import java.util.regex.Pattern;
  * 登录面板业务控制器（批次 3；契约 {@code build/_tmp/batch3-contracts.md}「队友 1」，需求 docs/PLAN.md
  * §8.1/§8.2）。
  *
- * <p>本类把 {@code ui.LoginDialog} 里「取码 / 刷新 / 切短信 / 发码 / 登录 / 风控 / 关闭」那套行为抽成
+ * <p>本类把 旧 {@code LoginDialog}（0.12.0 已删除） 里「取码 / 刷新 / 切短信 / 发码 / 登录 / 风控 / 关闭」那套行为抽成
  * <b>无 UI 依赖</b>的状态机：不 import 任何 Swing / AWT / Kotlin / Compose 类型，不自己起线程，也不碰
  * cookie / 密码，只把 {@link State} 快照交给 UI 渲染。所有网络与账号事实都由 {@link Ports} 提供，
  * {@code AccountService} 仍是账号状态的唯一事实来源。</p>

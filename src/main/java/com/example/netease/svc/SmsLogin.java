@@ -12,7 +12,7 @@ import java.util.regex.Pattern;
 
 /**
  * 「手机号 + 短信验证码」登录的收单与记账。界面入口 = 配置页账号组的「登录」按钮
- * （{@code ui.LoginDialog}，0.11.30 起它同时承载扫码档）；本类只做校验、单飞、抹码与展示行回写。
+ * （原生登录页，0.11.30 起它同时承载扫码档）；本类只做校验、单飞、抹码与展示行回写。
  *
  * <p>本类管四件事：<b>校验</b>（11 位号 / 4~6 位码）、<b>单飞与冷却</b>（发码 60 秒 / 同一条号码）、
  * <b>抹码</b>（读后即抹 + 启动自愈）、<b>登录态回写</b>（账号串写进配置页展示行）：</p>
@@ -27,7 +27,7 @@ import java.util.regex.Pattern;
  * 它是「登录态真相」的盘上落点（{@code PluginConfig.writeCurrentAccount}），<b>永不作为输入</b>。
  * 往它里面粘 11 位手机号或 4~6 位验证码不会触发任何动作（{@link #onAccountConfigChanged()} 只按
  * 登录态回写，不解析键值）。<b>0.11.35 起配置页上已经没有承载它的行</b>：用户 m00001 要求账号信息
- * 不得常驻显示，账号行改成按钮「当前账号」，点开 {@code ui.AccountStatusWindow} 才展示名字 / id / 会员。</p>
+ * 不得常驻显示，账号行改成按钮「当前账号」，点开 原生账号页 才展示名字 / id / 会员。</p>
  *
  * <p><b>凭据纪律</b>：验证码只在本机内存（不落盘 / 不进日志 / 不进证据，读完即抹）；日志只写位数与
  * 掩码号码（{@code AccountService.maskPhone}）。{@code harness/b3-collect.ps1} 与
@@ -35,7 +35,7 @@ import java.util.regex.Pattern;
  * {@code current_account} / {@code login_input} / {@code phone} / {@code sms_code} 做屏蔽。</p>
  *
  * <p><b>线程规矩</b>：{@link #refreshAccountRow()} 等写配置的动作必须回 {@code HostBridgeWorker}
- * 线程；弹窗路径由 {@code ui.LoginDialog} 自己的守护线程调用 {@link #sendCodeNow} /
+ * 线程；弹窗路径由 原生登录页 自己的守护线程调用 {@link #sendCodeNow} /
  * {@link #loginNow}，本类内部把「写配置」这一段回宿主线程。</p>
  */
 public final class SmsLogin {
@@ -57,7 +57,7 @@ public final class SmsLogin {
      */
     private static final Pattern NICK_IS_NUMBER_RE = Pattern.compile("\\d{7,}");
 
-    /** 重发冷却，与 {@code ui.LoginDialog} 的 60 秒对齐。 */
+    /** 重发冷却，与 原生登录页 的 60 秒对齐。 */
     private static final long RESEND_COOLDOWN_MS = 60_000L;
 
     /** 发码单飞闸：一次只允许一个发码请求在飞。 */
@@ -90,7 +90,7 @@ public final class SmsLogin {
             PluginConfig.writeCurrentAccount(text);
             PluginLog.i(TAG, "展示行已" + (text.isEmpty() ? "清空（未登录）" : "写入当前账号：" + text));
         }
-        // 0.11.35（用户 m00001 问题1）：账号行改成**按钮**（点开 ui.AccountStatusWindow 才展示
+        // 0.11.35（用户 m00001 问题1）：账号行改成**按钮**（点开 原生账号页 才展示
         // 名字 / id / 会员），配置页上再没有任何「常驻显示账号信息」的位置 ⇒ 不再需要把这段文本推进
         // 配置页 schema（0.11.32–0.11.34 的 DevMode.setAccountText 通路随之退役）。
     }
@@ -250,7 +250,7 @@ public final class SmsLogin {
      * <p>昵称取不到（空）或本身就是号码时用 {@code UID uid} —— 手机号绝不出现在这里。</p>
      *
      * <p><b>0.11.35</b>：这段文本只落进配置键（{@code current_account}），<b>不再写进配置页</b> ——
-     * 账号信息一律由 {@code ui.AccountStatusWindow} 在用户点击「当前账号」后逐项呈现；页面上常驻的
+     * 账号信息一律由 原生账号页 在用户点击「当前账号」后逐项呈现；页面上常驻的
      * 只有「当前账号」四个字（用户 m00001 问题1）。</p>
      */
     private static String rowText(AccountService.LoginStatus st) {
@@ -275,7 +275,7 @@ public final class SmsLogin {
     /**
      * 账号名字（0.11.35）：昵称；昵称取不到、或本身就是号码形态（含 {@code 138****0000} 这种打码号）
      * 时退成 {@code UID <uid>} —— 这是账号展示位的<b>既有约定</b>（0.11.32 起），此处只是把它抽成一个
-     * 公共入口，供「当前账号」明细窗（{@code ui.AccountStatusWindow}）与 {@link #rowText} 共用，
+     * 公共入口，供「当前账号」明细窗（原生账号页）与 {@link #rowText} 共用，
      * 免得两处各写一份判断而走偏。手机号形态的东西永不作为名字显示。
      */
     public static String accountName(AccountService.LoginStatus st) {

@@ -45,8 +45,8 @@ import java.util.stream.Stream;
  *       必须返回 false、日志按「结果=失败」上报、源文件一字未动。这条配了阴性对照：把 {@code RES_USER}
  *       改回 {@code /preference_config.json} 必须变红（否则门禁不算有效）。</li>
  *   <li><b>0.11.35（用户 m00001 问题1）</b>：账号行不再承载登录态 —— 它是 {@code button}
- *       「当前账号」→ {@code NeteasePlugin.currentAccount}，点开由 {@code ui.AccountStatusWindow}
- *       才展示「账号名字 / 账号 ID / 会员信息」（未登录 ⇒ 单行「当前未登录」）。0.11.32–0.11.34 的
+ *       「当前账号」→ {@code NeteasePlugin.currentAccount}，点开由宿主主窗口内的原生账号页
+ *       展示「账号名字 / 账号 ID / 会员信息」（未登录 ⇒ 单行「当前未登录」）。0.11.32–0.11.34 的
  *       {@code {{ACCOUNT}}} 占位机制与 {@code DevMode.setAccountText(String)} 一并退役，所以本探针
  *       断言的是**反向事实**：两档资源与写盘结果里都不许出现 {@code {{ACCOUNT}}} 占位、也不许出现
  *       「当前账号：」这种常驻登录态文本（用户原话「不要常驻显示」）。</li>
@@ -54,7 +54,7 @@ import java.util.stream.Stream;
  *
  * <p>用法（仓库根；<b>输出目录必须在沙箱目录之外</b> —— 见下面的坑）：</p>
  * <pre>
- * javac --release 21 -encoding UTF-8 -cp "tools\.cache\spw-workshop-api-host.jar;tools\.cache\pf4j-3.12.0.jar" ^
+ * javac --release 25 -encoding UTF-8 -cp "tools\.cache\spw-workshop-api-host.jar;tools\.cache\pf4j-3.12.0.jar" ^
  *       -d build\probe-e\cp &lt;全量 src\main\java 的 java 文件&gt; tools\smoke\DevModeProbe.java
  * java -Dstdout.encoding=UTF-8 -cp "build\probe-e\cp;build\probe-e\sandbox\plugin-com.example.netease-0.11.35\classes;tools\.cache\spw-workshop-api-host.jar;tools\.cache\pf4j-3.12.0.jar;tools\.cache\kotlin-stdlib-host.jar" ^
  *      com.example.netease.core.DevModeProbe build\probe-e\sandbox
@@ -94,7 +94,7 @@ public final class DevModeProbe {
 
     /** 0.11.35：账号行的标题（固定就是这四个字，点开才展示账号信息）。 */
     private static final String ACCOUNT_TITLE = "当前账号";
-    /** 0.11.35：账号行的接线（点开 ui.AccountStatusWindow）。 */
+    /** 0.11.35：账号行的接线（0.12.0 起打开原生账号页，入口类见 HostUiBridge.openNativePage）。 */
     private static final String ACCOUNT_CLICK = "com.example.netease.NeteasePlugin.currentAccount";
     /** 0.11.32–0.11.34 的常驻登录态前缀 —— 用户 m00001 要求页面**不得**再出现它。 */
     private static final String ACCOUNT_INLINE_PREFIX = "当前账号：";
@@ -327,7 +327,7 @@ public final class DevModeProbe {
         check("写盘后的行数没有被改写（\"type\" 个数 = 用户档资源）",
                 countOccurrences(after, "\"type\"") == countOccurrences(userText, "\"type\""),
                 "type 数=" + countOccurrences(after, "\"type\"") + "（用户档资源 " + countOccurrences(userText, "\"type\"") + "）");
-        check("点开账号行要打开的明细窗类存在：ui.AccountStatusWindow",
+        check("点开账号行要打开的原生账号页可用（ui.AccountReport + HostUiBridge.openNativePage）且旧窗口类已删除",
                 accountWindowOk(), accountWindowDetail());
         check("目录里仍然没有临时文件残留", countTmp(classes) == 0, "");
 
@@ -657,8 +657,8 @@ public final class DevModeProbe {
     }
 
     /**
-     * 点开账号行后要出现的那个窗（0.11.35 的 {@code ui.AccountStatusWindow}）是否真在包内，
-     * 且入口是 {@code public static void open()}。
+     * 点开账号行后要进入的那个原生页是否可用：{@code ui.AccountReport.render(LoginStatus)} 是文案唯一真源，
+     * {@code ui.HostUiBridge.openNativePage(String)} 是入口路由；同时反向断言旧 Swing 窗口类已被删除。
      *
      * <p>类加载失败（探针 classpath 不全）⇒ 走 {@link #skipped}，不算契约违约。</p>
      */
@@ -675,13 +675,24 @@ public final class DevModeProbe {
 
     static {
         try {
-            Class<?> w = Class.forName("com.example.netease.ui.AccountStatusWindow", false,
-                    DevModeProbe.class.getClassLoader());
-            Method m = w.getDeclaredMethod("open");
-            int mod = m.getModifiers();
-            windowProbeOk = Modifier.isPublic(mod) && Modifier.isStatic(mod)
-                    && m.getParameterCount() == 0 && m.getReturnType() == void.class;
-            windowProbeDetail = "ui.AccountStatusWindow.open() = " + m.toGenericString();
+            ClassLoader cl = DevModeProbe.class.getClassLoader();
+            Class<?> report = Class.forName("com.example.netease.ui.AccountReport", false, cl);
+            Method render = report.getMethod("render", com.example.netease.svc.AccountService.LoginStatus.class);
+            Class<?> bridge = Class.forName("com.example.netease.ui.HostUiBridge", false, cl);
+            Method openPage = bridge.getMethod("openNativePage", String.class);
+            boolean oldGone;
+            try {
+                Class.forName("com.example.netease.ui.AccountStatusWindow", false, cl);
+                oldGone = false;
+            } catch (ClassNotFoundException gone) {
+                oldGone = true;
+            }
+            windowProbeOk = Modifier.isStatic(render.getModifiers())
+                    && Modifier.isPublic(openPage.getModifiers())
+                    && Modifier.isStatic(openPage.getModifiers())
+                    && oldGone;
+            windowProbeDetail = "AccountReport.render 存在；HostUiBridge.openNativePage(String) 存在；"
+                    + "旧 AccountStatusWindow 已删除=" + oldGone;
         } catch (ClassNotFoundException | NoSuchMethodException e) {
             windowProbeOk = false;
             windowProbeDetail = "未找到：" + e;

@@ -12,7 +12,7 @@ import java.util.function.Consumer;
 /**
  * 本地歌单命名控制器（批次 3；契约 build/_tmp/batch3-contracts.md「队友 2」，需求 docs/PLAN.md §8.3）。
  *
- * <p>把 {@code PlaylistWindow.saveCurrentToLocal} 的手工保存流程抽成<b>无 UI 依赖</b>的状态机：
+ * <p>把 旧 PlaylistWindow 的 saveCurrentToLocal（0.12.0 已删除） 的手工保存流程抽成<b>无 UI 依赖</b>的状态机：
  * 打开面板时捕获「来源 + 曲目快照」并给出默认名；提交时在调用栈内固定名称与曲目快照，
  * 写盘交给注入的 {@link Async} 在后台执行，成功后在同一次回调里刷新本地歌单条目；
  * 连续点击由 {@code busy} 拦截，保证不重复写盘。本类不 import 任何 Swing / AWT / Kotlin / Compose 类型。</p>
@@ -33,7 +33,7 @@ import java.util.function.Consumer;
  */
 public final class LocalSaveController {
 
-    /** 来源为空时的兜底默认名（与 {@code PlaylistWindow.saveCurrentToLocal} 的 {@code def} 一致）。 */
+    /** 来源为空时的兜底默认名（与 旧 PlaylistWindow 的 saveCurrentToLocal（0.12.0 已删除） 的 {@code def} 一致）。 */
     public static final String DEFAULT_NAME = "我的本地歌单";
 
     /** 读取当前曲目失败（{@link Ports#tracks()} 抛异常时的反馈）。 */

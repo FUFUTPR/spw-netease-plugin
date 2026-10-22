@@ -48,7 +48,7 @@ import java.util.regex.Pattern;
  * <pre>
  * Remove-Item -Recurse -Force build\w1-check -ErrorAction SilentlyContinue
  * $cp = "tools\.cache\spw-workshop-api-host.jar;tools\.cache\pf4j-3.12.0.jar;libs\sqlite-jdbc-3.41.2.2.jar"
- * javac --release 21 -encoding UTF-8 -cp $cp -d build\w1-check `
+ * javac --release 25 -encoding UTF-8 -cp $cp -d build\w1-check `
  *   (Get-ChildItem src\main\java\com\example\netease -Recurse -Filter *.java | % FullName) `
  *   tools\smoke\LoginShapeProbe.java
  * java "-Dstdout.encoding=UTF-8" -cp "build\w1-check;$cp" com.example.netease.net.LoginShapeProbe
@@ -149,36 +149,56 @@ public final class LoginShapeProbe {
             lwGone = false;
             lwDetail = "反射异常（不算通过）：" + t;
         }
-        check("RETIRE 独立扫码窗 ui.LoginWindow 整类不存在（0.11.30 扫码并入 LoginDialog 卡片）",
+        check("RETIRE 独立扫码窗 ui.LoginWindow 整类不存在（0.12.0 起扫码并入宿主主窗口内的原生登录页）",
                 lwGone, lwDetail);
 
-        // 0.11.26：用户规格「点开登录弹出一个框，框里能分别填手机号和验证码」⇒ 登录块 = 配置页一个
-        //  按钮（openLoginDialog）+ 插件自绘对话框 ui/LoginDialog（手机号框 + 验证码框 + 右侧
-        //  「获取验证码」+ 底部「取消」「登录」）。宿主 edittext 行点开只有**一个**输入框，多控件表单
-        //  只能自绘（宿主不提供对话框 API，docs/00 §6.27）。这里钉住「入口在、对话框在、公开面无漂移」。
-        //  ⚠️ 一律 Class.forName(..., false, ...)：只验类与签名，不触发 Swing 静态初始化（无显示环境也能跑）。
-        section("一之三、登录对话框形态（0.11.26 用户规格）");
-        Class<?> dialogClz = null;
+        // 0.12.0 批次 5：旧 Swing 登录对话框（ui/LoginDialog）整类删除。用户规格从「点开弹出一个框」
+        //  变成「点开进入宿主主窗口内的原生登录页」：入口仍是配置页「登录」按钮 → openLoginDialog，
+        //  但它只调用 HostUiBridge.openNativePage("login")；页面本身由 Kotlin 侧 NativeLoginPage +
+        //  LoginController 承载。这里钉住「旧窗不在、原生路由在、控制器公开面在」。
+        //  ⚠️ 一律 Class.forName(..., false, ...)：只验类与签名，不触发 Swing/AWT 静态初始化（无显示环境也能跑）。
+        section("一之三、登录入口形态（0.12.0 原生登录页）");
+        boolean dialogGone;
         String dialogDetail;
         try {
-            dialogClz = Class.forName("com.example.netease.ui.LoginDialog", false,
+            Class.forName("com.example.netease.ui.LoginDialog", false,
                     LoginShapeProbe.class.getClassLoader());
-            dialogDetail = "Class.forName 命中 com.example.netease.ui.LoginDialog";
-        } catch (ClassNotFoundException e) {
-            dialogDetail = "Class.forName 抛 ClassNotFoundException：登录对话框缺失（0.11.26 起必须存在）";
+            dialogGone = false;
+            dialogDetail = "类仍在（0.12.0 起应为不存在）";
+        } catch (ClassNotFoundException expected) {
+            dialogGone = true;
+            dialogDetail = "Class.forName 抛 ClassNotFoundException：旧登录对话框整类已删除";
         } catch (Throwable t) {
+            dialogGone = false;
             dialogDetail = "反射异常（不算通过）：" + t;
         }
-        check("DIALOG ui.LoginDialog 存在（两框 + 获取验证码 + 取消/登录 的唯一载体）",
-                dialogClz != null, dialogDetail);
-        boolean hasOpen = hasMethod(dialogClz, "open", String.class);
-        boolean hasIsOpen = hasMethod(dialogClz, "isOpen");
-        check("DIALOG 公开面 open(String) / isOpen() 齐备（调用方只依赖这两条）",
-                hasOpen && hasIsOpen,
-                "反射查 open(String) ⇒ " + (hasOpen ? "在" : "缺") + "；isOpen() ⇒ " + (hasIsOpen ? "在" : "缺"));
-        check("DIALOG 开窗签名 = public static void open(String)（宿主线程侧立即返回，建框交给 EDT）",
-                isStaticVoid(dialogClz, "open", String.class),
-                "反射查修饰符 ⇒ 要求 public static void、单参 String");
+        check("RETIRE 旧 Swing 登录对话框 ui.LoginDialog 整类不存在（0.12.0 起登录在宿主主窗口内）",
+                dialogGone, dialogDetail);
+        Class<?> bridgeClz = null;
+        try {
+            bridgeClz = Class.forName("com.example.netease.ui.HostUiBridge", false,
+                    LoginShapeProbe.class.getClassLoader());
+        } catch (Throwable ignored) {
+            // 下一条断言会以「缺」的形式失败，细节更清楚
+        }
+        boolean hasRoute = hasMethod(bridgeClz, "openNativePage", String.class);
+        check("ROUTE HostUiBridge.openNativePage(String) 在（旧窗口删除后唯一页面路由）",
+                hasRoute, "反射查 openNativePage(String) ⇒ " + (hasRoute ? "在" : "缺"));
+        Class<?> loginCtl = null;
+        try {
+            loginCtl = Class.forName("com.example.netease.ui.controller.LoginController", false,
+                    LoginShapeProbe.class.getClassLoader());
+        } catch (Throwable ignored) {
+            // 下一条断言会以「缺」的形式失败
+        }
+        boolean ctlOk = loginCtl != null
+                && hasMethod(loginCtl, "open")
+                && hasMethod(loginCtl, "close")
+                && hasMethod(loginCtl, "tick")
+                && hasMethod(loginCtl, "sendCode", String.class)
+                && hasMethod(loginCtl, "submitCode", String.class, String.class);
+        check("CTRL LoginController 公开面 open()/close()/tick()/sendCode(String)/submitCode(String,String) 齐备",
+                ctlOk, "反射查类与五个方法 ⇒ " + (ctlOk ? "齐备" : "缺（登录页无法驱动取码/登录/关闭）"));
         Class<?> pluginClz = null;
         try {
             pluginClz = Class.forName("com.example.netease.NeteasePlugin", false,

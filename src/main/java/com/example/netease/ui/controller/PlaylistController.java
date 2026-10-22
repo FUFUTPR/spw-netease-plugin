@@ -17,7 +17,7 @@ import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 
 /**
- * 歌单页业务控制器（批次 2 从 {@code PlaylistWindow} 抽出；无 Swing / AWT / Kotlin / Compose 依赖）。
+ * 歌单页业务控制器（批次 2 从 旧 {@code PlaylistWindow}（0.12.0 已删除） 抽出；无 Swing / AWT / Kotlin / Compose 依赖）。
  *
  * <p>职责：左栏歌单清单、右栏曲目来源、载入失败重试（原参数）、账号 epoch 失效、
  * 整单连播请求与宿主播放反馈。线程模型由注入的 {@link Async} 决定；本控制器所有状态

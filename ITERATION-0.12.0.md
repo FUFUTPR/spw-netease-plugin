@@ -14,7 +14,7 @@
 | 2 | 业务控制器抽取、搜索与歌单 / 同步页面 | 2 | 实现、构建与自动检查全部完成；已做部分真机取证（搜索/播放/歌单页/同步状态），**待用户真机验收** |
 | 3 | 登录、账号及附属界面迁移 | 2 | 实现、构建与自动检查全部完成（登录/账号/本地命名控制器 + 原生页）；**待用户真机验收** |
 | 4 | WebView2 验证区域改造 | 2 | 助手严格挂载 + 控制器 + 内嵌验证面板 + 构建/自动检查全部完成；**待用户真机验收**（真实风控可见可操作、移动缩放、停用关闭） |
-| 5 | 旧 UI 清理与双渠道交付 | — | 未开始 |
+| 5 | 旧 UI 清理与双渠道交付 | 2 | 旧窗口与注册表已删除、门禁/探针已改写、0.12.0 包与双渠道材料完成，构建与 9 项自动检查全部 exit 0；**交付候选，待用户按 `ACCEPTANCE.md` 真机验收**；WebView2 技术关卡仍未闭合 |
 
 ---
 
@@ -384,7 +384,74 @@ harness/run-regression.ps1 本批扩展：-Batch 5 编译并运行 SearchControl
 本批**未做真机取证**：内嵌验证区域需要真实网易云风控触发，且用户已要求停止鼠标自动化、由用户自测（m01954）。
 自动侧已覆盖助手协议 41 条与控制器 185 条；真机项记入下一节待验清单。
 
-## 六、已实现但未验收
+## 六、批次 5 已验证事实（旧 UI 清理、门禁改写与 0.12.0 交付）
+
+### 1. 旧实现清理
+
+- 删除 8 个自建 Swing 类：`ui/AccountStatusWindow`、`ui/HostTheme`、`ui/LoginDialog`、`ui/PlaylistWindow`、
+  `ui/SearchWindow`、`ui/TableButtons`、`ui/UiRegistry`、`ui/VerifyWindow`。
+- 新增 `ui/AccountReport`（纯 Java，不 import AWT/Swing）作为「当前账号」文案唯一真源：
+  `NOT_LOGGED_IN`、`FACT_LABELS`、`rows/values/vipText/render/oneLine`；原生账号页改用 `AccountReport.render`。
+- `NeteasePlugin` 删除 4 个窗口 import、`UI_AUTOTEST_PLAYLIST_FLAG`/`UI_AUTOTEST_DELAY_MS`/`scheduleUiSelfTest()`；
+  `stop()` 不再调 `UiRegistry.disposeAll()`，统一由 `HostUiBridge.uninstall()` → `NativeUiSession.stop()` 收尾。
+- 五个配置入口（`openSearch`/`showLoginDialog`/`openLoginDialog`/`openPlaylist`/`currentAccount`）与 `syncNow()`
+  只走 `HostUiBridge.openNativePage(...)`；失败时 `nativePageUnavailable(label)` 写 WARN 并 toast，**不再回退旧窗口**。
+- 删除后全仓库 `new JFrame/new JDialog/extends JFrame/extends JDialog/JOptionPane/new JWindow` 为 0 处。
+- 同步更新 `SmsLogin`/`AccountService`/`DevMode`/`PluginConfig`/`VerifyHostPaths` 与控制器里指向旧窗口的注释。
+
+### 2. 测试与门禁改写
+
+- verify-spmod 76 → **78** 项：`[P10.10]` 改为 14 个新架构关键类；新增 `[P10.40]`「包内没有 8 个旧 Swing 窗口类」。
+- `P3Checks`：`[H9.9]` 改为「`currentAccount()` 不抛异常 + 不再创建标题『当前账号』的 AWT Dialog（headless 只 info）+
+  `AccountReport.render` 行数与登录态一致」；`[H9.16]` 删除 Swing 组件树检查，改为 `AccountReport` 合同 +
+  4 种登录态矩阵 + 8 个旧类 `ClassNotFoundException`。
+- 探针：删除 `DialogSkinProbe`/`LayoutDump`/`VerifyEmbedProbe`；`LoginShapeProbe` 保留业务断言（40 PASS），
+  「登录对话框形态」5 条改为「旧类不可加载 + `HostUiBridge.openNativePage` 存在 + 登录控制器方法齐全」；
+  `DevModeProbe` 账号检查改为 `AccountReport.render` + `HostUiBridge.openNativePage` + 旧类不存在（67 PASS）。
+
+### 3. 构建与包
+
+| 项 | 结果 |
+| --- | --- |
+| 版本 | `project.json` → 0.12.0；ID/主类/扩展类/权限 `class-transform`/`targetSpwVersion 1.19.0`/`javaRelease 25` 未变 |
+| 构建 | `build.ps1 -SkipApi` exit 0：JDK 25 → Gradle → `--package-only`；233 个 `.class`、资源 15 个 |
+| 产物 | `build/dist/plugin-com.example.netease-0.12.0.spmod`，14,282,949 B，sha256 `d5e43efaded706b26680d9cb6dce4f3a7857662e7908636acbc79496d81a330a`（两次构建同哈希） |
+| 包结构 | 254 条目；`META-INF/MANIFEST.MF` + `classes/**` + `lib/**`；无宿主/API/Kotlin/Compose 类 |
+
+### 4. 自动检查（0.12.0 最终包，证据 `build/evidence/batch5/01–09`）
+
+| # | 检查 | 结果 | 退出码 | 证据 |
+| --- | --- | --- | --- | --- |
+| 1 | 构建（JDK 25 → Gradle → package-only） | 233 class / 15 资源 / 自检通过 | 0 | `01-build.txt` |
+| 2 | verify-spmod | 78 项 PASS | 0 | `02-verify-spmod.txt` |
+| 3 | harness | PASS 56 / FAIL 0 | 0 | `03-harness.txt` |
+| 4 | run-regression -Batch all | 批次 1–4：12 / 6+7+3 / 9+7 / 4+10；批次 5：109+146；批次 6：253+156；批次 7：185 | 0 | `04-regression.txt` |
+| 5 | run-behavior | 27 + 18 + 7 + 1 PASS | 0 | `05-behavior.txt` |
+| 6 | python unittest | Ran 5 tests OK | 0 | `06-unittest.txt` |
+| 7 | VerifyHost 真实协议探测 | 41 PASS | 0 | `07-verifyhost-proto.txt` |
+| 8 | LoginShapeProbe（登录请求构造 + 旧类已删） | PASS 40 / FAIL 0 | 0 | `08-login-shape.txt` |
+| 9 | DevModeProbe（装机布局 + 档位矩阵 + 旧组件树） | PASS 67 / FAIL 0 / SKIP 0 | 0 | `09-devmode-probe.txt` |
+
+### 5. 双渠道交付材料与版本
+
+- `RELEASE-0.12.0.md`：发布状态、兼容、安装/权限、改动映射、GitHub 发布清单、Steam 上传与同 ID 冲突/切换、
+  回退（0.11.59 两个基线包 SHA）、已知问题、12 项验收表、PLAN §12.3 报告表；两渠道同包同 SHA、本轮不做更新器。
+- `ACCEPTANCE.md`：改为 0.12.0 的 12 条用户验收清单（0/1/2 结论 + 失败记录 + 回退步骤）。
+- `README.md`：安装段改 1.19.0 / `.spmod` / 授权 / 升级先移除同 ID 旧目录；「能做什么」新增界面一条。
+- `CHANGELOG.md`：新增 0.12.0 十条。
+- 版本按 PLAN §10.3：0.11.60 作为内部验证包承载批次 1–5，对外 0.11.59 → 0.12.0；版本只在 `project.json` 改。
+
+### 6. 真机状态
+
+本批按用户要求不做鼠标自动化取证（m01954）；0.12.0 包交付用户按 `ACCEPTANCE.md` 真机走查。
+删除旧窗口后的入口行为、停用后无残留助手进程等 5 条记入下一节待验清单。
+
+自动可证的部分已做：0.12.0 已装入宿主（`workshop/plugins/plugin-com.example.netease-0.12.0`，同 ID 的 0.11.60 目录
+归档到 `_archive/`），17:53:30 插件日志显示「插件版本(上下文)=0.12.0 插件版本(MANIFEST)=0.12.0」、
+「原生页面控制器已启动（tick=250ms）」、「install 成功…匹配数=1」；安装后 `VerifyHost.exe` 进程为 0。
+证据 `build/evidence/batch5/11-install-host.txt`。
+
+## 七、已实现但未验收
 
 1. `tools/jdk.ps1` 的探测顺序与报错信息（自动化路径已实测，异常机器环境未覆盖）。
 2. `extract-api.ps1` 的宿主版本/SHA-256 输出与 37 类阈值（本机通过，换宿主版本时只警告不阻断）。
@@ -408,16 +475,22 @@ harness/run-regression.ps1 本批扩展：-Batch 5 编译并运行 SearchControl
 15. 关闭登录、切页、停用插件时助手的**有界关闭**（600ms + 400ms）与网页消失；离开登录页后迟到回调不得重新显示验证区域。
 16. 三类失败在面板内**显示原因并可重试**：助手进程崩溃、父窗口消失、WebView2 不可用（自动侧覆盖协议，真机需人为 kill 助手或禁用 WebView2）。
 17. Cookie 初始化与回传在**真实风控流程**中生效（自动侧只验证管道格式、旧 session/旧 epoch 丢弃与日志脱敏）。
-18. 旧 Swing `LoginDialog` 的风控路径仍使用旧 `VerifyWindow`（批次 5 才清理），两套验证路径并存期间未在真机对比。
+18. ~~旧 Swing `LoginDialog` 的风控路径仍使用旧 `VerifyWindow`，两套验证路径并存期间未在真机对比~~ —— **已随批次 5 删除两者，本条作废**。
+19. 删除旧窗口后五个入口的**真机行为**：原生层不可用时只出现 toast「原生界面不可用：…」，不会再弹旧窗口；正常路径进原生页。
+20. 停用插件后**无残留辅助进程**（任务管理器里没有 `VerifyHost.exe`）与无残留页面：`UiRegistry` 已删，收尾路径改为
+    `HostUiBridge.uninstall()` → `NativeUiSession.stop()` → 各控制器 `close()` + `VerifyEmbedController.close()`（600+400ms）。
+21. 0.12.0 包在宿主 1.19.0 上的**首次安装/覆盖安装**：工坊显示 0.12.0、权限只有 `class-transform`、启用弹窗勾选后加载。
+22. Steam 渠道：同包上传、创意工坊材料、与本地安装同 ID 的冲突与切换步骤未在真实账号下执行（需用户操作并确认协议）。
+23. GitHub Release 未发布（发布物、SHA、说明与清单已备在 `RELEASE-0.12.0.md` §5）。
 
 
-## 七、尚待验证的技术方案
+## 八、尚待验证的技术方案
 
 1. **宿主品牌配色**：宿主不使用 `MaterialTheme`、也不暴露配色 CompositionLocal，
    插件页只能跟到系统深/浅色。后续若需要品牌色，只能解析宿主设置库（`spw.db`）或宿主自绘常量，属方案待定。
 2. **适配层锚点随宿主升级的稳定性**：1.19.0 已确认；1.20+ 需要重新核对锚点并更新适配层常量。
 
-## 八、明确阻塞项
+## 九、明确阻塞项
 
 1. ~~批次 1 硬关卡：最小原生 Compose 页面须用户真机确认~~ **已解除**：
    用户在宿主「配置」页确认「显示在主窗口内 / 关闭后宿主配置恢复可点 / 右下角入口可重开」三项均正常，
@@ -430,21 +503,25 @@ harness/run-regression.ps1 本批扩展：-Batch 5 编译并运行 SearchControl
    本批未做新的真机取证（按用户要求停止鼠标自动化），真机项记入上一节待验清单。
 5. 批次 4 **无新增阻塞**：助手协议 41 条、控制器 185 条探针全过，构建与全部自动检查 exit 0；
    但本批有**技术关卡**——内嵌验证区域必须由用户在真实风控下确认「网页在主窗口内可见可操作」，
-   未确认前批次 4 保持状态 2，不进入批次 5 的旧 UI 删除。
+   未确认前批次 4 保持状态 2（交付候选）。
+6. 批次 5 **无新增阻塞**：0.12.0 最终包构建与 9 项自动检查全部 exit 0。
+   但按用户「按文档全部干完」的指示（m01954）先完成了代码清理与交付材料，因此：
+   - 批次 4 的 WebView2 技术关卡**仍未闭合**，批次 4/5 都记状态 2（交付候选），不标「全部验收通过」；
+   - 0.12.0 是否可以对外发布，取决于 `ACCEPTANCE.md` 12 条在用户真机上的结论与 `RELEASE-0.12.0.md` §1 的剩余两项。
 
-## 九、复跑方式
+## 十、复跑方式
 
-在工程根目录（0.12.0 目标包名 `plugin-com.example.netease-0.11.60.spmod`，批次 5 才升到 0.12.0）：
+在工程根目录（批次 5 起包名为 `plugin-com.example.netease-0.12.0.spmod`）：
 
     pwsh -NoProfile -File tools/extract-api.ps1 -Force      # 需要时刷新宿主 API 并核对 37 类/SHA-256
     pwsh -NoProfile -File build.ps1                         # JDK25 → Gradle → --package-only
-    pwsh -NoProfile -File tools/verify-spmod.ps1 -Spmod build/dist/plugin-com.example.netease-0.11.60.spmod
-    pwsh -NoProfile -File harness/run-harness.ps1 -Spmod build/dist/plugin-com.example.netease-0.11.60.spmod
-    pwsh -NoProfile -File harness/run-regression.ps1 -Spmod build/dist/plugin-com.example.netease-0.11.60.spmod
-    pwsh -NoProfile -File harness/run-regression.ps1 -Batch 5 -Spmod build/dist/plugin-com.example.netease-0.11.60.spmod   # 搜索/歌单控制器探针
-    pwsh -NoProfile -File harness/run-regression.ps1 -Batch 6 -Spmod build/dist/plugin-com.example.netease-0.11.60.spmod   # 登录/本地命名控制器探针
-    pwsh -NoProfile -File harness/run-regression.ps1 -Batch 7 -Spmod build/dist/plugin-com.example.netease-0.11.60.spmod   # 内嵌验证控制器探针（185 条）
-    pwsh -NoProfile -File harness/run-verifyhost-probe.ps1 -Out build/evidence/batch4/10-verifyhost-protocol.txt  # 真实助手协议（41 条）
+    pwsh -NoProfile -File tools/verify-spmod.ps1 -Spmod build/dist/plugin-com.example.netease-0.12.0.spmod
+    pwsh -NoProfile -File harness/run-harness.ps1 -Spmod build/dist/plugin-com.example.netease-0.12.0.spmod
+    pwsh -NoProfile -File harness/run-regression.ps1 -Spmod build/dist/plugin-com.example.netease-0.12.0.spmod
+    pwsh -NoProfile -File harness/run-regression.ps1 -Batch 5 -Spmod build/dist/plugin-com.example.netease-0.12.0.spmod   # 搜索/歌单控制器探针
+    pwsh -NoProfile -File harness/run-regression.ps1 -Batch 6 -Spmod build/dist/plugin-com.example.netease-0.12.0.spmod   # 登录/本地命名控制器探针
+    pwsh -NoProfile -File harness/run-regression.ps1 -Batch 7 -Spmod build/dist/plugin-com.example.netease-0.12.0.spmod   # 内嵌验证控制器探针（185 条）
+    pwsh -NoProfile -File harness/run-verifyhost-probe.ps1 -Out build/evidence/batch5/07-verifyhost-proto.txt  # 真实助手协议（41 条）
 
 `run-regression.ps1` 的 `-Batch` 取值 1–7 或 all；批次 5 运行 `SearchControllerProbe`（**109** 条断言）
 与 `PlaylistControllerProbe`（146 条断言 + PlaylistIds 10 条等价性）；
@@ -455,10 +532,19 @@ harness/run-regression.ps1 本批扩展：-Batch 5 编译并运行 SearchControl
 
     pwsh -NoProfile -File tools/verify-host/build.ps1   # 先发布到临时目录→自检→成功才替换 src/main/resources/verify-host
 
-    pwsh -NoProfile -File harness/run-behavior.ps1 -Spmod build/dist/plugin-com.example.netease-0.11.60.spmod
+    pwsh -NoProfile -File harness/run-behavior.ps1 -Spmod build/dist/plugin-com.example.netease-0.12.0.spmod
     python -m unittest discover -s harness/regression -p test_acceptance.py -v
 
-每条命令单独检查退出码；证据写 `build/evidence/batchN/`，不入库。
+旧窗口清理后的两条离线探针（0.12.0 复跑：LoginShapeProbe 40 PASS、DevModeProbe 67 PASS）：
+
+    # 编译到临时目录（classpath 用构建产物 + 宿主 jar）：
+    javac --release 25 -encoding UTF-8 -cp "build/plugin-classes;tools/.cache/spw-workshop-api-host.jar;tools/.cache/pf4j-3.12.0.jar;tools/.cache/kotlin-stdlib-host.jar" -d build/_tmp/probes tools/smoke/LoginShapeProbe.java tools/smoke/DevModeProbe.java
+    # LoginShapeProbe 自己建临时数据目录，直接运行：
+    java -cp "build/_tmp/probes;build/plugin-classes;tools/.cache/*" com.example.netease.net.LoginShapeProbe
+    # DevModeProbe 要求「沙箱 classes 目录」本身是 classpath 第一项（= 真机 classpath 根），探针类不能放进去：
+    java -cp "build/devmode-probe/plugin-com.example.netease-0.11.35/classes;build/_tmp/probes;build/plugin-classes;tools/.cache/*" com.example.netease.core.DevModeProbe build/devmode-probe src/main/resources
+
+每条命令单独检查退出码；证据写 `build/evidence/batchN/`（0.12.0 为 `batch5/01–09`），不入库。
 
 真机验收（本批新增工具，均只在本机使用、不进包）：
 
@@ -473,21 +559,26 @@ harness/run-regression.ps1 本批扩展：-Batch 5 编译并运行 SearchControl
 截图坐标 = 窗口左上为原点，点击换算 `virtual = (windowRect.Left + X) * 1.25`。
 按钮位置建议用像素颜色扫描确定，不要凭缩略图估算（会偏 40–60 px）。
 
-## 十、回退
+## 十一、回退
 
 本批新增 Gradle 构建链与 Kotlin/Compose 源码，但**未改**插件 ID、主类、扩展类、包内布局与数据格式。
 回退即：`git revert` 本批提交（恢复 `build.ps1`/`tools/build.py` 的纯 javac 路径），
 并用 `build/baseline/0.11.59/` 里的 0.11.59 包重新安装。
 运行时副作用：插件停用/卸载时会执行 `HostUiBridge.uninstall()`；若进程被强杀，Hook 随宿主进程消失，无残留。
 批次 4 另含 C# 助手二进制：`src/main/resources/verify-host/` 由 `tools/verify-host/build.ps1` 从源码重建，
-回退时随提交一并 revert 即可恢复旧助手；旧 `VerifyWindow` 尚未删除，回退代码后旧验证窗路径仍然可用。
+回退时随提交一并 revert 即可恢复旧助手。
+批次 5 删除了 8 个旧窗口类与 `UiRegistry`；`git revert <批次 5 提交>`（或回退到 `34e2682`）即恢复全部旧窗口、旧探针与旧入口回退分支。
+回退 0.12.0 包本身按 `RELEASE-0.12.0.md` §7：恢复 `build/baseline/0.11.59/installed.zip`，保留数据目录（无数据迁移）。
 
-## 十一、本批提交
+## 十二、本批提交
 
 - 批次 0 独立提交：`f1bd594 0.12.0 批次 0：建立 JDK 25 可复现基线与宿主 1.19 API 核对`。
 - 批次 1 独立提交：`git log --grep='批次 1'`（Gradle 构建链 + 原生 UI 适配层 + 最小页面）。
 - 批次 2 独立提交：`git log --grep='批次 2'`（搜索/歌单/同步控制器 + 原生搜索/歌单/同步页 + 批次 5 探针）。
 - 批次 3 独立提交：`git log --grep='批次 3'`（登录/账号/本地命名控制器 + 原生登录/账号页 + 账号变化失效 + 批次 6 探针）。
 - 批次 4 独立提交：`git log --grep='批次 4'`（WebView2 内嵌验证：助手严格挂载与协议 41 条、控制器与批次 7 探针 185 条、内嵌验证面板接线、打包自检 77 项）。
+- 批次 5 独立提交：`git log --grep='批次 5'`（删除 8 个旧窗口类与 UiRegistry、新增 AccountReport、五入口不回退、
+  门禁/探针改写、0.12.0 版本与包、RELEASE/ACCEPTANCE/README/CHANGELOG 与本节记录）。
+  0.12.0 包：`build/dist/plugin-com.example.netease-0.12.0.spmod`，14,282,949 B，sha256 `d5e43efa…a330a`。
   上述提交只含源码、脚本与本记录；不含 `build/`、`docs/`、日志、截图、真实数据。
 - 之后批次各自独立提交；`docs/`、`build/` 不入库。

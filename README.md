@@ -6,7 +6,7 @@ Salt Player for Windows 的第三方插件，把网易云音乐接进本地播�
 
 ## 安装
 
-在 Salt Player for Windows 的设置里导入 zip 就行，导入完按提示重启播放器。
+需要 Salt Player for Windows 1.19.0（Steam 版亦可）。在工坊 / Mod 管理里导入 `plugin-com.example.netease-0.12.0.spmod`，启用时勾选「允许修改应用行为与界面」（`class-transform` 权限），按提示重启播放器。升级前先移除同 ID 的旧版本目录，数据目录不用动。
 
 ## 能做什么
 
@@ -15,6 +15,7 @@ Salt Player for Windows 的第三方插件，把网易云音乐接进本地播�
 - 封面：列表、播放条、迷你播放器都用网易云的图
 - 歌单：同步自己的歌单，可以和本地歌单合并显示
 - 账号：手机扫码或短信验证码登录，凭据加密存放在本机
+- 界面：搜索、歌单、登录、账号都在宿主主窗口内打开，跟随宿主深浅色，不再弹独立窗口
 
 ## 自己编译
 

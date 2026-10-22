@@ -57,11 +57,11 @@ $ForbiddenClassPrefixes = @('com/xuncorp/', 'org/pf4j/')
 # 所以这里同步收窄成 3 个文件名。两份档位文件的齐全性由 P10.21~P10.24 断言。
 $ExpectedConfigs = @('config.json', 'account_cfg.json', 'cache_cfg.json', 'music_cfg.json')
 
-# P3 新增实现类（docs/14 §3；必须在包内，见 P10.10）
-# 0.11.27：皮肤层拆出 ui/HostTheme（宿主同款样式令牌）与 LoginDialog 的绘制零件
-#          （CardPane / PillButton / FlatField / RootPane 都是内部类，P10.10 只钉两个代表）。
-# 0.11.30：ui/LoginWindow（独立扫码窗）**退役** —— 整类删掉、换成反向断言（P10.25 查它不在包里）；
-#          core/QrEncoder（二维码编码器）与 core/DevMode（开发者模式两档资源切换）接位。
+# 关键实现类（必须在包内，见 P10.10）
+# 0.11.30：ui/LoginWindow（独立扫码窗）**退役** —— 整类删掉、换成反向断言（P10.25 查它不在包里）。
+# 0.12.0 批次 5：旧 Swing 窗口（LoginDialog / PlaylistWindow / SearchWindow / AccountStatusWindow /
+#          VerifyWindow / HostTheme / TableButtons / UiRegistry）**全部删除**，换成宿主主窗口内的
+#          原生 Compose 页面与无 UI 控制器；这里改为钉住新架构的关键类，反向断言见 P10.40。
 $ExpectedP3Classes = @(
     'classes/com/example/netease/svc/AccountService.class',
     'classes/com/example/netease/svc/CookieVault.class',
@@ -69,12 +69,14 @@ $ExpectedP3Classes = @(
     'classes/com/example/netease/core/DevMode.class',
     'classes/com/example/netease/host/HostTrackListGate.class',
     'classes/com/example/netease/host/HostTrackListGate$ListMapHandler.class',
-    'classes/com/example/netease/ui/LoginDialog.class',
-    'classes/com/example/netease/ui/HostTheme.class',
-    'classes/com/example/netease/ui/LoginDialog$CardPane.class',
-    'classes/com/example/netease/ui/LoginDialog$PillButton.class',
-    'classes/com/example/netease/ui/LoginDialog$FlatField.class',
-    'classes/com/example/netease/ui/PlaylistWindow.class'
+    'classes/com/example/netease/ui/AccountReport.class',
+    'classes/com/example/netease/ui/HostUiBridge.class',
+    'classes/com/example/netease/nativeui/HostUiAdapter.class',
+    'classes/com/example/netease/nativeui/NativeUiSession.class',
+    'classes/com/example/netease/ui/controller/SearchController.class',
+    'classes/com/example/netease/ui/controller/PlaylistController.class',
+    'classes/com/example/netease/ui/controller/LoginController.class',
+    'classes/com/example/netease/ui/controller/VerifyEmbedController.class'
 )
 
 # ---------------------------------------------------------------- 结果收集
@@ -739,7 +741,7 @@ try {
 
     # P10.10 与 preference_config.json 无关，先判（纯包内事实）
     $missClasses = @($ExpectedP3Classes | Where-Object { $entryNames -notcontains $_ })
-    Add-Result 'P10.10' "P3 新增实现类都在包内（$($ExpectedP3Classes.Count) 个）" ($missClasses.Count -eq 0) `
+    Add-Result 'P10.10' "关键实现类都在包内（$($ExpectedP3Classes.Count) 个：原生 UI 适配层 / 会话 / 控制器）" ($missClasses.Count -eq 0) `
         "$($ExpectedP3Classes.Count - $missClasses.Count)/$($ExpectedP3Classes.Count) 存在" `
         $(if ($missClasses.Count) { '缺：' + ($missClasses -join ', ') } else { '' })
 
@@ -1093,7 +1095,7 @@ try {
         # ---------- P10.5b 账号组「登录」按钮（0.11.26 用户规格：点开弹出登录对话框）
         #  形态沿革：0.11.22 四件套（登录行 + 获取验证码 / 验证码 / 确定登录）→ 0.11.23 收成一行 edittext
         #  （按值的形态分步）→ 0.11.26 回到用户明确要的「对话框」：本行改成 button，点开是
-        #  ui/LoginDialog（手机号框 + 验证码框 + 右侧「获取验证码」+ 底部「取消」「登录」）。
+        #  ui/LoginDialog（手机号框 + 验证码框 + 右侧「获取验证码」+ 底部「取消」「登录」；0.12.0 已删除，改为宿主主窗口内的原生登录页）。
         #  为什么必须自绘：宿主 edittext 行点开只有**一个**输入框（宿主自绘模态），多控件表单宿主给不了。
         $ph    = Get-P3Pref $acctGroup '登录'
         $phTy  = [string](Get-P3Prop $ph 'type')
@@ -1111,7 +1113,7 @@ try {
         #  反向：四件套残留（获取验证码 / 验证码 / 确定登录）与旧「手机号」行都不许在；
         #  正向（**0.11.35 起，用户 m00001 问题1**）：「当前账号」是 button「当前账号」→ currentAccount，
         #  账号信息**不得常驻**在页面上 —— 标题丢掉 0.11.32 的 `{{ACCOUNT}}` 占位机制，点开才由
-        #  ui/AccountStatusWindow 展示「账号名字 / 账号 ID / 会员信息」。
+        #  宿主主窗口内的原生账号页（0.12.0 起文案由 ui/AccountReport 渲染）展示「账号名字 / 账号 ID / 会员信息」。
         $legacyRows = @()
         foreach ($t in @('获取验证码', '验证码', '确定登录', '手机号')) {
             if ($null -ne (Get-P3Pref $acctGroup $t)) { $legacyRows += $t }
@@ -1362,6 +1364,24 @@ try {
             $(if ($lwBack.Count -eq 0) { '未发现' } else { ($lwBack -join ', ') }) `
             $(if ($lwBack.Count) { '回潮：独立扫码窗又在包里了 —— 用户会看到第二个窗口（需求② 判 FAIL）' } else { '' })
 
+        # ---------- P10.40 退役不留痕（0.12.0 批次 5）：旧 Swing 窗口整类删除
+        #  0.12.0 起所有界面都是宿主主窗口内的原生 Compose 页面；旧窗口类只要还在包里，
+        #  就说明还有代码路径能弹出独立 Swing 窗口（用户验收表「无遗留独立 Swing 窗口」判 FAIL）。
+        $retiredClasses = @(
+            'classes/com/example/netease/ui/SearchWindow.class',
+            'classes/com/example/netease/ui/PlaylistWindow.class',
+            'classes/com/example/netease/ui/LoginDialog.class',
+            'classes/com/example/netease/ui/AccountStatusWindow.class',
+            'classes/com/example/netease/ui/VerifyWindow.class',
+            'classes/com/example/netease/ui/HostTheme.class',
+            'classes/com/example/netease/ui/TableButtons.class',
+            'classes/com/example/netease/ui/UiRegistry.class'
+        )
+        $retiredBack = @($retiredClasses | Where-Object { $entryNames -contains $_ })
+        Add-Result 'P10.40' '退役不留痕：包内没有旧 Swing 窗口类（SearchWindow/PlaylistWindow/LoginDialog/AccountStatusWindow/VerifyWindow/HostTheme/TableButtons/UiRegistry，0.12.0 批次 5 删除）' ($retiredBack.Count -eq 0) `
+            $(if ($retiredBack.Count -eq 0) { "8 个类均未发现" } else { ($retiredBack -join ', ') }) `
+            $(if ($retiredBack.Count) { '回潮：旧 Swing 窗口类又进包了 —— 用户会看到宿主窗口外的独立窗口（0.12.0 验收判 FAIL）' } else { '' })
+
         # ---------- P10.20 退役不留痕（0.11.22 + 0.11.23 + 0.11.26）：独立模态登录框与登录四件套都不得回潮
         #  用户规格沿革：① 0.11.22「登录不弹独立窗口（ui/LoginPrompt），输入手机号与登录合并成一行」⇒
         #  loginSms 一行 + LoginPrompt 模态框退役；② 0.11.23「登录不许拆成四个点击部分」⇒ smsSend /
@@ -1370,7 +1390,7 @@ try {
         #  登录按钮 + 一个「当前账号」按钮。这里做与 P10.3 / P10.19 同构的**反向**断言：
         #  退役接线不得回潮、退役标题不得回潮、内部键（phone / sms_code / login_input / current_account）
         #  不得再占用界面控件 —— 0.11.35（用户 m00001 问题1）把 current_account 也降级成**插件内部写盘键**：
-        #  账号行已改成 button，页面上不再有承载它的行，账号信息只在点击后由 ui/AccountStatusWindow 展示。
+        #  账号行已改成 button，页面上不再有承载它的行，账号信息只在点击后由原生账号页展示。
         $smsHits = New-Object System.Collections.Generic.List[string]
         foreach ($g in $p3Groups) {
             $gCfg = [string](Get-P3Prop $g 'config')
