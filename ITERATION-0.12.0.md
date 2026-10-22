@@ -10,7 +10,7 @@
 | 批次 | 内容 | 状态 | 说明 |
 | --- | --- | --- | --- |
 | 0 | 建立可复现基线 | 0 | 见下「已验证事实」 |
-| 1 | 构建迁移 + 最小原生 Compose 页面 | 2 | **硬关卡**：需用户真机确认最小页面 |
+| 1 | 构建迁移 + 最小原生 Compose 页面 | 0 | 构建/自动检查/真机验收全部完成；**用户已真机确认最小页面**（显示在主窗口内、关闭恢复宿主内容、重开正常） |
 | 2 | 业务控制器抽取、搜索与歌单迁移 | — | 未开始 |
 | 3 | 登录、账号及附属界面迁移 | — | 未开始 |
 | 4 | WebView2 验证区域改造 | — | 未开始 |
@@ -18,7 +18,7 @@
 
 ---
 
-## 一、已验证事实（本机实测，可复跑）
+## 一、批次 0 已验证事实（本机实测，可复跑）
 
 ### 1. 环境与版本
 
@@ -102,52 +102,143 @@
 
 ---
 
-## 二、已实现但未验收
+## 二、批次 1 已验证事实（Gradle + 最小原生 Compose 页面）
 
-本批不改业务行为，用户可见功能无新增。以下为「已写进仓库、尚未真机确认」的部分：
+### 1. 构建链迁移（Gradle 9.2.1 + Kotlin 2.4.20 + Compose 编译器 2.4.20 + JDK 25）
+
+- Gradle 发行版：`gradle-9.2.1-bin.zip`，137,358,119 B，
+  sha256 `72f44c9f8ebcb1af43838f45ee5c4aa9c5444898b3468ab3f4af7b6076c5bc3f`；
+  Wrapper 的 `distributionUrl` 指向腾讯镜像，`distributionSha256Sum` 即该校验值，
+  `validateDistributionUrl=true`。官方 `services.gradle.org` 会重定向到 GitHub（本机不可达）。
+- 版本选择依据（实测，不是猜）：
+  - Kotlin **2.4.20**：宿主 `kotlin/KotlinVersionCurrentValue` 字节码常量为 2.4.20，
+    宿主类 `@Metadata mv={2,4,0}`；
+  - Compose 运行时 **1.12.2**（`runtime-desktop` / `foundation-desktop` / `ui-desktop`）：
+    其 class 名集合与宿主 runtime 完全一致（宿主多出 `retain`/`saveable`/注解类，属宿主自带）；
+  - Material3 **1.10.0-alpha05**（`org.jetbrains.compose.material3:material3-desktop`）：
+    与宿主同名类公共方法集完全同数（MaterialTheme=9、TextKt=10、ButtonKt=12、ColorScheme=59、
+    Typography=58 …），1.9.0/1.12.0-alpha03 等版本均不一致；
+  - JDK **25**（宿主 class 版本 69）。
+- 仓库：`mavenCentral()` + `google()`；Gradle 插件从 Maven Central/Plugin Portal 取
+  （未使用官方 Workshop Gradle 插件：其坐标在 JitPack，本机不可达；PLAN 6.1 允许继续用自有打包器）。
+- 编译产物落 `build/plugin-classes`，再由 `python tools/build.py --package-only --classes-dir ...`
+  完成资源、manifest、`.spmod` 打包与自检；`--package-only` 不调用 `javac`、不清理输入目录。
+- 包格式与污染检查不变：`classes/` 下禁止出现 `com/xuncorp/`、`org/pf4j/`、`kotlin/`、
+  `androidx/`、`org/jetbrains/`；`lib/*.jar` 做内部条目检查；不打包宿主 JAR/API/PF4J/Kotlin/Compose。
+
+### 2. 宿主 UI 适配层（混淆名只出现在这一层）
+
+`src/main/kotlin/com/example/netease/nativeui/HostUiAdapter.kt` 集中记录：
+
+| 项 | 值（宿主 1.19.0 实测） |
+| --- | --- |
+| 目标类 | `androidx.compose.ui.ȫ`（U+022B，实为 `ModConfigScreenKt`） |
+| 目标方法 | `Ϳ`（U+037F），业务参数 `[BoxScope, java.util.List, java.lang.String, PaddingValues]` |
+| JVM 参数 | 上述 4 个 + `androidx.compose.runtime.Composer, int, int` |
+| 调用点所在类（inClass） | `com.xuncorp.voxzen.ui.navigation.ComposableSingletons$AppNavigation_desktopKt` |
+| 方式 / 优先级 | `afterComposable` / 100 |
+
+- 选点结论：宿主配置内容区的私有 composable 在宿主字节码里有 **2 个 UI 调用点**，Hook 引擎因此报
+  `UI call missing or ambiguous ... (2 calls)`；公共 `ModConfigScreen` 全宿主**唯一**调用，
+  且 `afterComposable` 不改写原调用，规避了该调用点以默认参数（mask=2）传参的问题。
+- 失败语义（都写日志且不装 Hook）：目标类不存在 / 目标方法 0 个 / 目标方法 >1 个 /
+  未获 `class-transform` 权限。成功日志含宿主版本、插件版本、目标签名、inClass 与匹配数。
+- 权限：`project.json` 的 `permissions: ["class-transform"]`（真实标识，非枚举名）；
+  宿主「启用模组」确认框勾选「允许修改应用行为与界面」后 `isPermissionGranted(CLASS_TRANSFORM)` 通过。
+
+### 3. 生命周期与页面
+
+- `NeteasePlugin.start()` → `HostUiBridge.install(spwVersion, pluginVersion)`；
+  `stop()` 先 `HostUiBridge.uninstall()`。Java 侧通过反射调用 Kotlin 适配层，
+  因此 harness 仍只编译 `src/main/java`（不 import Kotlin/Compose）。
+- `install`/`uninstall` 幂等：重复进入配置页不会重复注册（日志每次进程启动仅 1 条 `install 成功`）。
+- 页面在宿主主窗口内用 Compose 渲染，无独立窗口；关闭后仅保留右下角
+  「打开原生 UI 测试区域」胶囊，关闭态下宿主配置页完全可交互。
+- 主题/缩放：宿主 1,791 个 `com/xuncorp/**` 类对 `androidx.compose.material3` 引用数为 **0**，
+  宿主 UI 全自绘、不使用 `MaterialTheme`，Workshop API 37 个 class 也无主题接口 →
+  插件改用与宿主相同的 `isSystemInDarkTheme()` 套 `darkColorScheme()/lightColorScheme()`，
+  密度与字体缩放直接读宿主 `CompositionLocals`（页面显示 密度 1.00×、字体缩放 1.00×）。
+  **已知偏差**：宿主品牌配色取不到，插件页用 Material3 默认色板（深/浅色模式与宿主一致）。
+
+### 4. 自动检查（全部 exit 0，证据 `build/evidence/batch1/`）
+
+| 检查 | 结果 | 证据 |
+| --- | --- | --- |
+| `build.ps1`（JDK25 → Gradle → `--package-only`） | 成功，174 个 `.class`，14,094,406 B，sha256 `f991cc02f2d91fa42bb7494394aa830257c07d2bad7e205a9d3a48a030101d51` | `05-build.txt` |
+| `tools/verify-spmod.ps1` | **76 PASS / 0 FAIL** | `06-verify-spmod.txt` |
+| `harness/run-harness.ps1` | **56 PASS / 0 FAIL**（`HARNESS_RESULT=ALL_PASS`） | `07-harness.txt` |
+| `harness/run-regression.ps1` | **10 PASS / 0 FAIL** | `08-regression.txt` |
+| `harness/run-behavior.ps1` | `HOST_TRANSACTION_RESULT=7 PASS`、`HOST_PROFILE_RESULT=1 PASS` | `09-behavior.txt` |
+| `python -m unittest ... test_acceptance.py` | **5 tests OK** | `10-unittest.txt` |
+
+### 5. 真机验收记录（宿主 1.19.0，副屏 2398×1288）
+
+| 项 | 结果 | 证据 |
+| --- | --- | --- |
+| 插件加载 | 模块管理「已启用」后 3 秒内启动，日志含宿主/插件版本 | `18-workshop.png`…`22-enabled-confirmed.png` |
+| Hook 挂载 | `install 成功：… 匹配数=1`（适配基线 1.19.0） | `30-host-after-restart.png` |
+| 页面显示在主窗口内 | 标题/正文/按钮/状态齐全，无独立窗口 | `30`、`32`、`33`、`37`、`41`、`53` |
+| 关闭恢复宿主内容 | 关闭后宿主配置项完整可交互，仅留右下角入口 | `31-closed-host-content.png`、`42-closed-dark.png` |
+| 重复打开不重复注册 | 重开后状态保留、日志仍只有 1 条 `install` | `32-reopened.png`、`37-panel-reentered.png` |
+| 主题跟随 | 宿主机深色 → 页面深色（正文显示「当前为深色」） | `38-theme-dark.png`、`41-theme-follow.png` |
+| 缩放/密度跟随 | 页面显示宿主 CompositionLocals 的 1.00× | `43-density-host.png` |
+| 停用后消失 | 停用 → `uninstall 完成：Hook 已摘除`，配置页无插件层、无入口 | `44`–`46` |
+| 重新启用 | 再次启用 → 重新 `install 成功`，配置页页面恢复（计数归 0） | `47`–`53` |
+
+## 三、已实现但未验收
 
 1. `tools/jdk.ps1` 的探测顺序与报错信息（自动化路径已实测，异常机器环境未覆盖）。
 2. `extract-api.ps1` 的宿主版本/SHA-256 输出与 37 类阈值（本机通过，换宿主版本时只警告不阻断）。
-3. README 的 JDK 25 说明（文档改动，无运行验收项）。
+3. 适配层在**其它宿主版本**上的行为（当前只对 1.19.0 记录锚点；换版本应表现为「目标类/方法不存在」并停在不动手状态）。
+4. 宿主机浅色模式的截图（本轮宿主处于深色；浅色分支由同一 `isSystemInDarkTheme()` 决定，未单独截图）。
 
-## 三、尚待验证的技术方案
+## 四、尚待验证的技术方案
 
-1. **Gradle + Compose 构建链（批次 1）**：本机无 Gradle、GitHub/jitpack 不可达；Maven Central 可用。
-   需确认 Gradle 发行版、Kotlin、Compose 编译器插件与宿主 Compose 运行时的版本组合，
-   尤其是 Kotlin 版本必须能产出宿主可加载的 Compose 代码。
-2. **最小原生 Compose 页面挂载**：`replaceComposable` / `afterComposable` / `appendContent` 的
-   真实行为（哪个入口点、是否需要 `CLASS_TRANSFORM` 授权提示）尚未在 1.19.0 真机验证。
-3. **混淆锚点稳定性**：1.18.5 → 1.19.0 的宿主类名/参数名已发生变化，批次 1 需要运行期确认实际锚点，
-   不能硬编码旧版本字符串。
-4. **插件授权维度**：`PluginPermission.CLASS_TRANSFORM` 在 `plugin.json`/宿主设置里的授予方式未知
-   （当前 `project.json` 的 `permissions` 为空数组）。
+1. **宿主品牌配色**：宿主不使用 `MaterialTheme`、也不暴露配色 CompositionLocal，
+   插件页只能跟到系统深/浅色。后续若需要品牌色，只能解析宿主设置库（`spw.db`）或宿主自绘常量，属方案待定。
+2. **适配层锚点随宿主升级的稳定性**：1.19.0 已确认；1.20+ 需要重新核对锚点并更新适配层常量。
 
-## 四、明确阻塞项
+## 五、明确阻塞项
 
-1. 批次 1 是硬关卡：**最小原生 Compose 页面必须由用户真机确认**后才能进入批次 2
-   （PLAN 第 767 行：「最小原生页面尚未取得用户真机确认时，停在批次 1 交付验证包和复现说明」）。
-2. 网络限制：GitHub、jitpack.io 不可达，仅 Maven Central 可用；若 Gradle 发行版或 Compose 依赖
-   只能在 GitHub 获取，需要先解决下载渠道（或改用本机缓存）。
+1. ~~批次 1 硬关卡：最小原生 Compose 页面须用户真机确认~~ **已解除**：
+   用户在宿主「配置」页确认「显示在主窗口内 / 关闭后宿主配置恢复可点 / 右下角入口可重开」三项均正常，
+   批次 1 记为 0（通过），可进入批次 2。
+2. 网络限制：GitHub、jitpack.io 不可达（Gradle 发行版走腾讯镜像，依赖走 Maven Central），
+   因此官方 Workshop Gradle 插件不可用；本批继续使用自有 Python 打包器。
 
-## 五、复跑方式（批次 0 基线）
+## 六、复跑方式
 
-在工程根目录：
+在工程根目录（0.12.0 目标包名 `plugin-com.example.netease-0.11.60.spmod`，批次 5 才升到 0.12.0）：
 
-    pwsh -NoProfile -File tools/extract-api.ps1 -Force      # 需要时刷新宿主 API 并核对来源
-    pwsh -NoProfile -File build.ps1 -SkipApi
-    pwsh -NoProfile -File tools/verify-spmod.ps1 -Spmod build/dist/plugin-com.example.netease-0.11.59.spmod
-    pwsh -NoProfile -File harness/run-harness.ps1 -Spmod build/dist/plugin-com.example.netease-0.11.59.spmod
-    pwsh -NoProfile -File harness/run-regression.ps1 -Spmod build/dist/plugin-com.example.netease-0.11.59.spmod
-    pwsh -NoProfile -File harness/run-behavior.ps1 -Spmod build/dist/plugin-com.example.netease-0.11.59.spmod
+    pwsh -NoProfile -File tools/extract-api.ps1 -Force      # 需要时刷新宿主 API 并核对 37 类/SHA-256
+    pwsh -NoProfile -File build.ps1                         # JDK25 → Gradle → --package-only
+    pwsh -NoProfile -File tools/verify-spmod.ps1 -Spmod build/dist/plugin-com.example.netease-0.11.60.spmod
+    pwsh -NoProfile -File harness/run-harness.ps1 -Spmod build/dist/plugin-com.example.netease-0.11.60.spmod
+    pwsh -NoProfile -File harness/run-regression.ps1 -Spmod build/dist/plugin-com.example.netease-0.11.60.spmod
+    pwsh -NoProfile -File harness/run-behavior.ps1 -Spmod build/dist/plugin-com.example.netease-0.11.60.spmod
     python -m unittest discover -s harness/regression -p test_acceptance.py -v
 
-每条命令单独检查退出码；证据写 `build/evidence/batch0/`，不入库。
+每条命令单独检查退出码；证据写 `build/evidence/batchN/`，不入库。
 
-## 六、回退
+真机验收（本批新增工具，均只在本机使用、不进包）：
 
-本批只有构建/测试脚本与文档改动，无数据格式、配置键或插件 ID 变化。
-回退即恢复上一版工具链脚本；已归档的 0.11.59 包在 `build/baseline/0.11.59/`。
+    pwsh -NoProfile -File tools/host-restart.ps1 -Install   # 停宿主→校验 .spmod→替换目录→重启
+    pwsh -NoProfile -File harness/shot-window.ps1 -Out build/evidence/batch1/x.png
+    pwsh -NoProfile -File tools/host-click.ps1 -X <截图X> -Y <截图Y>   # 125% 缩放下的坐标换算点击
 
-## 七、本批提交
+注意：宿主为 Compose/AWT 自绘，UIA 拿不到按钮，只能截图 + 坐标点击；
+截图坐标 = 窗口左上为原点，点击换算 `virtual = (windowRect.Left + X) * 1.25`。
+按钮位置建议用像素颜色扫描确定，不要凭缩略图估算（会偏 40–60 px）。
 
-批次 0 独立提交（见 `git log` 中 `批次 0` 条目）。之后批次各自独立提交。
+## 七、回退
+
+本批新增 Gradle 构建链与 Kotlin/Compose 源码，但**未改**插件 ID、主类、扩展类、包内布局与数据格式。
+回退即：`git revert` 本批提交（恢复 `build.ps1`/`tools/build.py` 的纯 javac 路径），
+并用 `build/baseline/0.11.59/` 里的 0.11.59 包重新安装。
+运行时副作用：插件停用/卸载时会执行 `HostUiBridge.uninstall()`；若进程被强杀，Hook 随宿主进程消失，无残留。
+
+## 八、本批提交
+
+- 批次 0 独立提交：`f1bd594 0.12.0 批次 0：建立 JDK 25 可复现基线与宿主 1.19 API 核对`。
+- 批次 1 独立提交：见 `git log` 中「批次 1」条目（Gradle 构建链 + 原生 UI 适配层 + 最小页面）。
+- 之后批次各自独立提交；`docs/`、`build/` 不入库。

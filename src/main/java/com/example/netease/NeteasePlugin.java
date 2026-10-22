@@ -23,6 +23,7 @@ import com.example.netease.svc.NativeLibrary;
 import com.example.netease.svc.NativeStreamServer;
 import com.example.netease.svc.NetCheck;
 import com.example.netease.ui.AccountStatusWindow;
+import com.example.netease.ui.HostUiBridge;
 import com.example.netease.ui.LoginDialog;
 import com.example.netease.ui.PlaylistWindow;
 import com.example.netease.ui.SearchWindow;
@@ -358,6 +359,10 @@ public final class NeteasePlugin extends SpwPlugin {
                     + " 插件版本(上下文)=" + pluginVersion
                     + " 插件版本(MANIFEST)=" + PluginVersions.read());
             RuntimeCapabilities.setRuntime(spwVersion, channel);
+
+            // ③ 原生 UI 适配层（0.11.60 批次 1）：只在生命周期入口注册一次；
+            // 混淆名只出现在 Kotlin 适配层，Java 侧经反射进入，失败也只记日志。
+            HostUiBridge.install(spwVersion, pluginVersion);
 
             // ② 起线程（顺序敏感：HostBridgeWorker 必须先于一切宿主交互）
             HostBridgeWorker.get().start();
@@ -1253,7 +1258,9 @@ public final class NeteasePlugin extends SpwPlugin {
         SYNC.stop();
         VoxzenBridge.stop();
         try {
-            // ① 先销毁插件窗口：窗口若留着，插件停用后仍会滞留在宿主进程里（验收 A9）
+            // ① 先摘原生 UI Hook（宿主升级导致的失效也只记日志），再销毁旧窗口
+            HostUiBridge.uninstall();
+            // ①′ 销毁插件窗口：窗口若留着，插件停用后仍会滞留在宿主进程里（验收 A9）
             UiRegistry.disposeAll();
             // ② 停业务：账号线程收工（0.4.0 起 stop() 是终态；先断 IO 再有界 join，见 docs/00 §5）
             stopLegacyAudioMigration();

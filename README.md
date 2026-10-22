@@ -26,6 +26,15 @@ Eclipse Adoptium、`%USERPROFILE%\tools\jdk25` 等位置；都找不到且 `PATH
 
     pwsh -File build.ps1
 
+构建分三段：抽取宿主 API → Gradle Wrapper 编译 Java + Kotlin + Compose → Python 打包 `.spmod`。
+Gradle 发行版固定为 9.2.1 并做了 Wrapper 校验值校验（`gradle/wrapper/gradle-wrapper.properties`）；
+本机没有 Gradle 也能跑，Wrapper 会自己下载。Java 与 Kotlin 产物都落在 `build/plugin-classes`，
+Python 侧只做组装与自检（`tools/build.py --package-only --classes-dir build/plugin-classes`）。
+
+`gradle.properties` 里已固定 UTF-8 与 JDK 25 探测器（`JAVA_HOME` / `SPW_JDK_HOME`）。
+若网络访问不了 Gradle 官方发行版与 Maven Central，需要先改 Wrapper 的 `distributionUrl` 或加镜像；
+`settings.gradle.kts` 的仓库顺序是 Maven Central、Google Maven。
+
 产物在 build/dist/ 下。
 
 ## 开发验证

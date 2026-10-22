@@ -2,6 +2,7 @@
 build/
 harness/build/
 *.class
+.gradle/
 
 # ---- 从宿主运行时抽取的编译期 classpath：含宿主私有字节码，禁止入库 ----
 tools/.cache/

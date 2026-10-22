@@ -28,6 +28,16 @@ Set-StrictMode -Version 3.0
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Windows.Forms
 
+# DPI 感知：DISPLAY2 有缩放时，不做声明会让 GetWindowRect / CopyFromScreen 坐标系不一致，
+# 截出的图里窗口只占一角（见 10-host-initial.png 的 480px 左侧黑边）。
+if (-not ('ShotDpi' -as [type])) {
+    Add-Type -Namespace '' -Name 'ShotDpi' -MemberDefinition @'
+[DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(System.IntPtr value);
+[DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+'@
+}
+try { [void][ShotDpi]::SetProcessDpiAwarenessContext([IntPtr]::new(-4)) } catch { try { [void][ShotDpi]::SetProcessDPIAware() } catch { } }
+
 if (-not ('ShotWin32' -as [type])) {
     Add-Type -Namespace '' -Name 'ShotWin32' -MemberDefinition @'
 [DllImport("user32.dll")] public static extern bool GetWindowRect(System.IntPtr hWnd, out RECT lpRect);

@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     SPW 网易云插件 · .spmod 产物结构校验器（纯 PowerShell，零外部依赖）。
 
@@ -29,6 +29,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# 证据文件按 UTF-8 落盘（Windows PowerShell 控制台默认 GBK 会把中文写花）
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 Set-StrictMode -Version 3.0
 
 $RepoRoot    = Split-Path -Parent $PSScriptRoot

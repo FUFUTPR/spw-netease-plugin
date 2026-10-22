@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-零 Gradle 构建链：javac 编译 + 打 .spmod 包。
+插件打包器：javac（兼容模式）或复用 Gradle 产物 + 打 .spmod 包。
 
-本机没有 gradle / 7z / jar，所以整条链路只用 javac + Python 标准库：
+0.12.0 批次 1 起 Java/Kotlin/Compose 由 Gradle 统一编译，本脚本默认由 build.ps1 以
+--package-only 调用，只负责组装与自检；不带参数时仍保留纯 javac 的兼容路径：
 
     1. 读取仓库根 project.json（唯一事实来源：插件 ID / 版本 / 打包参数）
-    2. javac(JDK 25) --release 21 -cp "宿主抽取的 API jar;pf4j.jar" 编译 src/main/java
+    2. javac(JDK 25) --release <javaRelease> -cp "宿主抽取的 API jar;pf4j.jar" 编译 src/main/java
        —— 宿主 1.19.0 的 API class 是 Java 25（class 69），必须用 JDK 25 的 javac 读；
-          产物仍按 --release 21 生成（宿主运行时 = JDK 25，可向下兼容）
+          project.json 的 javaRelease 已随批次 1 改为 25
+    2′. --package-only --classes-dir build/plugin-classes：完全不调用 javac，也不清空输入目录
     3. 把 src/main/resources 平铺进 classes/ 根
     4. 组装 .spmod 目录结构（这个结构就是宿主解压后的插件目录）：
          META-INF/MANIFEST.MF                     <- 根 manifest（PF4J 用 ManifPluginDescriptorFinder 读它）
@@ -25,12 +27,14 @@
 用法：
     python tools/build.py
     python tools/build.py --no-clean
+    python tools/build.py --package-only --classes-dir build/plugin-classes
 """
 
 from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import locale
 import os
@@ -304,7 +308,11 @@ def compile_java(project: dict, javac: str, sources: list[Path], extra_cp: list[
 # --------------------------------------------------------------------------- 组装 / 打包
 
 
-def stage_plugin(project: dict, manifest: bytes) -> None:
+def stage_plugin(project: dict, manifest: bytes, classes_dir: Path) -> int:
+    """把 classes_dir 的编译产物与资源装进 STAGE；返回复制的资源文件数。
+
+    只清理 STAGE（本次输出），绝不清空 classes_dir（可能是 Gradle 的输出）。
+    """
     if STAGE.exists():
         shutil.rmtree(STAGE)
     (STAGE / "META-INF").mkdir(parents=True, exist_ok=True)
@@ -312,7 +320,9 @@ def stage_plugin(project: dict, manifest: bytes) -> None:
     (STAGE / "lib").mkdir(parents=True, exist_ok=True)
 
     # --- classes/：编译产物 + 资源
-    copy_tree(CLASSES, STAGE / "classes")
+    copy_tree(classes_dir, STAGE / "classes")
+    res_dir = ROOT / project["resourceDir"]
+    res_count = copy_tree(res_dir, STAGE / "classes") if res_dir.exists() else 0
 
     # --- manifest：根目录一份（PF4J 读）+ classes/META-INF 一份（插件自己按 /META-INF/MANIFEST.MF 读版本号）
     (STAGE / "META-INF" / "MANIFEST.MF").write_bytes(manifest)
@@ -335,6 +345,8 @@ def stage_plugin(project: dict, manifest: bytes) -> None:
         for jar in sorted(libdir.glob("*.jar")):
             shutil.copy2(jar, STAGE / "lib" / jar.name)
             lib_count += 1
+
+    return res_count
 
 
 def make_spmod(project: dict) -> Path:
@@ -411,10 +423,41 @@ def verify_spmod(spmod: Path, project: dict) -> list[str]:
             except Exception as exc:  # noqa: BLE001
                 problems.append(f"preference_config.json 不是合法 JSON：{exc}")
 
-        # 打包污染检查：宿主 API / PF4J 绝不能进包
+        # --- 批次 1 起的打包污染检查（Gradle 编译 Java+Kotlin+Compose）---
+        # 宿主 API / PF4J / Kotlin / Compose 运行时都是 compileOnly，绝不能进包。
+        forbidden_prefixes = (
+            "classes/com/xuncorp/",
+            "classes/org/pf4j/",
+            "classes/kotlin/",
+            "classes/androidx/",
+            "classes/org/jetbrains/",
+        )
         for name in names:
-            if name.startswith("classes/com/xuncorp/") or name.startswith("classes/org/pf4j/"):
-                problems.append(f"包内混入宿主/PF4J 类：{name}")
+            for prefix in forbidden_prefixes:
+                if name.startswith(prefix):
+                    problems.append(f"包内混入编译期依赖：{name}")
+                    break
+
+        # lib/*.jar 内部也要查：第三方 jar 里不得夹带宿主/PF4J/插件自己的类
+        for name in names:
+            if not (name.startswith("lib/") and name.endswith(".jar")):
+                continue
+            try:
+                with zipfile.ZipFile(io.BytesIO(z.read(name))) as inner:
+                    for entry in inner.namelist():
+                        if entry.startswith(("com/xuncorp/", "org/pf4j/", "com/example/netease/")):
+                            problems.append(f"lib/{name} 内夹带不该打包的类：{entry}")
+                            break
+            except zipfile.BadZipFile:
+                problems.append(f"lib/{name} 不是合法 jar")
+
+        # 权限声明：project.json 里写了就必须真的进 manifest（宿主据此让用户授权）
+        if "META-INF/MANIFEST.MF" in names and project.get("permissions"):
+            perms = parse_manifest(z.read("META-INF/MANIFEST.MF")).get("Plugin-Permissions", "")
+            declared = {p.strip() for p in perms.split(",") if p.strip()}
+            for perm in project["permissions"]:
+                if perm not in declared:
+                    problems.append(f"manifest 缺少权限声明：{perm}（实际 {sorted(declared)}）")
     return problems
 
 
@@ -475,9 +518,13 @@ def _release_build_lock(_flag) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="零 Gradle 构建：javac + 打 .spmod")
+    parser = argparse.ArgumentParser(description="零 Gradle 构建：javac + 打 .spmod（或 --package-only 只打包）")
     parser.add_argument("--no-clean", action="store_true", help="不清理 build/classes 与 build/stage")
+    parser.add_argument("--package-only", action="store_true", help="只打包：复用 --classes-dir 的编译产物，不调用 javac、不清空输入目录")
+    parser.add_argument("--classes-dir", default=None, help="编译产物目录（--package-only 必填，默认 build/classes）")
     args = parser.parse_args()
+    if args.package_only and not args.classes_dir:
+        parser.error("--package-only 必须配合 --classes-dir <目录>")
     _flag = _acquire_build_lock()
     try:
         return _run_build(args)
@@ -490,33 +537,54 @@ def _run_build(args) -> int:
     project = load_project()
     log(f"== 构建 {project['pluginId']} v{project['version']} ({project['name']}) ==")
 
-    ensure_api_jars()
-    javac = find_javac()
+    classes_dir = (ROOT / args.classes_dir).resolve() if args.classes_dir else CLASSES
 
-    if not args.no_clean:
-        for d in (CLASSES, STAGE):
-            if d.exists():
-                shutil.rmtree(d)
-    CLASSES.mkdir(parents=True, exist_ok=True)
-    log(f"  javac = {javac} (major {_javac_major(javac)})")
-    log(f"  API   = {API_JAR.name}  PF4J = {PF4J_JAR.name}")
+    if args.package_only:
+        # 只打包：不调用 javac、不要求 JDK、不清空输入目录（批次 1 起由 Gradle 编译）。
+        if not classes_dir.is_dir():
+            die(f"--package-only 的 classes 目录不存在：{classes_dir}")
+        class_count = sum(1 for _ in classes_dir.rglob("*.class"))
+        if class_count == 0:
+            die(f"classes 目录里没有 .class：{classes_dir}（先跑 Gradle compilePluginClasses？）")
+        main_class_file = classes_dir / (project["mainClass"].replace(".", "/") + ".class")
+        if not main_class_file.is_file():
+            die(f"classes 目录缺少主类 {project['mainClass']}：{classes_dir}")
+        log("  mode    = package-only（不调用 javac，输入目录保持不变）")
+        log(f"  classes = {classes_dir}（{class_count} 个 .class）")
+    else:
+        # 0.11.60 起 Java + Kotlin + Compose 由 Gradle 编译：纯 javac 路径无法产出完整插件。
+        kotlin_src = ROOT / "src" / "main" / "kotlin"
+        if kotlin_src.is_dir() and any(kotlin_src.rglob("*.kt")):
+            die(
+                "检测到 src/main/kotlin（Kotlin/Compose 源码），纯 javac 路径不能产出完整插件；"
+                "请改用 build.ps1，或先 gradlew compilePluginClasses 再 "
+                "python tools/build.py --package-only --classes-dir build/plugin-classes"
+            )
+        ensure_api_jars()
+        javac = find_javac()
 
-    src_dir = ROOT / project["sourceDir"]
-    if not src_dir.exists():
-        die(f"源码目录不存在：{src_dir}")
-    sources = collect_sources(src_dir)
-    if not sources:
-        die(f"{src_dir} 下没有 .java 文件")
+        if not args.no_clean:
+            for d in (CLASSES, STAGE):
+                if d.exists():
+                    shutil.rmtree(d)
+        CLASSES.mkdir(parents=True, exist_ok=True)
+        log(f"  javac = {javac} (major {_javac_major(javac)})")
+        log(f"  API   = {API_JAR.name}  PF4J = {PF4J_JAR.name}")
 
-    extra_cp = sorted((ROOT / project.get("libDir", "libs")).glob("*.jar")) if (ROOT / project.get("libDir", "libs")).exists() else []
-    compile_java(project, javac, sources, extra_cp)
+        src_dir = ROOT / project["sourceDir"]
+        if not src_dir.exists():
+            die(f"源码目录不存在：{src_dir}")
+        sources = collect_sources(src_dir)
+        if not sources:
+            die(f"{src_dir} 下没有 .java 文件")
 
-    res_dir = ROOT / project["resourceDir"]
-    res_count = copy_tree(res_dir, CLASSES) if res_dir.exists() else 0
-    log(f"  资源 {res_count} 个")
+        libs_dir = ROOT / project.get("libDir", "libs")
+        extra_cp = sorted(libs_dir.glob("*.jar")) if libs_dir.exists() else []
+        compile_java(project, javac, sources, extra_cp)
 
     manifest = build_manifest(project)
-    stage_plugin(project, manifest)
+    res_count = stage_plugin(project, manifest, classes_dir)
+    log(f"  资源 {res_count} 个")
     spmod = make_spmod(project)
 
     problems = verify_spmod(spmod, project)
