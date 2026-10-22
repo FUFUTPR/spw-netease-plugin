@@ -267,6 +267,12 @@ public final class NativeLibrary {
      */
     public static Result sync(List<Entry> entries, String urlPrefix, List<CoverArt.Cover> covers,
                               Map<String, Long> playlistCoverTimes) {
+        return sync(entries, urlPrefix, covers, playlistCoverTimes, () -> true);
+    }
+
+    public static Result sync(List<Entry> entries, String urlPrefix, List<CoverArt.Cover> covers,
+                              Map<String, Long> playlistCoverTimes, java.util.function.BooleanSupplier valid) {
+        if (!valid.getAsBoolean()) { throw new java.util.concurrent.CancellationException("写库任务已失效"); }
         if (entries == null || entries.isEmpty()) {
             return new Result(0, 0, 0, null, "没有要同步的歌单");
         }
@@ -281,6 +287,7 @@ public final class NativeLibrary {
             }
             try {
                 Result r = writeOn(new JdbcSql(c), entries, urlPrefix, backup, covers, playlistCoverTimes);
+                if (!valid.getAsBoolean()) { throw new java.util.concurrent.CancellationException("提交前任务已失效"); }
                 c.commit();
                 PluginLog.i(TAG, "曲库同步完成（外部 JDBC 连接）：" + r + "（备份 " + backup + "，曲库 " + describe() + "）");
                 return new Result(r.playlists(), r.tracks(), r.links(), r.covers(), backup, null);
@@ -295,7 +302,9 @@ public final class NativeLibrary {
                 throw t;
             }
         } catch (Throwable t) {
-            PluginLog.e(TAG, "曲库同步失败（本轮已中止、已回滚）：" + t, t);
+            if (t instanceof java.util.concurrent.CancellationException) {
+                PluginLog.i(TAG, "曲库同步已取消并回滚");
+            } else { PluginLog.e(TAG, "曲库同步失败（本轮已中止、已回滚）：" + t, t); }
             return new Result(0, 0, 0, backup, String.valueOf(t));
         }
     }

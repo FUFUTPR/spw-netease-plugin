@@ -107,6 +107,18 @@ public final class HostSqlBridge {
     /** 在宿主连接上跑的任务；返回值原样交回调用方。 */
     public interface HostTask<T> {
         T run(Sql sql) throws Exception;
+        default void checkValid() { }
+    }
+
+    /** A stale operation must roll back, never fall through to another write route. */
+    public static <T> HostTask<T> guarded(java.util.function.BooleanSupplier valid, HostTask<T> task) {
+        return new HostTask<>() {
+            public void checkValid() {
+                if (!valid.getAsBoolean()) { throw new java.util.concurrent.CancellationException("写库任务已失效"); }
+                task.checkValid();
+            }
+            public T run(Sql sql) throws Exception { checkValid(); return task.run(sql); }
+        };
     }
 
     /**
@@ -119,12 +131,14 @@ public final class HostSqlBridge {
         if (task == null) {
             return null;
         }
+        java.util.concurrent.atomic.AtomicBoolean abandoned = new java.util.concurrent.atomic.AtomicBoolean();
+        HostTask<T> guardedTask = guarded(() -> !abandoned.get(), task);
         CountDownLatch done = new CountDownLatch(1);
         AtomicReference<Object> out = new AtomicReference<>();
         AtomicReference<Throwable> err = new AtomicReference<>();
         Runnable job = () -> {
             try {
-                out.set(runOnWorker(dbPath, task));
+                out.set(runOnWorker(dbPath, guardedTask));
             } catch (Throwable t) {
                 err.set(t);
             } finally {
@@ -139,15 +153,16 @@ public final class HostSqlBridge {
         }
         try {
             if (!done.await(TOTAL_WAIT_MS, TimeUnit.MILLISECONDS)) {
-                PluginLog.w(TAG, "宿主同连接写库：等待超时 " + TOTAL_WAIT_MS + "ms，回退外部 JDBC");
-                return null;
+                abandoned.set(true);
+                throw new TaskFailure(new java.util.concurrent.CancellationException("宿主写库超时；中止任务，禁止重复提交"));
             }
         } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
-            PluginLog.w(TAG, "宿主同连接写库：等待被中断，回退外部 JDBC");
-            return null;
+            abandoned.set(true);
+            throw new TaskFailure(new java.util.concurrent.CancellationException("宿主写库等待被中断；中止任务"));
         }
         if (err.get() != null) {
+            abandoned.set(true);
             // 0.11.7（P0 铁律 4）：任务体在宿主连接上「被 SQL 拒绝」（约束/外键/影响行数不符）不是
             // 「通路不可用」——原样上抛，让调用方中止本轮，**绝不许**换个通路把同一批语句重跑一遍。
             TaskFailure tf = findTaskFailure(err.get());
@@ -229,6 +244,10 @@ public final class HostSqlBridge {
             return;
         }
         Throwable cause = tf.getCause() == null ? tf : tf.getCause();
+        if (cause instanceof java.util.concurrent.CancellationException) {
+            PluginLog.i(TAG, "宿主写库任务已取消，禁止换通路重跑");
+            throw tf;
+        }
         PluginLog.e(TAG, "宿主同连接写库**数据失败**（" + way + "：SQL 被拒 / 约束或外键不通过）⇒ 本轮中止，"
                 + "**不换通路重跑**（0.11.6 就是换通道重跑写出 5935 条孤儿关联行的）：" + brief(cause), cause);
         throw tf;
@@ -338,15 +357,13 @@ public final class HostSqlBridge {
                 : "池通路：useConnection 直接返回 " + outcomeDesc(invoked) + "，等写入块回调（" + BLOCK_GRACE_MS + "ms 宽限）");
         if (didSuspend) {
             if (!finished.await(POOL_WAIT_MS, TimeUnit.MILLISECONDS)) {
-                return Outcome.fail("useConnection 挂起后 " + POOL_WAIT_MS + "ms 内没有续体回调"
-                        + "（块被回调=" + ran.get() + "，语句=" + stmts.get() + " 条）");
+                throw new TaskFailure(new java.util.concurrent.CancellationException("宿主连接挂起超时，禁止换通路重跑"));
             }
         } else {
             // 未挂起返回：块可能已跑完（本线程同步回调），也可能被派到别的线程稍后跑。
             // 判据用「块跑完」而不是「续体回来」——未挂起时续体根本不会来，等它就是白等满宽限。
             if (!blockDone.await(BLOCK_GRACE_MS, TimeUnit.MILLISECONDS)) {
-                PluginLog.w(TAG, "池通路：宽限 " + BLOCK_GRACE_MS + "ms 内写入块未跑完（已回调=" + ran.get()
-                        + "，语句=" + stmts.get() + " 条）");
+                throw new TaskFailure(new java.util.concurrent.CancellationException("宿主写入块超时，禁止换通路重跑"));
             }
         }
         if (failure.get() != null) {
@@ -465,6 +482,7 @@ public final class HostSqlBridge {
      * 第一条写语句时才升级写锁；pool 连接已由 Room 配好 busy_timeout，自带连接我们自己设。</p>
      */
     private static <T> T writeInTransaction(HostSql sql, Object conn, HostTask<T> task) throws Exception {
+        task.checkValid();
         boolean own = !inTransaction(conn);
         boolean begun = false;
         if (own) {
@@ -472,11 +490,12 @@ public final class HostSqlBridge {
                 sql.exec("BEGIN");
                 begun = true;
             } catch (Throwable t) {
-                PluginLog.w(TAG, "宿主连接上开事务失败（改为逐条自动提交）：" + brief(t));
+                throw new TaskFailure(t); // no partial autocommit on failed BEGIN
             }
         }
         try {
             T value = task.run(sql);
+            task.checkValid();
             if (begun) {
                 sql.exec("COMMIT");
             }

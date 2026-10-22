@@ -141,6 +141,25 @@ public final class HostTrackListGate {
             "UPDATE Track SET readable = readable WHERE rowid = (SELECT MIN(rowid) FROM Track)";
 
     private static volatile boolean installed;
+    private static volatile boolean gateActive = true;
+    private record Replacement(Field field, Object owner, Object before, Object after) { }
+    private static final java.util.List<Replacement> REPLACEMENTS = new java.util.ArrayList<>();
+
+    /** Run only on HostBridgeWorker; restore only slots still owned by this plugin. */
+    public static void uninstallOnWorker() {
+        gateActive = false;
+        var changes = java.util.List.copyOf(REPLACEMENTS);
+        for (int i = changes.size() - 1; i >= 0; i--) {
+            var change = changes.get(i);
+            try {
+                if (change.field().get(change.owner()) != change.after()) { continue; }
+                if (change.owner() == null) { putStaticFinal(change.field(), change.before()); }
+                else { change.field().set(change.owner(), change.before()); }
+            } catch (Throwable error) { PluginLog.w(TAG, "恢复宿主字段失败：" + brief(error)); }
+        }
+        REPLACEMENTS.clear();
+        installed = scanGateInstalled = refreshGateInstalled = false;
+    }
 
     private static volatile String lastNote = "尚未安装（宿主 UI 若已建流，需重进歌曲页或重启宿主）";
 
@@ -336,6 +355,7 @@ public final class HostTrackListGate {
                 return m.invoke(originalLazy,a);
             });
             slot.set(db, replacement);
+            REPLACEMENTS.add(new Replacement(slot, db, original, replacement));
             Object scanGate = Proxy.newProxyInstance(dao.getClassLoader(), new Class<?>[]{dao}, new DaoGate(scanOriginal));
             String why = putStaticFinal(scan, scanGate);
             if (why != null) {
@@ -684,6 +704,7 @@ public final class HostTrackListGate {
     private static String putStaticFinal(Field f, Object value) {
         try {
             f.setAccessible(true);
+            Object before = f.get(null);
             Class<?> uc = Class.forName("sun.misc.Unsafe");
             Field theUnsafe = uc.getDeclaredField("theUnsafe");
             theUnsafe.setAccessible(true);
@@ -692,6 +713,7 @@ public final class HostTrackListGate {
             Object off = uc.getMethod("staticFieldOffset", Field.class).invoke(u, f);
             uc.getMethod("putObject", Object.class, long.class, Object.class)
                     .invoke(u, base, off, value);
+            if (before != value) { REPLACEMENTS.add(new Replacement(f, null, before, value)); }
             return null;
         } catch (Throwable t) {
             return brief(t);
@@ -912,6 +934,7 @@ public final class HostTrackListGate {
      * {@code ArrayList}，反射 {@code getId()} 抛异常被吞 ⇒ 整份放行）。
      */
     private static Object transform(Object element) {
+        if (!gateActive) { return element; }
         if (!(element instanceof List<?>)) {
             return element;                       // 元素不是列表（宿主结构不符）⇒ 原样放行
         }

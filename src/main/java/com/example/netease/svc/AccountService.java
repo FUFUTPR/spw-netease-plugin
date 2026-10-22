@@ -150,6 +150,9 @@ public final class AccountService {
     /** {@link #stop()} 等账号线程真正退出的上限（宿主停用不该被卡在 socket 读上的线程拖住）。 */
     private static final long STOP_JOIN_MS = 1500L;
 
+    private static final java.util.concurrent.atomic.AtomicLong SESSION_EPOCH = new java.util.concurrent.atomic.AtomicLong();
+    public static long sessionEpoch() { return SESSION_EPOCH.get(); }
+
     private static volatile LoginStatus status =
             new LoginStatus(State.NONE, "未登录", "", 0L, false, "", 0L);
     private static volatile Dto.QrSession qr;
@@ -919,6 +922,7 @@ public final class AccountService {
 
     /** 退出登录：**立即**清内存快照（UI 立刻变「未登录」），落盘删除在账号线程上做。 */
     public static void logout() {
+        SESSION_EPOCH.incrementAndGet();
         qr = null;
         qrKey = null;
         POLL_PENDING.set(false);
@@ -1528,7 +1532,7 @@ public final class AccountService {
         return t != null && Thread.currentThread() == t;
     }
 
-    private static void setStatus(LoginStatus s) {
+    private static synchronized void setStatus(LoginStatus s) {
         if (s == null) {
             return;
         }
@@ -1542,6 +1546,10 @@ public final class AccountService {
                 && cur.vip() == s.vip()
                 && java.util.Objects.equals(cur.vipName(), s.vipName())) {
             return;
+        }
+        if (cur == null || cur.uid() != s.uid()
+                || (cur.state() == State.LOGGED_IN) != (s.state() == State.LOGGED_IN)) {
+            SESSION_EPOCH.incrementAndGet();
         }
         status = s;
     }

@@ -36,6 +36,7 @@ public final class HostBridgeWorker {
     private final LinkedBlockingDeque<Runnable> queue = new LinkedBlockingDeque<>(CAPACITY);
     private volatile Thread thread;
     private volatile boolean running;
+    private volatile boolean closing;
 
     /** 上一个任务的耗时与当前任务起点：用于给「快车道为什么还等了 N ms」归因（0.11.12 真机取证）。 */
     private static volatile long lastTaskMs = -1L;
@@ -53,6 +54,7 @@ public final class HostBridgeWorker {
         if (running) {
             return;
         }
+        closing = false;
         running = true;
         Thread t = new Thread(this::loop, "spw-netease-host");
         t.setDaemon(true);
@@ -77,6 +79,27 @@ public final class HostBridgeWorker {
         }
     }
 
+    /** Reject new work, discard stale queued work, then restore hooks on the host thread. */
+    public void stopWithCleanup(Runnable cleanup) {
+        java.util.concurrent.CountDownLatch done = new java.util.concurrent.CountDownLatch(1);
+        Runnable last = () -> {
+            try { cleanup.run(); }
+            finally { stop(); done.countDown(); }
+        };
+        synchronized (this) {
+            if (!running) { return; }
+            closing = true;
+            queue.clear();
+            if (!isOnWorkerThread()) { queue.offerFirst(last); }
+        }
+        if (isOnWorkerThread()) { last.run(); return; }
+        try {
+            if (!done.await(2000L, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                PluginLog.w("host", "停止清理仍等待当前宿主任务结束；已拒绝新任务");
+            }
+        } catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }
+    }
+
     public boolean isOnWorkerThread() {
         return Thread.currentThread() == thread && thread != null;
     }
@@ -90,7 +113,7 @@ public final class HostBridgeWorker {
         if (task == null) {
             return false;
         }
-        if (!running) {
+        if (!running || closing) {
             PluginLog.w("host", "宿主交互线程未启动，任务被丢弃");
             return false;
         }
@@ -116,7 +139,7 @@ public final class HostBridgeWorker {
         if (task == null) {
             return false;
         }
-        if (!running) {
+        if (!running || closing) {
             PluginLog.w("host", "宿主交互线程未启动，快车道任务被丢弃");
             return false;
         }
