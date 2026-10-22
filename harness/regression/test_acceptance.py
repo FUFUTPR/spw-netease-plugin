@@ -73,6 +73,9 @@ class PreservationTests(unittest.TestCase):
             evidence = root / 'evidence'
             plugin = root / 'workshop/plugins' / f"plugin-{project['pluginId']}-{project['version']}"
             plugin.mkdir(parents=True)
+            (plugin / 'META-INF').mkdir()
+            (plugin / 'META-INF/MANIFEST.MF').write_text(
+                f"Plugin-Id: {project['pluginId']}\nPlugin-Version: {project['version']}\n", encoding='utf-8')
             for i in range(61):
                 (plugin / str(i)).touch()
             args = ['pwsh', '-NoProfile', '-File', str(ROOT / 'tools/accept-host.ps1'),

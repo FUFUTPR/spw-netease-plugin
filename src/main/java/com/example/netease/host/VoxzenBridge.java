@@ -159,6 +159,9 @@ public final class VoxzenBridge {
     /** 0.3.11：直调装载器时，动态代理 Continuation 收到的 {@code resumeWith} 结果（可读文本）。 */
     private static final AtomicReference<String> RESUME = new AtomicReference<>();
 
+    private static final java.util.concurrent.ConcurrentMap<Integer, String> PLAY_REPORTS = new java.util.concurrent.ConcurrentHashMap<>();
+    public static String playbackReport(int requestId) { return PLAY_REPORTS.get(requestId); }
+
     private static volatile String lastResult = "在线播放：未开始";
     private static volatile long lastPlayAtMs;
     private static volatile String lastUrlMeta = "";
@@ -192,13 +195,22 @@ public final class VoxzenBridge {
      * @param level       音质档（standard/higher/exhigh/lossless/hires），空则用配置默认
      */
     public static void playOnline(long songId, String title, String artist, String album, String level) {
+        requestOnline(songId, title, artist, album, "", level);
+    }
+    public static int playOnlineRequest(Dto.Song song, String level) {
+        return requestOnline(song.id(), song.name(), song.artists(), song.album(), song.picUrl(), level);
+    }
+    private static int requestOnline(long songId, String title, String artist, String album, String picUrl, String level) {
         final int seq = SEQ.incrementAndGet();
+        set(seq, "正在解析音源…");
         try {
             NET.execute(() -> {
                 // level 为空表示“跟随插件配置”。必须先解析后再取直链：NeteaseApi 对空值有
                 // 自己的兼容默认值（exhigh）；若直接把 null 传下去，会把 320k 直链错误地
                 // 记到 lossless/hires 的缓存键下，表现成“切到最高音质仍然是低音质”。
                 String effectiveLevel = effectiveLevel(level);
+                try { com.example.netease.svc.CoverStore.ensure(album, artist, picUrl); }
+                catch (Throwable coverError) { PluginLog.d(TAG, "搜索封面准备失败，播放继续"); }
                 String direct;
                 try {
                     direct = NeteaseApi.songUrl(songId, effectiveLevel);
@@ -236,12 +248,16 @@ public final class VoxzenBridge {
                 LyricService.prefetch(
                         List.of(new Dto.Song(songId, title, artist, album, 0L, 0, true, "")),
                         Map.of(songId, playbackUrl));
-                HostBridgeWorker.get().submit(
-                        () -> injectOnWorker(seq, songId, title, artist, album, playbackUrl));
+                if (!HostBridgeWorker.get().submit(
+                        () -> injectOnWorker(seq, songId, title, artist, album, playbackUrl))) {
+                    set(seq, "播放失败：宿主交互线程不可用，请启用插件后重试");
+                }
             });
         } catch (Throwable t) {
+            set(seq, "播放请求失败：" + brief(t));
             PluginLog.e(TAG, "在线播放投递失败（已吞）", t);
         }
+        return seq;
     }
 
     // ------------------------------------------------------------ 对外：试一首
@@ -3418,6 +3434,8 @@ public final class VoxzenBridge {
     // ------------------------------------------------------------ 文本工具
 
     private static void set(int seq, String text) {
+        PLAY_REPORTS.put(seq, text);
+        if (PLAY_REPORTS.size() > 64) { PLAY_REPORTS.keySet().removeIf(id -> id < seq - 32); }
         lastResult = "#" + seq + " " + text;
         lastPlayAtMs = System.currentTimeMillis();
     }

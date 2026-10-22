@@ -168,9 +168,13 @@ function Invoke-Post {
     Write-Step '真机验收证据采集（Post）'
     if (-not (Test-Path -LiteralPath $BaselineJson)) { Write-Bad "缺少基线 $BaselineJson —— 请先跑 -Phase Pre"; exit 1 }
     $base = Get-Content -LiteralPath $BaselineJson -Raw | ConvertFrom-Json
-    if ($base.dataRoot -ne $DataRoot -or $base.pluginId -ne $PluginId -or $base.pluginVersion -ne $PluginVersion -or $base.devMode -ne $DevMode) {
+    if ($base.dataRoot -ne $DataRoot -or $base.pluginId -ne $PluginId -or $base.devMode -ne $DevMode) {
         throw 'Baseline identity/version/root/dev mode mismatch; rerun Pre for this target.'
     }
+    # Post is bound to the exact package captured by Pre, even after source version advances.
+    $PluginVersion = $base.pluginVersion
+    $PluginDirName = "plugin-$PluginId-$PluginVersion"
+    $PluginDir = Join-Path $PluginsDir $PluginDirName
     if ($base.isTempRoot) { Write-Unk "沙盒自测模式（DataRoot = $($base.dataRoot)）：下面结果**不是真机证据**，只用于验证本脚本自身" }
 
     $procs = @(Get-SpwProcess)
@@ -198,6 +202,15 @@ function Invoke-Post {
 
     $fileCount = if (Test-Path -LiteralPath $PluginDir) { @(Get-ChildItem -LiteralPath $PluginDir -Recurse -File).Count } else { 0 }
     $hostLogTail = if (Test-Path -LiteralPath $HostLog) { Get-DeltaText -File $HostLog -Offset $base.hostLogOffset } else { '' }
+    $manifestPath = Join-Path $PluginDir 'META-INF/MANIFEST.MF'
+    $installedVersion = $null
+    $installedId = $null
+    if (Test-Path -LiteralPath $manifestPath) {
+        $manifest = Get-Content -LiteralPath $manifestPath -Raw
+        if ($manifest -match '(?m)^Plugin-Version:\s*([^\r\n]+)') { $installedVersion = $Matches[1].Trim() }
+        if ($manifest -match '(?m)^Plugin-Id:\s*([^\r\n]+)') { $installedId = $Matches[1].Trim() }
+    }
+    $identityMatch = $installedVersion -eq $PluginVersion -and $installedId -eq $PluginId
     $dbResult = & python $DbGate check $SpwDb $DbBaseline
     $dbCode = $LASTEXITCODE
     $hostLogFatal = @()
@@ -211,7 +224,7 @@ function Invoke-Post {
     Write-Step '判定表'
     $rows = @()
     foreach ($r in @(
-        [pscustomobject]@{ Id = 'A1';  Item = '插件目录已就位';            Verdict = $(if ($fileCount -ge $MinFiles) { 'PASS' } else { 'FAIL' });   Detail = "$fileCount 个文件（阈值 $MinFiles），路径 $PluginDir" },
+        [pscustomobject]@{ Id = 'A1';  Item = '插件目录已就位';            Verdict = $(if ($fileCount -ge $MinFiles -and $identityMatch) { 'PASS' } else { 'FAIL' });   Detail = "$fileCount 个文件（阈值 $MinFiles）；Manifest id=$installedId version=$installedVersion，预期 $PluginId $PluginVersion" },
         [pscustomobject]@{ Id = 'A2';  Item = '插件日志出现「启动完成」';   Verdict = $(if ($hasStart) { 'PASS' } else { 'FAIL' });                   Detail = 'start() 跑到底的机器侧证据' },
         [pscustomobject]@{ Id = 'A3';  Item = '无 ERROR / 无致命异常';      Verdict = $(if ($fatalHits.Count -gt 0) { 'FAIL' } elseif ($errCount -eq 0) { 'PASS' } else { 'FAIL' }); Detail = "ERROR=$errCount WARN=$warnCount 致命异常=$(if ($fatalHits.Count) { $fatalHits -join ',' } else { '无' })" },
         [pscustomobject]@{ Id = 'A4'; Item = '开发者模式 toast 策略'; Verdict = $(if (-not $modeObserved) { 'UNKNOWN' } elseif ($DevMode -eq 'Off' -and $hasToast) { 'FAIL' } elseif ($DevMode -eq 'Off') { 'PASS' } elseif ($hasToast) { 'PASS' } else { 'UNKNOWN' }); Detail = "模式=$DevMode 调度记录=$($toastLines.Count)；模式需在本次配置日志中确认，画面另验" },

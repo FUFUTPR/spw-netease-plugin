@@ -1,6 +1,8 @@
 package com.example.netease.ui;
 
 import com.example.netease.core.PluginLog;
+import com.example.netease.cfg.PluginConfig;
+import com.example.netease.host.VoxzenBridge;
 import com.example.netease.net.Dto;
 import com.example.netease.net.NeteaseApi;
 
@@ -25,15 +27,13 @@ import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 
 /**
  * 搜索窗口（P2，Lead 所有）。
  *
  * <p>线程规则（docs/00 §4 铁律）：
  * <ul>
- *   <li>网络搜索<b>只在自己的单线程池</b>里跑（{@code netease-search} 守护线程），<b>绝不在 EDT</b>，
+ *   <li>网络搜索<b>只在自己的有界后台线程池</b>里跑（{@code netease-search} 守护线程），<b>绝不在 EDT</b>，
  *       也不占用 {@code HostBridgeWorker}（那个线程专供宿主对象访问，不能被 2 秒级网络请求阻塞）；</li>
  *   <li>所有 UI 变更回到 EDT（{@code SwingUtilities.invokeLater}）；</li>
  *   <li>窗口注册进 {@link UiRegistry}，插件停用时被 {@code disposeAll()} 关掉，不会滞留在宿主进程里。</li>
@@ -91,14 +91,16 @@ public final class SearchWindow {
     private final SearchModel searchModel = new SearchModel();
     private final JTable searchTable = new JTable(searchModel);
 
-    private final ExecutorService pool = Executors.newSingleThreadExecutor(r -> {
-        Thread t = new Thread(r, "netease-search");
-        t.setDaemon(true);
-        return t;
-    });
+    private final LatestTask requests = new LatestTask("netease-search");
+    private final JButton playBtn = new JButton("播放所选");
+    private final JButton retryBtn = new JButton("重试");
+    private final JLabel resultSource = new JLabel("暂无搜索结果");
+    private javax.swing.Timer playbackTimer;
+    private Runnable retry = this::doSearch;
+    private boolean closed;
 
     private SearchWindow() {
-        searchTable.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
+        searchTable.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
         searchTable.setRowHeight(22);
         searchTable.getTableHeader().setReorderingAllowed(false);
 
@@ -115,6 +117,11 @@ public final class SearchWindow {
         top.add(searchBtn);
 
         JPanel bottom = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 6));
+        bottom.add(resultSource);
+        bottom.add(playBtn);
+        bottom.add(retryBtn);
+        playBtn.setEnabled(false);
+        retryBtn.setEnabled(false);
         bottom.add(status);
         busy.setIndeterminate(true);
         busy.setVisible(false);
@@ -133,6 +140,18 @@ public final class SearchWindow {
         searchBtn.addActionListener(e -> doSearch());
         keyword.addActionListener(e -> doSearch());
         DecimalRenderer.apply(searchTable, 1, 2, 3);
+        playBtn.addActionListener(e -> playSelected());
+        retryBtn.addActionListener(e -> retry.run());
+        searchTable.getSelectionModel().addListSelectionListener(e -> playBtn.setEnabled(searchTable.getSelectedRow() >= 0));
+        searchTable.addMouseListener(new java.awt.event.MouseAdapter() {
+            @Override public void mouseClicked(java.awt.event.MouseEvent e) {
+                if (e.getClickCount() == 2 && javax.swing.SwingUtilities.isLeftMouseButton(e)) { playSelected(); }
+            }
+        });
+        searchTable.getInputMap().put(javax.swing.KeyStroke.getKeyStroke("ENTER"), "play-selected");
+        searchTable.getActionMap().put("play-selected", new javax.swing.AbstractAction() {
+            @Override public void actionPerformed(java.awt.event.ActionEvent e) { playSelected(); }
+        });
 
         frame.addWindowListener(new WindowAdapter() {
             @Override
@@ -156,11 +175,9 @@ public final class SearchWindow {
     }
 
     private void shutdown() {
-        try {
-            pool.shutdownNow();
-        } catch (Throwable ignored) {
-            // 关窗收尾，忽略
-        }
+        closed = true;
+        requests.close();
+        if (playbackTimer != null) { playbackTimer.stop(); playbackTimer = null; }
         if (instance == this) {
             instance = null;
         }
@@ -191,37 +208,49 @@ public final class SearchWindow {
             say("请输入关键词");
             return;
         }
-        searchBtn.setEnabled(false);
+        if (playbackTimer != null) { playbackTimer.stop(); playbackTimer = null; }
         busy.setVisible(true);
+        retryBtn.setEnabled(false);
         say("搜索中…");
-        pool.submit(() -> {
-            List<Dto.Song> songs = new ArrayList<>();
-            String err = null;
-            try {
-                List<Dto.Song> got = NeteaseApi.search(kw, SEARCH_LIMIT);
-                if (got != null) {
-                    songs.addAll(got);
-                }
-            } catch (Throwable t) {
-                err = String.valueOf(t.getMessage() == null ? t : t.getMessage());
-                PluginLog.w(TAG, "搜索失败 kw=" + kw + "：" + t);
-            }
-            final List<Dto.Song> result = songs;
-            final String error = err;
-            SwingUtilities.invokeLater(() -> {
-                busy.setVisible(false);
-                searchBtn.setEnabled(true);
-                searchTable.clearSelection();
-                searchModel.setRows(result);
-                if (error != null) {
-                    say("搜索失败：" + error);
-                } else if (result.isEmpty()) {
-                    say("没有找到结果（检查网络或换个关键词）");
-                } else {
-                    say("找到 " + result.size() + " 条");
-                }
-            });
+        retry = this::doSearch;
+        requests.run(() -> NeteaseApi.search(kw, SEARCH_LIMIT), result -> {
+            busy.setVisible(false);
+            searchTable.clearSelection();
+            searchModel.setRows(result == null ? List.of() : result);
+            resultSource.setText("结果来源：" + kw);
+            say(result == null || result.isEmpty() ? "没有找到结果，可换个关键词重试" : "找到 " + result.size() + " 条");
+            retryBtn.setEnabled(true);
+        }, error -> {
+            busy.setVisible(false);
+            say("搜索失败：" + safeMessage(error) + "（保留上次结果）");
+            retryBtn.setEnabled(true);
+            PluginLog.w(TAG, "搜索失败：" + safeMessage(error));
         });
+    }
+
+    private static String safeMessage(Throwable error) {
+        String msg = error.getMessage();
+        return msg == null || msg.isBlank() ? "网络或服务暂不可用，请重试" : msg.replaceAll("[\\r\\n]", " ");
+    }
+
+    private void playSelected() {
+        int viewRow = searchTable.getSelectedRow();
+        if (viewRow < 0) { say("请先选择一首歌"); return; }
+        Dto.Song song = searchModel.rows.get(searchTable.convertRowIndexToModel(viewRow));
+        if (!song.playable()) { say("这首歌当前无版权或不可播放"); return; }
+        if (playbackTimer != null) { playbackTimer.stop(); }
+        int requestId = VoxzenBridge.playOnlineRequest(song, PluginConfig.audioLevel());
+        say("播放请求：正在准备「" + song.name() + "」");
+        retry = this::playSelected;
+        retryBtn.setEnabled(true);
+        long started = System.nanoTime();
+        playbackTimer = new javax.swing.Timer(250, e -> {
+            if (closed) { ((javax.swing.Timer)e.getSource()).stop(); return; }
+            String report = VoxzenBridge.playbackReport(requestId);
+            if (report != null) { say("播放请求：" + report); }
+            if (System.nanoTime() - started > 30_000_000_000L) { ((javax.swing.Timer)e.getSource()).stop(); }
+        });
+        playbackTimer.start();
     }
 
     // ------------------------------------------------------------------ 表格模型

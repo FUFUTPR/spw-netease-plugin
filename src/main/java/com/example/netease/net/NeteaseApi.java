@@ -95,38 +95,15 @@ public final class NeteaseApi {
         PluginLog.i("netease", "搜索 \"" + keyword + "\" → HTTP " + Http.lastStatus()
                 + "，" + body.length() + " 字节");
         Object root = parse(Json.parse(body));
-        List<Object> songs = Json.list(Json.get(root, "result.songs"), "");
-        for (Object node : songs) {
-            if (!(node instanceof Map)) {
-                continue;
-            }
-            long id = Json.lng(node, "id", 0L);
-            if (id <= 0L) {
-                continue;
-            }
-            String name = Json.str(node, "name", "");
-            String album = Json.str(node, "album.name", "");
-            long durationMs = Json.lng(node, "duration", 0L);
-            int fee = Json.integer(node, "fee", 0);
-            StringBuilder artists = new StringBuilder();
-            for (Object a : Json.list(Json.get(node, "artists"), "")) {
-                String artistName = Json.str(a, "name", "");
-                if (artistName.isEmpty()) {
-                    continue;
-                }
-                if (artists.length() > 0) {
-                    artists.append('/');
-                }
-                artists.append(artistName);
-            }
-            // privilege 缺失时按"有版权"乐观处理：真正的可用性以 songUrl 为准
-            boolean playable = Json.bool(node, "privilege.st", true);
-            // 封面原始 URL（0.6.0）：搜索命中用 al.picUrl，老式应答用 album.picUrl；缺失 = ""
-            String picUrl = Json.str(node, "al.picUrl", "");
-            if (picUrl.isEmpty()) {
-                picUrl = Json.str(node, "album.picUrl", "");
-            }
-            out.add(new Dto.Song(id, name, artists.toString(), album, durationMs, fee, playable, picUrl));
+        return parseSearch(root);
+    }
+
+    static List<Dto.Song> parseSearch(Object root) {
+        List<Dto.Song> out = new ArrayList<>();
+        Map<Long, Integer> privileges = privilegeSt(root);
+        for (Object node : Json.list(Json.get(root, "result.songs"), "")) {
+            Dto.Song song = toSong(node, privileges);
+            if (song != null) { out.add(song); }
         }
         return out;
     }
