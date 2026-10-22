@@ -20,8 +20,10 @@ import java.util.function.Supplier;
  * 歌单页业务控制器（批次 2 从 旧 {@code PlaylistWindow}（0.12.0 已删除） 抽出；无 Swing / AWT / Kotlin / Compose 依赖）。
  *
  * <p>职责：左栏歌单清单、右栏曲目来源、载入失败重试（原参数）、账号 epoch 失效、
- * 整单连播请求与宿主播放反馈。线程模型由注入的 {@link Async} 决定；本控制器所有状态
- * 变更都在 {@code synchronized} 方法内完成，并在状态真正变化后同步通知 {@link Listener}。
+ * 整单连播请求与宿主播放反馈。线程模型由注入的 {@link Async} 决定；所有状态变更都在私有锁
+ * {@code lock} 内完成，并在状态真正变化后同步通知 {@link Listener}。
+ * {@code Async} 的投递、取消、关闭一律在锁外调用，避免与 {@link LatestTask} 的监视器形成
+ * 「控制器锁 → 任务锁」与「任务锁 → 控制器锁」的反向锁序死锁。
  * {@link #close()} 之后不再通知。</p>
  */
 public final class PlaylistController {
@@ -144,6 +146,8 @@ public final class PlaylistController {
     private final Playback playback;
     private final Supplier<String> audioLevel;
     private final LongSupplier clock;
+    /** 状态锁；异步通道的投递 / 取消 / 关闭必须在锁外进行（REVIEW issue 1）。 */
+    private final Object lock = new Object();
 
     private List<Dto.PlaylistBrief> briefs = List.of();
     private boolean briefsLoaded;
@@ -198,14 +202,16 @@ public final class PlaylistController {
                 System::currentTimeMillis);
     }
 
-    public synchronized State state() {
-        return snapshot();
+    public State state() {
+        synchronized (lock) {
+            return snapshotLocked();
+        }
     }
 
     // ------------------------------------------------------------------ 载入动作
 
-    public synchronized void loadMine() {
-        if (closed) {
+    public void loadMine() {
+        if (isClosed()) {
             return;
         }
         long uid = uid();
@@ -223,8 +229,8 @@ public final class PlaylistController {
         });
     }
 
-    public synchronized void loadLiked() {
-        if (closed) {
+    public void loadLiked() {
+        if (isClosed()) {
             return;
         }
         long uid = uid();
@@ -239,8 +245,8 @@ public final class PlaylistController {
         });
     }
 
-    public synchronized void loadDaily() {
-        if (closed) {
+    public void loadDaily() {
+        if (isClosed()) {
             return;
         }
         submit(Request.daily(), api::dailySongs, value -> {
@@ -250,8 +256,8 @@ public final class PlaylistController {
         });
     }
 
-    public synchronized void loadPlaylist(long playlistId, String label) {
-        if (closed) {
+    public void loadPlaylist(long playlistId, String label) {
+        if (isClosed()) {
             return;
         }
         String safeLabel = label == null ? "" : label;
@@ -268,8 +274,8 @@ public final class PlaylistController {
     }
 
     /** 用户输入歌单 ID / 链接：解析失败只改提示，不发请求。 */
-    public synchronized void loadPlaylistText(String text) {
-        if (closed) {
+    public void loadPlaylistText(String text) {
+        if (isClosed()) {
             return;
         }
         long id = PlaylistIds.parse(text);
@@ -280,8 +286,8 @@ public final class PlaylistController {
         loadPlaylist(id, "歌单 #" + id);
     }
 
-    public synchronized void loadLocal(String key, String name) {
-        if (closed) {
+    public void loadLocal(String key, String name) {
+        if (isClosed()) {
             return;
         }
         String safeName = name == null ? "" : name;
@@ -293,55 +299,64 @@ public final class PlaylistController {
     }
 
     /** 失败重试：复用发起时的同一请求参数（playlistId / localKey 不重新解析）。 */
-    public synchronized void retry() {
-        if (closed) {
-            return;
+    public void retry() {
+        Runnable action;
+        synchronized (lock) {
+            if (closed) {
+                return;
+            }
+            if (retryRequest == null) {
+                messageOnlyLocked("没有可重试的载入");
+                return;
+            }
+            action = retrySubmit;
         }
-        if (retryRequest == null) {
-            messageOnly("没有可重试的载入");
-            return;
-        }
-        retrySubmit.run();
+        action.run();
     }
 
     // ------------------------------------------------------------------ 播放
 
     /** 从第 row 行开始整单连播（行号夹到 [0, n-1]）。 */
-    public synchronized void playFrom(int row) {
-        if (closed) {
-            return;
+    public void playFrom(int row) {
+        synchronized (lock) {
+            if (closed) {
+                return;
+            }
+            if (tracks.isEmpty()) {
+                messageOnlyLocked("曲目表是空的，请先载入一张歌单");
+                return;
+            }
+            int index = Math.max(0, Math.min(row, tracks.size() - 1));
+            Dto.Song song = tracks.get(index);
+            if (song == null || !song.playable()) {
+                messageOnlyLocked("这首歌当前无版权或不可播放");
+                return;
+            }
+            startPlaybackLocked(index);
         }
-        if (tracks.isEmpty()) {
-            messageOnly("曲目表是空的，请先载入一张歌单");
-            return;
-        }
-        int index = Math.max(0, Math.min(row, tracks.size() - 1));
-        Dto.Song song = tracks.get(index);
-        if (song == null || !song.playable()) {
-            messageOnly("这首歌当前无版权或不可播放");
-            return;
-        }
-        startPlayback(index);
     }
 
     /** 重试上次的播放目标：在当前列表里按歌曲 id 重新定位行（找不到就只改提示）。 */
-    public synchronized void retryPlayback() {
-        if (closed) {
-            return;
+    public void retryPlayback() {
+        synchronized (lock) {
+            if (closed) {
+                return;
+            }
+            if (lastPlaySongId == null) {
+                messageOnlyLocked("没有可重试的播放请求");
+                return;
+            }
+            int index = indexOf(lastPlaySongId);
+            if (index < 0) {
+                messageOnlyLocked("上次播放的歌曲已不在当前列表中，无法重试");
+                return;
+            }
+            startPlaybackLocked(index);
         }
-        if (lastPlaySongId == null) {
-            messageOnly("没有可重试的播放请求");
-            return;
-        }
-        int index = indexOf(lastPlaySongId);
-        if (index < 0) {
-            messageOnly("上次播放的歌曲已不在当前列表中，无法重试");
-            return;
-        }
-        startPlayback(index);
     }
 
-    private void startPlayback(int index) {
+    /** 调用方必须持有 {@link #lock}。 */
+    private void startPlaybackLocked(int index) {
         Dto.Song song = tracks.get(index);
         String level = audioLevel.get();
         String source = sourceName;
@@ -357,7 +372,7 @@ public final class PlaylistController {
         lastPlaySongId = song.id();
         PluginLog.i(TAG, "请求整单连播 source=" + source + " start=" + (index + 1) + "/"
                 + tracks.size() + " songId=" + song.id() + " level=" + level);
-        publish();
+        publishLocked();
     }
 
     // ------------------------------------------------------------------ 定时轮询
@@ -366,42 +381,54 @@ public final class PlaylistController {
      * UI 定时调用（搜索页契约同样 250ms 节奏）：先看账号 epoch，再看整单播放反馈。
      * 无变化时绝不通知监听器。
      */
-    public synchronized void tick() {
-        if (closed) {
-            return;
-        }
-        long epochNow = api.accountEpoch();
-        if (epochNow != accountEpoch) {
-            // 插件启动早期账号态尚未稳定，而页面还没载入过任何内容（没有可失效的列表/在途请求）：
-            // 只静默同步快照，不把内部 epoch 抖动显示成用户可见的「账号状态变化」。
-            boolean untouched = !briefsLoaded && briefs.isEmpty() && tracks.isEmpty()
-                    && !busy && pendingPlayRequest <= 0;
-            if (untouched) {
-                accountEpoch = epochNow;
-                playbackTick();
+    public void tick() {
+        boolean cancelRequests = false;
+        synchronized (lock) {
+            if (closed) {
                 return;
             }
-            async.cancel();
-            busy = false;
-            briefs = List.of();
-            briefsLoaded = false;
-            playing = false;
-            pendingPlayRequest = 0;
-            lastPlaybackReport = "";
-            pendingLabel = "";
-            message = "账号状态变化，请重新载入；当前仍显示上次载入的曲目";
-            canRetry = true;
-            retryLabel = "重新载入我的歌单";
-            retryRequest = Request.mine();
-            retrySubmit = this::loadMine;
-            accountEpoch = epochNow;
-            publish();
-            return;
+            long epochNow = api.accountEpoch();
+            if (epochNow != accountEpoch) {
+                // 插件启动早期账号态尚未稳定，而页面还没载入过任何内容（没有可失效的列表/在途请求）：
+                // 只静默同步快照，不把内部 epoch 抖动显示成用户可见的「账号状态变化」。
+                boolean untouched = !briefsLoaded && briefs.isEmpty() && tracks.isEmpty()
+                        && !busy && pendingPlayRequest <= 0;
+                if (untouched) {
+                    accountEpoch = epochNow;
+                    playbackTickLocked();
+                    return;
+                }
+                cancelRequests = true;
+                busy = false;
+                briefs = List.of();
+                briefsLoaded = false;
+                playing = false;
+                pendingPlayRequest = 0;
+                lastPlaybackReport = "";
+                pendingLabel = "";
+                message = "账号状态变化，请重新载入；当前仍显示上次载入的曲目";
+                canRetry = true;
+                retryLabel = "重新载入我的歌单";
+                retryRequest = Request.mine();
+                retrySubmit = this::loadMine;
+                accountEpoch = epochNow;
+                publishLocked();
+            } else {
+                playbackTickLocked();
+            }
         }
-        playbackTick();
+        if (cancelRequests) {
+            // 锁外取消：与 submit / close 相同，避免持控制器锁等待 LatestTask 的监视器。
+            try {
+                async.cancel();
+            } catch (Throwable cancelError) {
+                PluginLog.w(TAG, "账号变化时取消歌单请求失败：" + cancelError);
+            }
+        }
     }
 
-    private void playbackTick() {
+    /** 调用方必须持有 {@link #lock}。 */
+    private void playbackTickLocked() {
         if (!playing || pendingPlayRequest <= 0) {
             return;
         }
@@ -418,7 +445,7 @@ public final class PlaylistController {
             if (!text.equals(playbackText)) {
                 playbackText = text;
                 message = text;
-                publish();
+                publishLocked();
             }
         }
         if (clock.getAsLong() - playStart >= PLAYBACK_TIMEOUT_MS) {
@@ -428,98 +455,119 @@ public final class PlaylistController {
                 message = playbackText;
             }
             pendingPlayRequest = 0;
-            publish();
+            publishLocked();
         }
     }
 
     // ------------------------------------------------------------------ 生命周期
 
     /** 关闭：之后不再接受请求、不再通知监听器。 */
-    public synchronized void close() {
-        if (closed) {
-            return;
+    public void close() {
+        synchronized (lock) {
+            if (closed) {
+                return;
+            }
+            closed = true;
         }
-        closed = true;
-        async.close();
+        try {
+            async.close();
+        } catch (Throwable closeError) {
+            PluginLog.w(TAG, "关闭歌单请求通道失败：" + closeError);
+        }
     }
 
     // ------------------------------------------------------------------ 内部
 
-    private synchronized <T> void submit(Request request, Fetcher<T> work, Consumer<T> apply) {
-        if (closed) {
-            return;
+    private <T> void submit(Request request, Fetcher<T> work, Consumer<T> apply) {
+        long myVersion;
+        long myEpoch;
+        synchronized (lock) {
+            if (closed) {
+                return;
+            }
+            playing = false;
+            pendingPlayRequest = 0;
+            busy = true;
+            pendingLabel = request.describe();
+            message = "正在载入「" + request.describe() + "」…（保留上次列表）";
+            canRetry = false;
+            retryLabel = "";
+            myVersion = ++version;
+            myEpoch = api.accountEpoch();
+            epochSnapshot = myEpoch;
+            retryRequest = request;
+            retrySubmit = () -> submit(request, work, apply);
+            publishLocked();
         }
-        playing = false;
-        pendingPlayRequest = 0;
-        busy = true;
-        pendingLabel = request.describe();
-        message = "正在载入「" + request.describe() + "」…（保留上次列表）";
-        canRetry = false;
-        retryLabel = "";
-        long myVersion = ++version;
-        long myEpoch = api.accountEpoch();
-        epochSnapshot = myEpoch;
-        retryRequest = request;
-        retrySubmit = () -> submit(request, work, apply);
-        async.run(work,
-                value -> onLoadSuccess(request, myVersion, myEpoch, apply, value),
-                error -> onLoadFailure(request, myVersion, error));
-        publish();
-    }
-
-    private synchronized <T> void onLoadSuccess(Request request, long myVersion, long myEpoch,
-                                                Consumer<T> apply, T value) {
-        if (closed) {
-            return;
-        }
-        if (myVersion != version) {
-            PluginLog.d(TAG, "丢弃过期的歌单载入结果：" + request.describe());
-            return;
-        }
-        if (api.accountEpoch() != myEpoch) {
-            PluginLog.d(TAG, "丢弃账号变化后的歌单载入结果：" + request.describe());
-            return;
-        }
-        busy = false;
-        pendingLabel = "";
-        Throwable applyError = null;
         try {
-            apply.accept(value);
-        } catch (Throwable t) {
-            applyError = t;
-            PluginLog.w(TAG, "歌单载入结果应用失败：" + request.describe() + " :: " + t);
+            async.run(work,
+                    value -> onLoadSuccess(request, myVersion, myEpoch, apply, value),
+                    error -> onLoadFailure(request, myVersion, error));
+        } catch (Throwable dispatchError) {
+            // 通道拒绝投递（关闭 / 线程池拒绝）：按失败收尾，不留「永远 busy」的死状态。
+            PluginLog.w(TAG, "投递歌单载入请求失败（按失败处理）：" + dispatchError);
+            onLoadFailure(request, myVersion, dispatchError);
         }
-        canRetry = true;
-        retryLabel = "重试「" + request.describe() + "」";
-        if (applyError != null) {
-            message = "载入「" + request.describe() + "」失败：" + briefError(applyError)
+    }
+
+    private <T> void onLoadSuccess(Request request, long myVersion, long myEpoch,
+                                   Consumer<T> apply, T value) {
+        synchronized (lock) {
+            if (closed) {
+                return;
+            }
+            if (myVersion != version) {
+                PluginLog.d(TAG, "丢弃过期的歌单载入结果：" + request.describe());
+                return;
+            }
+            if (api.accountEpoch() != myEpoch) {
+                PluginLog.d(TAG, "丢弃账号变化后的歌单载入结果：" + request.describe());
+                return;
+            }
+            busy = false;
+            pendingLabel = "";
+            Throwable applyError = null;
+            try {
+                apply.accept(value);
+            } catch (Throwable t) {
+                applyError = t;
+                PluginLog.w(TAG, "歌单载入结果应用失败：" + request.describe() + " :: " + t);
+            }
+            canRetry = true;
+            retryLabel = "重试「" + request.describe() + "」";
+            if (applyError != null) {
+                message = "载入「" + request.describe() + "」失败：" + briefError(applyError)
+                        + "；保留上次列表，可重试";
+            }
+            publishLocked();
+        }
+    }
+
+    private void onLoadFailure(Request request, long myVersion, Throwable error) {
+        synchronized (lock) {
+            if (closed) {
+                return;
+            }
+            if (myVersion != version) {
+                PluginLog.d(TAG, "丢弃过期的歌单载入失败：" + request.describe());
+                return;
+            }
+            busy = false;
+            pendingLabel = "";
+            canRetry = true;
+            retryLabel = "重试「" + request.describe() + "」";
+            message = "载入「" + request.describe() + "」失败：" + briefError(error)
                     + "；保留上次列表，可重试";
+            publishLocked();
         }
-        publish();
     }
 
-    private synchronized void onLoadFailure(Request request, long myVersion, Throwable error) {
+    /** 调用方必须持有 {@link #lock}。 */
+    private void publishLocked() {
         if (closed) {
             return;
         }
-        if (myVersion != version) {
-            PluginLog.d(TAG, "丢弃过期的歌单载入失败：" + request.describe());
-            return;
-        }
-        busy = false;
-        pendingLabel = "";
-        canRetry = true;
-        retryLabel = "重试「" + request.describe() + "」";
-        message = "载入「" + request.describe() + "」失败：" + briefError(error)
-                + "；保留上次列表，可重试";
-        publish();
-    }
-
-    private void publish() {
-        if (closed) {
-            return;
-        }
-        State snapshot = snapshot();
+        State snapshot = snapshotLocked();
         try {
             listener.onState(snapshot);
         } catch (Throwable t) {
@@ -527,17 +575,34 @@ public final class PlaylistController {
         }
     }
 
-    private State snapshot() {
+    /** 调用方必须持有 {@link #lock}。 */
+    private State snapshotLocked() {
         return new State(briefs, briefsLoaded, tracks, sourceName, message, busy, pendingLabel,
                 retryLabel, canRetry, pendingPlayRequest, playbackText, playing, accountEpoch);
     }
 
     private void messageOnly(String newMessage) {
+        synchronized (lock) {
+            messageOnlyLocked(newMessage);
+        }
+    }
+
+    /** 调用方必须持有 {@link #lock}。 */
+    private void messageOnlyLocked(String newMessage) {
+        if (closed) {
+            return;
+        }
         if (Objects.equals(message, newMessage)) {
             return;
         }
         message = newMessage;
-        publish();
+        publishLocked();
+    }
+
+    private boolean isClosed() {
+        synchronized (lock) {
+            return closed;
+        }
     }
 
     private long uid() {

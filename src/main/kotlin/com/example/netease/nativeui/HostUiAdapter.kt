@@ -1,14 +1,286 @@
-@file:OptIn(com.xuncorp.spw.workshop.api.UnstableSpwWorkshopApi::class)
+@file:OptIn(
+    com.xuncorp.spw.workshop.api.UnstableSpwWorkshopApi::class,
+    androidx.compose.runtime.InternalComposeApi::class,
+)
 
 package com.example.netease.nativeui
 
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.Composer
+import androidx.compose.runtime.CompositionLocal
+import androidx.compose.runtime.currentComposer
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.text.TextStyle
 import com.example.netease.core.PluginLog
 import com.xuncorp.spw.workshop.api.PluginPermission
 import com.xuncorp.spw.workshop.api.WorkshopApi
 import com.xuncorp.spw.workshop.api.hook.ComposableHook
 import com.xuncorp.spw.workshop.api.hook.HookHandle
 import com.xuncorp.spw.workshop.api.hook.UiHookCall
+import java.lang.reflect.Method
+
+/**
+ * 挂载范围判定（REVIEW issue2）。
+ *
+ * <p>宿主的 ModConfigScreen 是所有工坊插件共用的配置页容器：Hook 注入的
+ * [ComposableHook.Content] 只在“当前打开的配置页属于本插件”时才允许绘制原生界面。
+ * 当前配置页由 Hook 调用的第 0 个业务参数（宿主 ScreenRoute.ModConfigContent）给出，
+ * 插件 ID 必须精确等于 [PLUGIN_ID]；其它插件、路由缺失、类型不认识或反射失败一律
+ * 返回 false（不建入口、不消费指针事件）。</p>
+ *
+ * <p>整个对象只用反射，不依赖 Compose，可直接在 JVM 探针里验证。</p>
+ */
+internal object HostUiMountScope {
+    /** 本插件在宿主工坊里的插件 ID（与插件元数据一致）。 */
+    const val PLUGIN_ID = "com.example.netease"
+
+    /** 宿主配置路由类名（宿主 1.19.0 混淆前的真实类名）。 */
+    const val MOD_CONFIG_ROUTE_CLASS =
+        "com.xuncorp.voxzen.ui.navigation.ScreenRoute\$ModConfigContent"
+
+    private const val PLUGIN_ID_GETTER = "getPluginId"
+
+    /** 取本次 Hook 调用的第 0 个业务参数（即当前屏幕路由）；异常时返回 null。 */
+    @JvmStatic
+    fun routeOf(call: UiHookCall?): Any? = try {
+        call?.arguments?.firstOrNull()
+    } catch (t: Throwable) {
+        null
+    }
+
+    /** 读取路由里的插件 ID；不是宿主 ModConfigContent、字段缺失或空串都返回 null。 */
+    @JvmStatic
+    fun pluginIdOf(route: Any?): String? {
+        if (route == null || route.javaClass.name != MOD_CONFIG_ROUTE_CLASS) {
+            return null
+        }
+        return try {
+            (route.javaClass.getMethod(PLUGIN_ID_GETTER).invoke(route) as? String)
+                ?.takeIf { it.isNotBlank() }
+        } catch (t: Throwable) {
+            null
+        }
+    }
+
+    /** 只有本插件自己的配置路由才允许挂载。 */
+    @JvmStatic
+    fun shouldMountRoute(route: Any?): Boolean = pluginIdOf(route) == PLUGIN_ID
+
+    /** 只有本插件自己的 Hook 调用才允许挂载。 */
+    @JvmStatic
+    fun shouldMount(call: UiHookCall?): Boolean = shouldMountRoute(routeOf(call))
+
+    /** 诊断描述：只用于日志与开发者页，不参与绘制。 */
+    @JvmStatic
+    fun describe(route: Any?): String = when {
+        route == null -> "路由缺失"
+        route.javaClass.name != MOD_CONFIG_ROUTE_CLASS ->
+            "非 ModConfigContent 路由：" + route.javaClass.name
+        else -> "pluginId=" + (pluginIdOf(route) ?: "<不可读或空>")
+    }
+}
+
+/**
+ * 宿主 SaltTheme（com.moriafly.salt）桥接（REVIEW issue6）。
+ *
+ * <p>已核实（Python 扫描宿主安装 jar + javap -c）：宿主 1.19.0 的全部
+ * com.xuncorp.* 界面都没有引用 androidx.compose.material3.MaterialTheme，颜色/字体/
+ * 圆角全部来自宿主自己的 CompositionLocal（混淆类 androidx.compose.ui.ʶ，Kotlin 源即
+ * SaltTheme），深浅色由宿主 AppConfig/LightDarkTheme 决定。Hook 注入点位于宿主 AppTheme
+ * 之内，因此可以在组合期用 Composer.consume 读到宿主真实提供的 SaltConfigs /
+ * SaltDynamicColors / SaltTextStyles / SaltShapes。</p>
+ *
+ * <p>混淆名只在宿主 1.19.0 上核对过（javap 验证）。任何一步失败都返回 null：页面据此
+ * 降级到默认 Material3 主题，并在开发者页明确标注降级原因，不用默认色板冒充宿主主题。</p>
+ */
+internal object HostSaltTheme {
+    private const val TAG = "native-ui"
+
+    // --- 宿主 1.19.0 混淆名（javap -p 核实） --------------------------------
+    /** SaltTheme 的 CompositionLocal 持有者。 */
+    private const val THEME_CLASS = "androidx.compose.ui.ʶ"
+    /** SaltColors（11 个 long 颜色）。 */
+    private const val COLORS_CLASS = "androidx.compose.ui.ʹ"
+    /** SaltDynamicColors（light/dark 两套 SaltColors）。 */
+    private const val DYNAMIC_COLORS_CLASS = "androidx.compose.ui.ʴ"
+    /** SaltConfigs（isDarkTheme 等）。 */
+    private const val CONFIGS_CLASS = "androidx.compose.ui.ˤ"
+    /** SaltTextStyles（main/sub/paragraph/largeTitle）。 */
+    private const val TEXT_STYLES_CLASS = "androidx.compose.ui.ʲ"
+    /** SaltShapes（small/medium/large）。 */
+    private const val SHAPES_CLASS = "androidx.compose.ui.ˮ"
+
+    /** 主题持有者上 4 个目标 local 的静态 getter：configs、dynamicColors、textStyles、shapes。 */
+    private const val LOCALS_CONFIGS = "Ϳ"
+    private const val LOCALS_DYNAMIC_COLORS = "Ԩ"
+    private const val LOCALS_TEXT_STYLES = "ԩ"
+    private const val LOCALS_SHAPES = "ԫ"
+
+    private const val CONFIGS_IS_DARK = "Ϳ"
+    private const val DYNAMIC_LIGHT = "Ϳ"
+    private const val DYNAMIC_DARK = "Ԩ"
+
+    /** SaltColors：highlight,text,subText,background,subBackground,popup,stroke,onHighlight,success,warning,error。 */
+    private val COLOR_GETTERS = listOf(
+        "Ϳ", "Ԩ", "ԩ", "Ԫ", "ԫ", "Ԭ",
+        "ԭ", "Ԯ", "ԯ", "ՠ", "ֈ",
+    )
+
+    /** SaltTextStyles：main,sub,paragraph,largeTitle。 */
+    private val TEXT_STYLE_GETTERS = listOf("Ϳ", "Ԩ", "ԩ", "Ԫ")
+
+    /** SaltShapes：small,medium,large。 */
+    private val SHAPE_GETTERS = listOf("Ϳ", "Ԩ", "ԩ")
+
+    /** SaltTheme 下的实际配色（来自宿主当前 dark/light 的一套 SaltColors）。 */
+    internal class Palette(
+        val highlight: Color,
+        val text: Color,
+        val subText: Color,
+        val background: Color,
+        val subBackground: Color,
+        val popup: Color,
+        val stroke: Color,
+        val onHighlight: Color,
+        val success: Color,
+        val warning: Color,
+        val error: Color,
+    )
+
+    /** SaltTextStyles 的四个字体样式（已包含宿主自定义 FontFamily）。 */
+    internal class TypeSet(
+        val main: TextStyle,
+        val sub: TextStyle,
+        val paragraph: TextStyle,
+        val largeTitle: TextStyle,
+    )
+
+    /** SaltShapes 的三个圆角形状。 */
+    internal class ShapeSet(
+        val small: Shape,
+        val medium: Shape,
+        val large: Shape,
+    )
+
+    /** 一次成功读取的宿主主题快照。 */
+    internal class Snapshot(
+        val dark: Boolean,
+        val palette: Palette,
+        val textStyles: TypeSet,
+        val shapes: ShapeSet,
+    )
+
+    private class Reader(
+        val configs: CompositionLocal<Any?>,
+        val dynamicColors: CompositionLocal<Any?>,
+        val textStyles: CompositionLocal<Any?>,
+        val shapes: CompositionLocal<Any?>,
+        val isDark: Method,
+        val lightColors: Method,
+        val darkColors: Method,
+        val colorGetters: List<Method>,
+        val textStyleGetters: List<Method>,
+        val shapeGetters: List<Method>,
+    ) {
+        fun read(composer: Composer): Snapshot? {
+            val configsValue = composer.consume(configs) ?: return null
+            val dynamicValue = composer.consume(dynamicColors) ?: return null
+            val stylesValue = composer.consume(textStyles) ?: return null
+            val shapesValue = composer.consume(shapes) ?: return null
+            val dark = isDark.invoke(configsValue) as? Boolean ?: return null
+            val saltColors = (if (dark) darkColors else lightColors).invoke(dynamicValue) ?: return null
+            val colors = colorGetters.map {
+                val value = it.invoke(saltColors) as? Long ?: return null
+                Color(value)
+            }
+            val styles = textStyleGetters.map {
+                it.invoke(stylesValue) as? TextStyle ?: return null
+            }
+            val shapeValues = shapeGetters.map {
+                it.invoke(shapesValue) as? Shape ?: return null
+            }
+            return Snapshot(
+                dark = dark,
+                palette = Palette(
+                    highlight = colors[0],
+                    text = colors[1],
+                    subText = colors[2],
+                    background = colors[3],
+                    subBackground = colors[4],
+                    popup = colors[5],
+                    stroke = colors[6],
+                    onHighlight = colors[7],
+                    success = colors[8],
+                    warning = colors[9],
+                    error = colors[10],
+                ),
+                textStyles = TypeSet(
+                    main = styles[0],
+                    sub = styles[1],
+                    paragraph = styles[2],
+                    largeTitle = styles[3],
+                ),
+                shapes = ShapeSet(
+                    small = shapeValues[0],
+                    medium = shapeValues[1],
+                    large = shapeValues[2],
+                ),
+            )
+        }
+    }
+
+    private val reader: Reader? by lazy {
+        runCatching { load() }
+            .onFailure { PluginLog.w(TAG, "宿主 SaltTheme 不可用（页面将降级）：" + it) }
+            .getOrNull()
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun load(): Reader {
+        val theme = Class.forName(THEME_CLASS)
+        fun local(name: String): CompositionLocal<Any?> =
+            theme.getMethod(name).invoke(null) as CompositionLocal<Any?>
+        val colors = Class.forName(COLORS_CLASS)
+        val dynamic = Class.forName(DYNAMIC_COLORS_CLASS)
+        val configs = Class.forName(CONFIGS_CLASS)
+        val styles = Class.forName(TEXT_STYLES_CLASS)
+        val shapes = Class.forName(SHAPES_CLASS)
+        return Reader(
+            configs = local(LOCALS_CONFIGS),
+            dynamicColors = local(LOCALS_DYNAMIC_COLORS),
+            textStyles = local(LOCALS_TEXT_STYLES),
+            shapes = local(LOCALS_SHAPES),
+            isDark = configs.getMethod(CONFIGS_IS_DARK),
+            lightColors = dynamic.getMethod(DYNAMIC_LIGHT),
+            darkColors = dynamic.getMethod(DYNAMIC_DARK),
+            colorGetters = COLOR_GETTERS.map(colors::getMethod),
+            textStyleGetters = TEXT_STYLE_GETTERS.map(styles::getMethod),
+            shapeGetters = SHAPE_GETTERS.map(shapes::getMethod),
+        )
+    }
+
+    /** 组合期读取宿主主题；不可用返回 null（调用方降级并展示原因）。 */
+    @Composable
+    fun read(): Snapshot? {
+        val current = reader ?: return null
+        val composer = currentComposer
+        return try {
+            current.read(composer)
+        } catch (t: Throwable) {
+            PluginLog.w(TAG, "读取宿主 SaltTheme 失败（已降级）：" + t)
+            null
+        }
+    }
+
+    /** 开发者页使用的主题来源说明（不参与正式页面布局）。 */
+    fun describe(snapshot: Snapshot?): String = if (snapshot == null) {
+        "降级：未读到宿主 SaltTheme（混淆名可能已随宿主版本变化，已回退 Material3 默认主题）"
+    } else {
+        "宿主 SaltTheme（" + (if (snapshot.dark) "深色" else "浅色") +
+            "；颜色/字体/圆角来自宿主 CompositionLocal）"
+    }
+}
 
 /**
  * 集中式宿主 UI 适配层（docs/PLAN.md 批次 1）。
@@ -107,7 +379,8 @@ internal object HostUiAdapter {
             )
             handle = h
             NativeUiSession.start()
-            NativeUiState.visible = true
+            // 不在这里打开整页界面：是否显示由 PanelHook 按当前配置路由的 pluginId 决定，
+            // 避免其它插件的配置页（共享同一个 ModConfigScreen）被本插件覆盖（REVIEW issue2）。
             NativeUiState.status =
                 "已挂载（唯一匹配，宿主 " + hostVersion + "，priority=" + PRIORITY + "）"
             PluginLog.i(
@@ -144,10 +417,29 @@ internal object HostUiAdapter {
         PluginLog.w(TAG, "install 失败：" + reason)
     }
 
-    /** 宿主侧唯一注入点：替换配置页内容区的渲染。 */
+    /**
+     * 宿主侧唯一注入点：只在本插件自己的配置路由上绘制原生页面。
+     *
+     * <p>宿主 ModConfigScreen 被所有插件共用，因此必须先读 [UiHookCall] 里的当前路由
+     * （ScreenRoute.ModConfigContent.pluginId）再决定是否绘制；其它插件、路由缺失或
+     * 类型不认识时直接返回，不创建入口、不消费指针事件（REVIEW issue2）。</p>
+     */
     private object PanelHook : ComposableHook() {
+        /** 跳过日志去重：同一个路由只记录一次，避免每次重组都写插件日志。 */
+        @Volatile
+        private var lastSkippedRoute: String? = null
+
         @Composable
         override fun Content(call: UiHookCall) {
+            val route = HostUiMountScope.routeOf(call)
+            if (!HostUiMountScope.shouldMountRoute(route)) {
+                val desc = HostUiMountScope.describe(route)
+                if (desc != lastSkippedRoute) {
+                    lastSkippedRoute = desc
+                    PluginLog.i(TAG, "PanelHook 跳过（非本插件配置页）：" + desc)
+                }
+                return
+            }
             NativeUiPanel()
         }
     }

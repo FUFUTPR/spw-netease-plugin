@@ -19,8 +19,9 @@ import java.util.function.Consumer;
  * {@code LOGIN_CONTROLLER_RESULT=<n> PASS} 并以 0 退出；任一断言失败打印 {@code FAIL ...}
  * 并以 1 退出。</p>
  *
- * <p>覆盖 14 组：构造初值 / open 幂等 / tick 节流 / 二维码映射 / 旧登录态 / 扫码成功 /
- * 风控迁移 / 切档 / 刷新去重 / 发码 / 短信登录 / 验证页与重试 / 关闭 / 异步通道。</p>
+ * <p>覆盖 15 组：构造初值 / open 幂等 / tick 节流 / 二维码映射 / 旧登录态 / 扫码成功 /
+ * 风控迁移 / 切档 / 刷新去重 / 发码 / 短信登录 / 验证页与重试 / 关闭 / 异步通道 /
+ * 每次打开的登录判据（REVIEW issue 3 回归）。</p>
  */
 public final class LoginControllerProbe {
 
@@ -42,6 +43,7 @@ public final class LoginControllerProbe {
             group12VerifyAndRetry();
             group13Close();
             group14AsyncChannel();
+            group15OpenSessionVerdict();
         } catch (Throwable t) {
             System.out.println("FAIL " + t.getMessage());
             t.printStackTrace(System.out);
@@ -101,7 +103,7 @@ public final class LoginControllerProbe {
         p.wasLoggedIn = true;
         Fixture g = new Fixture(p);
         check("G1-14 status=LOGGED_IN ⇒ loggedIn=true", g.s().loggedIn());
-        check("G1-15 端口 wasLoggedInAtOpen=true ⇒ State 冻结为 true", g.s().wasLoggedInAtOpen());
+        check("G1-15 端口 wasLoggedInAtOpen=true ⇒ State 快照为 true", g.s().wasLoggedInAtOpen());
     }
 
     // ------------------------------------------------------------------ G2 open
@@ -752,6 +754,154 @@ public final class LoginControllerProbe {
         check("G14-17 迟到回调不把 busy 卡住", !h.s().busy());
     }
 
+    // ------------------------------------------------------------------ G15 每次打开的登录判据
+
+    /**
+     * 回归 REVIEW issue 3：成功判据不能冻结在构造时。
+     *
+     * <p>正确语义是「一次 open 一份会话」：{@code open} 时记快照，处理 {@code LOGGED_IN} 时<b>实时</b>读
+     * {@code ports.wasLoggedInAtOpen()} —— true = 恢复出来的旧登录态（保持面板打开），false = 本次打开之后
+     * 才真正登录成功（收尾关窗）。覆盖修正要求的四个场景：未登录后成功 / 已登录再打开恢复旧态 /
+     * 已登录再完成新扫码 / 同一控制器关闭重开。</p>
+     */
+    private static void group15OpenSessionVerdict() {
+        // ① 未登录后成功：实时判据 false ⇒ 本次打开之后的新登录，收尾关窗。
+        Fixture a = new Fixture();
+        a.ports.now = 0L;
+        a.ports.statusValue = status(AccountService.State.WAITING_SCAN, "");
+        a.c.open();
+        a.c.tick();
+        a.ports.statusValue = status(AccountService.State.LOGGED_IN, "小明");
+        a.ports.now = 1000L;
+        a.c.tick();
+        State sa = a.s();
+        eq("G15-01 未登录后成功 phase=LOGGED_IN", Phase.LOGGED_IN, sa.phase());
+        check("G15-02 未登录后成功自动关窗", !a.c.isOpen());
+        eq("G15-03 未登录后成功 loginVia=扫码", "扫码", sa.loginVia());
+        eq("G15-04 未登录后成功文案", "登录成功：小明", sa.message());
+
+        // ② 已登录、但旧登录态是打开之后才恢复的：处理 LOGGED_IN 时实时读数已翻成 true ⇒ 保持面板打开。
+        FakePorts bp = new FakePorts();
+        bp.statusValue = status(AccountService.State.WAITING_SCAN, "");
+        Fixture b = new Fixture(bp);
+        b.ports.now = 0L;
+        b.c.open();
+        eq("G15-05 open 时重新读一次判据（构造 1 次 + open 1 次）", 2, bp.wasLoggedInCalls);
+        check("G15-06 打开时快照=未登录", !b.s().wasLoggedInAtOpen());
+        int callsAtOpen = bp.wasLoggedInCalls;
+        bp.wasLoggedIn = true;                        // 打开之后旧登录态恢复了
+        bp.statusValue = status(AccountService.State.LOGGED_IN, "旧账号");
+        b.ports.now = 1000L;
+        b.c.tick();
+        State sb = b.s();
+        eq("G15-07 恢复旧登录态 phase=QR_READY", Phase.QR_READY, sb.phase());
+        eq("G15-08 恢复旧登录态文案", "当前已经登录，无需重复扫码；如需换号请先退出登录", sb.message());
+        check("G15-09 恢复旧登录态不关窗", b.c.isOpen());
+        check("G15-10 恢复旧登录态 loggedIn=true", sb.loggedIn());
+        eq("G15-11 恢复旧登录态不判扫码成功（loginVia 空）", "", sb.loginVia());
+        eq("G15-12 恢复旧登录态不调 pauseQrWatch", 0, bp.pauseCalls);
+        eq("G15-13 处理 LOGGED_IN 时重新问端口（不缓存）", callsAtOpen + 1, bp.wasLoggedInCalls);
+        check("G15-14 State 快照仍是打开时的值（不随实时判据抖动）", !sb.wasLoggedInAtOpen());
+        b.ports.now = 2000L;
+        b.c.tick();
+        eq("G15-15 下一拍继续实时读端口", callsAtOpen + 2, bp.wasLoggedInCalls);
+        check("G15-16 下一拍仍保持打开", b.c.isOpen());
+
+        // ③ 已登录再完成新扫码：打开时已登录，但本次打开之后真的登录成功（loginSerial 变了）⇒ 收尾关窗。
+        FakePorts cp = new FakePorts();
+        cp.statusValue = status(AccountService.State.LOGGED_IN, "旧账号");
+        cp.wasLoggedIn = true;
+        Fixture c = new Fixture(cp);
+        c.ports.now = 0L;
+        c.c.open();
+        check("G15-17 打开时快照=已登录", c.s().wasLoggedInAtOpen());
+        cp.wasLoggedIn = false;                       // 新登录成功：活判据翻成 false
+        cp.statusValue = status(AccountService.State.LOGGED_IN, "小明");
+        c.ports.now = 1000L;
+        c.c.tick();
+        State sc = c.s();
+        eq("G15-18 已登录后新扫码 phase=LOGGED_IN", Phase.LOGGED_IN, sc.phase());
+        check("G15-19 已登录后新扫码自动关窗", !c.c.isOpen());
+        eq("G15-20 已登录后新扫码 loginVia=扫码", "扫码", sc.loginVia());
+        eq("G15-21 已登录后新扫码文案", "登录成功：小明", sc.message());
+        eq("G15-22 已登录后新扫码 pauseQrWatch 1 次", 1, cp.pauseCalls);
+        eq("G15-23 已登录后新扫码 closeVerify 1 次", 1, cp.closeVerifyCalls);
+
+        // ④ 同一控制器关闭重开：快照属于各自的打开会话，上一次的判定绝不带到下一次。
+        FakePorts dp = new FakePorts();
+        dp.statusValue = status(AccountService.State.LOGGED_IN, "旧账号");
+        dp.wasLoggedIn = true;
+        Fixture d = new Fixture(dp);
+        d.ports.now = 0L;
+        d.c.open();
+        d.c.tick();
+        eq("G15-24 第一次打开 phase=QR_READY", Phase.QR_READY, d.s().phase());
+        check("G15-25 第一次打开保持打开", d.c.isOpen());
+        check("G15-26 第一次打开快照=已登录", d.s().wasLoggedInAtOpen());
+        d.c.close();
+
+        dp.wasLoggedIn = false;                       // 重开时环境已变成「本次打开之后才登录」
+        dp.statusValue = status(AccountService.State.WAITING_SCAN, "");
+        d.ports.now = 2000L;
+        d.c.open();
+        check("G15-27 重开后 isOpen", d.c.isOpen());
+        eq("G15-28 重开后 phase=WAITING_QR", Phase.WAITING_QR, d.s().phase());
+        check("G15-29 重开的快照属于新会话（未登录）", !d.s().wasLoggedInAtOpen());
+        eq("G15-30 重开重新取码（startQr 共 2 次）", 2, dp.startQrCalls);
+        dp.statusValue = status(AccountService.State.LOGGED_IN, "新账号");
+        d.ports.now = 3000L;
+        d.c.tick();
+        eq("G15-31 重开后新登录 phase=LOGGED_IN", Phase.LOGGED_IN, d.s().phase());
+        check("G15-32 重开后新登录自动关窗", !d.c.isOpen());
+        eq("G15-33 重开后新登录文案", "登录成功：新账号", d.s().message());
+
+        dp.wasLoggedIn = true;                        // 再开：这次打开时本来就登录着
+        dp.statusValue = status(AccountService.State.LOGGED_IN, "新账号");
+        d.ports.now = 4000L;
+        d.c.open();
+        d.c.tick();
+        eq("G15-34 第三次打开 phase=QR_READY", Phase.QR_READY, d.s().phase());
+        check("G15-35 第三次打开保持打开", d.c.isOpen());
+        check("G15-36 第三次打开快照=已登录", d.s().wasLoggedInAtOpen());
+        eq("G15-37 第三次打开不判扫码成功（loginVia 清空）", "", d.s().loginVia());
+        check("G15-38 第三次打开 loggedIn=true", d.s().loggedIn());
+
+        // ⑤ 快照必须在 startQr 之后读：生产 AccountService 正是在 startQr 里刷新开窗快照。
+        FakePorts ep = new FakePorts();
+        ep.wasLoggedIn = false;
+        ep.wasLoggedInAfterStartQr = Boolean.TRUE;
+        Fixture e = new Fixture(ep);
+        e.ports.now = 0L;
+        e.c.open();
+        check("G15-39 open 的快照在 startQr 之后读取（拿到刷新后的值）", e.s().wasLoggedInAtOpen());
+
+        // ⑥ 判定端口读失败时的兜底：本次打开的快照是 true ⇒ 仍按旧登录态处理，绝不误关窗。
+        FakePorts fp = new FakePorts();
+        fp.statusValue = status(AccountService.State.LOGGED_IN, "旧账号");
+        fp.wasLoggedIn = true;
+        Fixture f = new Fixture(fp);
+        f.ports.now = 0L;
+        f.c.open();
+        fp.wasLoggedInError = new IllegalStateException("判据端口读失败");
+        f.ports.now = 1000L;
+        f.c.tick();
+        eq("G15-40 判据读取失败时兜底用本次快照（phase=QR_READY）", Phase.QR_READY, f.s().phase());
+        check("G15-41 判据读取失败时不误关窗", f.c.isOpen());
+
+        // ⑦ 兜底只在「本次打开」有效：快照是 false 时读失败照常收尾（不会把新登录当旧态）。
+        FakePorts gp = new FakePorts();
+        gp.statusValue = status(AccountService.State.WAITING_SCAN, "");
+        Fixture g = new Fixture(gp);
+        g.ports.now = 0L;
+        g.c.open();
+        gp.wasLoggedInError = new IllegalStateException("判据端口读失败");
+        gp.statusValue = status(AccountService.State.LOGGED_IN, "小明");
+        g.ports.now = 1000L;
+        g.c.tick();
+        eq("G15-42 快照=未登录且读失败 ⇒ 收尾关窗", Phase.LOGGED_IN, g.s().phase());
+        check("G15-43 快照=未登录且读失败 ⇒ 不保持打开", !g.c.isOpen());
+    }
+
     // ------------------------------------------------------------------ 夹具
 
     /** 控制器 + 假端口 + 可手动 flush 的假异步通道 + 状态记录器。 */
@@ -803,6 +953,9 @@ public final class LoginControllerProbe {
 
         boolean wasLoggedIn;
         int wasLoggedInCalls;
+        RuntimeException wasLoggedInError;
+        /** 非 null 时模拟生产 AccountService：{@code startQr} 内部刷新开窗快照。 */
+        Boolean wasLoggedInAfterStartQr;
 
         Dto.SmsResult smsResult = new Dto.SmsResult(200, "ok");
         RuntimeException smsError;
@@ -832,6 +985,10 @@ public final class LoginControllerProbe {
             lastStartQrForce = force;
             if (startQrError != null) {
                 throw startQrError;
+            }
+            if (wasLoggedInAfterStartQr != null) {
+                // 生产 startQr 里才刷新 statusAtOpen / loginSerialAtOpen，控制器必须在这之后读快照
+                wasLoggedIn = wasLoggedInAfterStartQr;
             }
             return startQrResult;
         }
@@ -874,6 +1031,9 @@ public final class LoginControllerProbe {
         @Override
         public boolean wasLoggedInAtOpen() {
             wasLoggedInCalls++;
+            if (wasLoggedInError != null) {
+                throw wasLoggedInError;
+            }
             return wasLoggedIn;
         }
 

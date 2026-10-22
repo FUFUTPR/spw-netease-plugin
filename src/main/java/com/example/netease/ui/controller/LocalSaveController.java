@@ -241,18 +241,66 @@ public final class LocalSaveController {
             message = TEXT_SAVING;
             publishLocked();
         }
-        final String finalName = name;
+        return dispatchSave(name, finalSongs);
+    }
+
+    /**
+     * 提交保存（REVIEW issue 5）：在确认保存的调用栈内原子捕获「当前来源 + 当前列表」，再投递写盘。
+     *
+     * <p>与「先 {@link #capture(List, String)} 再 {@link #submit(String)}」相比，本重载在同一把锁内
+     * 先固定本次快照、再检查 busy / 空名称 / 空曲目，避免页面刷新后仍提交旧列表，也避免提交后
+     * 切页影响本次写盘。捕获失败（端口异常）不在这里发生——调用方直接传入它正在展示的列表。</p>
+     *
+     * @param rawName    用户输入的名称（null 视为 ""）
+     * @param tracks     当前页面正在展示的曲目（null 视为空列表）
+     * @param sourceName 当前页面正在展示的来源名（null 归一为 ""）
+     * @return 是否真的发起了一次写盘
+     */
+    public boolean submit(String rawName, List<Dto.Song> tracks, String sourceName) {
+        String name = rawName == null ? "" : rawName.trim();
+        List<Dto.Song> finalSongs;
+        synchronized (lock) {
+            // 先做防御性拷贝并更新页面快照：用户看到什么，就保存什么。
+            songs = copySongs(tracks);
+            this.sourceName = norm(sourceName);
+            defaultName = defaultNameFor(this.sourceName);
+            saved = false;
+            if (busy) {
+                message = TEXT_BUSY;
+                publishLocked();
+                return false;
+            }
+            if (name.isEmpty()) {
+                message = TEXT_EMPTY_NAME;
+                publishLocked();
+                return false;
+            }
+            if (songs.isEmpty()) {
+                message = TEXT_NO_TRACKS;
+                publishLocked();
+                return false;
+            }
+            finalSongs = Collections.unmodifiableList(new ArrayList<>(songs));
+            busy = true;
+            message = TEXT_SAVING;
+            publishLocked();
+        }
+        return dispatchSave(name, finalSongs);
+    }
+
+    /** 投递写盘（锁外；成功 / 失败都在异步回调里收尾）。 */
+    private boolean dispatchSave(String finalName, List<Dto.Song> finalSongs) {
         final int count = finalSongs.size();
         try {
             async.run(() -> ports.save(finalName, finalSongs),
                     key -> onSaved(finalName, count, key),
                     this::onSaveFailed);
+            return true;
         } catch (Throwable dispatchError) {
             // 通道拒绝投递：按保存失败收尾，不留「永远 busy」的死状态。
             onSaveFailed(dispatchError);
             return false;
         }
-        return true;
     }
 
     /** 写盘回调：key 非空才算成功；成功后在同一次回调内同步刷新 entries。 */

@@ -38,6 +38,13 @@ import java.util.regex.Pattern;
  * 会话号，过期结果直接丢弃 —— 关掉面板（或已经登录成功）之后到达的回调不会把界面重新点亮，也不会把
  * {@code busy} 卡在 true。</p>
  *
+ * <p><b>登录成功判据（每次打开一份会话）</b>：{@link Ports#wasLoggedInAtOpen()} 不是常量 —— 生产实现
+ * {@code AccountService.wasLoggedInAtOpen()} 只在「打开时已登录」<b>且</b>此后没有真正的新登录（{@code loginSerial}
+ * 未变）时为 true，新登录成功一次它就翻成 false。所以每次 {@link #open()} 都开一份新的打开会话：记下打开时的快照
+ * （{@link #openWasLoggedIn} / {@link #openSession}），并在处理 {@code LOGGED_IN} 的<b>当下</b>重新问端口。
+ * 实时读数为 true ⇒ 恢复出来的旧登录态，保持面板打开并显示「当前已经登录」；为 false ⇒ 本次打开之后才真正登录，
+ * 收尾关窗。打开快照只属于那一次打开，{@link #close()} / 登录收尾后即作废，重开重新记录，不串会话。</p>
+ *
  * <p><b>生命周期</b>：{@link Async} 由调用方（UI 适配层）创建并持有，本类只使用它的 {@code run}；
  * 不用 {@code cancel}/{@code close} —— 契约的关闭语义只要求停二维码轮询与验证窗，在途网络请求由适配层
  * 自己收尾，本类用会话号保证结果不会落地。</p>
@@ -121,7 +128,7 @@ public final class LoginController {
      * @param riskFromQr        本次风控是否由扫码引来（决定主按钮语义）
      * @param verifyOpened      验证页是否已经交给用户打开过
      * @param loggedIn          当前账号是否已登录
-     * @param wasLoggedInAtOpen 打开面板前就已经登录（扫码成功判定要用它区分「恢复的旧登录态」）
+     * @param wasLoggedInAtOpen 本次打开面板时是否已登录（每次 open 重新记录；只是快照，成功判定看端口实时读数）
      * @param loginVia          本次登录方式（"扫码" / "验证码"）；未登录为空串
      */
     public record State(Mode mode, Phase phase, String message, String qrKey, byte[] qrPng, boolean qrExpired,
@@ -155,6 +162,15 @@ public final class LoginController {
 
         boolean pauseQrWatch();
 
+        /**
+         * 打开面板前是否已登录 —— <b>活判据</b>，每次调用都按「打开时快照 + 登录序号未变」重新求值。
+         *
+         * <p>生产实现 {@code AccountService.wasLoggedInAtOpen()}：开窗快照是 LOGGED_IN <b>且</b>{@code loginSerial}
+         * 未变时为 true，本次开窗之后真的登录成功一次就翻成 false。控制器在每次 {@code LOGGED_IN} 时都会重新问，
+         * 调用方不要缓存返回值。</p>
+         *
+         * @return true = 当前仍是「打开前就已经登录」的旧态；false = 打开之后发生了新的登录（或本来就没登录）
+         */
         boolean wasLoggedInAtOpen();
 
         Dto.SmsResult sendCode(String phone, String source);
@@ -194,10 +210,19 @@ public final class LoginController {
     private final Listener listener;
     private final Object lock = new Object();
 
-    /** 打开面板前是否已登录（构造时冻结；扫码成功判定全程用它）。 */
-    private final boolean wasLoggedInAtOpen;
-
     // ---- 受 lock 保护的字段 ----
+
+    /**
+     * 本次打开面板时的「打开前是否已登录」快照（构造器记初值，每次 {@link #open()} 重新记录）。
+     *
+     * <p>只用于两件事：给 {@link State} 提供快照值、以及在端口读失败时兜底。<b>它不是成功判据本身</b> ——
+     * 决定「这次 {@code LOGGED_IN} 是不是恢复的旧登录态」的是处理当下的实时读数，见
+     * {@link #restoredOldLoginLocked()}。</p>
+     */
+    private boolean openWasLoggedIn;
+
+    /** 本次打开会话的代次（= {@link #open()} 时的会话号；{@code -1} = 当前没有打开会话）。 */
+    private int openSession = -1;
     private Mode mode = Mode.QR;
     private Phase phase = Phase.IDLE;
     private String message = "";
@@ -248,7 +273,7 @@ public final class LoginController {
         } catch (Throwable ignored) {
             // 读不到就当成「打开前没登录」：宁可不把扫码结果当旧登录态
         }
-        this.wasLoggedInAtOpen = before;
+        this.openWasLoggedIn = before;
         this.lastPublished = snapshotLocked();
     }
 
@@ -299,6 +324,9 @@ public final class LoginController {
                 phase = Phase.ERROR;
                 message = TEXT_QR_FAIL;
             }
+            // 必须在 startQr 之后记录：生产 AccountService 正是在 startQr 里刷新「打开时快照」，
+            // 先读会拿到上一次开窗（甚至上一次登录）的陈旧值。
+            captureOpenSnapshotLocked();
             publishLocked();
         }
     }
@@ -321,6 +349,7 @@ public final class LoginController {
             busy = false;
             qrPng = null;
             session++;
+            openSession = -1;
             try {
                 ports.pauseQrWatch();
             } catch (Throwable ignored) {
@@ -433,12 +462,15 @@ public final class LoginController {
                     break;
                 }
                 case LOGGED_IN:
-                    if (wasLoggedInAtOpen) {
-                        // 扫码前本来就登录着：这是恢复出来的旧登录态，不是本次扫码的结果 —— 绝不判成功、绝不关窗。
+                    if (restoredOldLoginLocked()) {
+                        // 打开面板前本来就登录着（恢复出来的旧登录态）：不是本次打开之后的结果 —— 绝不判成功、绝不关窗。
+                        // loggedIn 同步补真：面板此时显示的是「已登录」而不是一张待扫的码。
+                        loggedIn = true;
                         phase = Phase.QR_READY;
                         qrExpired = false;
                         message = TEXT_ALREADY_LOGGED_IN;
                     } else {
+                        // 本次打开之后才真正登录成功（例如刚扫完码）：收尾关窗。
                         String nick = st.nickname() == null ? "" : st.nickname().trim();
                         qrPng = null;
                         finishLoginLocked(TEXT_LOGIN_VIA_QR, nick);
@@ -779,6 +811,7 @@ public final class LoginController {
         busy = false;
         closed = true;
         session++;
+        openSession = -1;
         try {
             ports.pauseQrWatch();
         } catch (Throwable ignored) {
@@ -817,6 +850,40 @@ public final class LoginController {
         }
     }
 
+    /**
+     * 记录「本次打开时是否已登录」，并把它绑定到当前打开代次。
+     *
+     * <p>调用时机必须在 {@code ports.startQr(...)} <b>之后</b>：生产实现 {@code AccountService.startQr} 正是在那里
+     * 刷新 {@code statusAtOpen} / {@code loginSerialAtOpen}，提前读会拿到上一次开窗的陈旧快照。</p>
+     */
+    private void captureOpenSnapshotLocked() {
+        openSession = session;
+        try {
+            openWasLoggedIn = ports.wasLoggedInAtOpen();
+        } catch (Throwable ignored) {
+            // 读不到就沿用上一次快照：宁可维持旧判定，也不把恢复出来的旧登录态误判成本次新登录
+        }
+    }
+
+    /**
+     * 处理 {@code LOGGED_IN} 时的<b>实时</b>成功判据（每次都要问端口，不复用任何缓存值）。
+     *
+     * <p>{@link Ports#wasLoggedInAtOpen()} 在生产实现里是活判据：打开时已登录 <b>且</b>此后没有真正的新登录
+     * （{@code loginSerial} 未变）才为 true；本次打开之后登录成功一次它就翻成 false。因此「恢复的旧登录态」
+     * 与「本次新扫码成功」只有问当下这一刻才能分开。</p>
+     *
+     * <p>端口抛异常时退回本次打开记下的快照（代次对得上才用），避免把已知的旧登录态误判成新登录而误关窗。</p>
+     *
+     * @return true = 恢复出来的旧登录态（保持面板打开）；false = 本次打开之后的新登录（收尾关窗）
+     */
+    private boolean restoredOldLoginLocked() {
+        try {
+            return ports.wasLoggedInAtOpen();
+        } catch (Throwable t) {
+            return openSession == session && openWasLoggedIn;
+        }
+    }
+
     /** 时钟（端口异常时退回系统时钟，避免节流逻辑整个失效）。 */
     private long now() {
         try {
@@ -838,7 +905,7 @@ public final class LoginController {
 
     private State snapshotLocked() {
         return new State(mode, phase, message, qrKey, qrPng, qrExpired, busy, cooldownLeft, riskUrl,
-                riskFromQr, verifyOpened, loggedIn, wasLoggedInAtOpen, loginVia);
+                riskFromQr, verifyOpened, loggedIn, openWasLoggedIn, loginVia);
     }
 
     /** 状态变了才通知（避免每秒一次的 tick 把 UI 刷成无意义重绘）。 */

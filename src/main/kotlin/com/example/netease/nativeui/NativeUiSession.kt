@@ -29,8 +29,10 @@ import java.util.function.Consumer
  * </ul>
  *
  * <p>关闭页面只改 [NativeUiState.visible]，不停止 tick、不取消已提交的同步；
- * 停用插件时 [stop] 关闭控制器并取消定时器。登录流程只有一个（[loginController]），
- * 页面关闭时 [closeLogin] 会停二维码轮询并走 AccountService 原有的取消/恢复语义。</p>
+ * 停用插件时 [stop] 关闭控制器、取消定时器，并在锁外关闭登录/本地保存的异步通道
+ * （LatestTask 的线程池与超时定时器随之释放），再次 [start] 会重建全新的异步通道。
+ * 登录流程只有一个（[loginController]），页面关闭时 [closeLogin] 只关登录面板
+ * （停二维码轮询、关验证窗，异步通道保留），用户可以再次打开；销毁整个控制器集合才走 [stop]。</p>
  */
 internal object NativeUiSession {
     private const val TAG = "native-ui"
@@ -74,18 +76,44 @@ internal object NativeUiSession {
     @Volatile
     private var started: Boolean = false
 
+    /**
+     * 登录异步通道：与 [loginController] 同生命周期。关登录面板（[closeLogin]）只关控制器、
+     * 不关本通道；停用（[stop]）才在锁外 close——通道里的 LatestTask 线程与超时定时器必须在这里释放。
+     */
+    @Volatile
+    private var loginAsync: LoginAsync? = null
+
+    /** 本地保存异步通道：与 [localSaveController] 同生命周期，[stop] 时在锁外关闭。 */
+    @Volatile
+    private var localSaveAsync: LocalSaveAsync? = null
+
     /** 安装 Hook 成功后启动；失败只记日志，绝不影响插件其它功能。 */
-    @Synchronized
     fun start() {
+        val failed = startLocked()
+        if (failed != null) {
+            // 启动失败的半成品不在会话锁内关闭：LatestTask 的回调会去取控制器锁，锁内等待可能反向加锁。
+            release(failed)
+        }
+    }
+
+    /** 创建本代控制器与异步通道；失败时在锁内摘除半成品，交给 [start] 在锁外释放。 */
+    @Synchronized
+    private fun startLocked(): Closing? {
         if (started) {
-            return
+            return null
         }
         try {
+            // 异步通道与控制器一起重建：stop() 关闭过的 LatestTask 不能复用（closed 后 run 静默丢弃请求），
+            // 所以每次 start 都造一对全新的通道，并作为会话字段持有，供 stop 在锁外显式关闭。
+            val loginChannel = LoginAsync()
+            val localSaveChannel = LocalSaveAsync()
+            loginAsync = loginChannel
+            localSaveAsync = localSaveChannel
             searchController = SearchController.createDefault { state -> NativeUiState.search = state }
             playlistController = PlaylistController.createDefault { state -> NativeUiState.playlist = state }
             loginController = LoginController(
                 AccountLoginPorts,
-                LoginAsync(),
+                loginChannel,
             ) { state ->
                 NativeUiState.login = state
                 if (state.phase() == LoginController.Phase.LOGGED_IN) {
@@ -94,7 +122,7 @@ internal object NativeUiSession {
             }
             localSaveController = LocalSaveController(
                 LocalSavePorts,
-                LocalSaveAsync(),
+                localSaveChannel,
             ) { state ->
                 NativeUiState.localSave = state
                 NativeUiState.localEntries = state.entries()
@@ -123,56 +151,137 @@ internal object NativeUiSession {
             refreshSync()
             refreshAccount()
             PluginLog.i(TAG, "原生页面控制器已启动（tick=250ms）")
+            return null
         } catch (t: Throwable) {
             PluginLog.w(TAG, "原生页面控制器启动失败（已隔离）：$t")
+            // 启动失败不留半成品：控制器与已创建的异步通道都要释放；锁内只摘除，关闭在 [start] 锁外做。
+            return detachLocked()
         }
     }
 
-    /** 停用插件时调用：关闭控制器、取消定时器；页面随后不再更新。 */
-    @Synchronized
+    /**
+     * 停用插件时调用：销毁整个控制器集合——取消定时器、关闭控制器，并在会话锁外关闭
+     * 登录/本地保存的异步通道（有界等待线程退出）；页面随后不再更新。
+     *
+     * <p>与 [closeLogin] 的区别：关面板只动 [loginController]（见其 close 契约），异步通道保留，
+     * 用户可以再次打开登录页；本方法关闭整代对象，[start] 会重建全新实例。所有关闭动作都在
+     * 会话锁外执行：LatestTask 的回调会去取控制器锁，反过来在持锁时等 LatestTask 监视器会形成
+     * 反向锁序；顺序固定为「先控制器（停回调），后异步通道」。</p>
+     */
     fun stop() {
-        timer?.cancel()
+        release(detachLocked())
+    }
+
+    /** 在会话锁内摘除当前一代控制器/异步通道；返回的对象必须在锁外关闭，避免锁序反转。 */
+    @Synchronized
+    private fun detachLocked(): Closing {
+        val closing = Closing(
+            timer = timer,
+            search = searchController,
+            playlist = playlistController,
+            login = loginController,
+            localSave = localSaveController,
+            verify = verifyController,
+            loginAsync = loginAsync,
+            localSaveAsync = localSaveAsync,
+        )
         timer = null
-        val search = searchController
-        val playlist = playlistController
-        val login = loginController
-        val localSave = localSaveController
-        val verify = verifyController
         searchController = null
         playlistController = null
         loginController = null
         localSaveController = null
         verifyController = null
+        loginAsync = null
+        localSaveAsync = null
         verifyAreaLaidOut = false
         started = false
+        return closing
+    }
+
+    /** 关闭一代控制器与异步通道（不持有会话锁；[stop] 与 [start] 失败回滚共用）。 */
+    private fun release(closing: Closing) {
         try {
-            search?.close()
+            closing.timer?.cancel()
+        } catch (t: Throwable) {
+            PluginLog.d(TAG, "取消原生页面定时器失败（已忽略）：$t")
+        }
+        try {
+            closing.search?.close()
         } catch (t: Throwable) {
             PluginLog.d(TAG, "关闭搜索控制器失败（已忽略）：$t")
         }
         try {
-            playlist?.close()
+            closing.playlist?.close()
         } catch (t: Throwable) {
             PluginLog.d(TAG, "关闭歌单控制器失败（已忽略）：$t")
         }
         try {
-            // close() 会停二维码轮询并走 AccountService 的取消/恢复语义（不会退出账号）。
-            login?.close()
+            // 只关面板：停二维码轮询、关验证窗、走 AccountService 的取消/恢复语义（不会退出账号）。
+            closing.login?.close()
         } catch (t: Throwable) {
             PluginLog.d(TAG, "关闭登录控制器失败（已忽略）：$t")
         }
         try {
-            localSave?.close()
+            closing.localSave?.close()
         } catch (t: Throwable) {
             PluginLog.d(TAG, "关闭本地命名控制器失败（已忽略）：$t")
         }
         try {
             // 有界关闭助手进程（close 内部 600ms + 400ms 后强制结束），失败也不影响停用流程。
-            verify?.close()
+            closing.verify?.close()
         } catch (t: Throwable) {
             PluginLog.d(TAG, "关闭内嵌验证控制器失败（已忽略）：$t")
         }
+        // 必须等控制器都关完、且不持有任何控制器锁时再关异步通道：LatestTask.publish 在
+        // synchronized(this) 里回调控制器，若此时还持有控制器锁就会互相等待。
+        try {
+            closing.loginAsync?.close()
+        } catch (t: Throwable) {
+            PluginLog.d(TAG, "关闭登录异步通道失败（已忽略）：$t")
+        }
+        try {
+            closing.localSaveAsync?.close()
+        } catch (t: Throwable) {
+            PluginLog.d(TAG, "关闭本地保存异步通道失败（已忽略）：$t")
+        }
+        // LatestTask.close 只 shutdownNow、不 join；这里做有界回收确认，避免反复启停累积线程。
+        awaitWorkersGone(LOGIN_THREAD_NAME)
+        awaitWorkersGone(LOCAL_SAVE_THREAD_NAME)
     }
+
+    /** 等待指定名字的 daemon 线程退出（有界；超时只记日志，绝不阻塞停用流程）。 */
+    private fun awaitWorkersGone(threadName: String) {
+        val deadline = System.nanoTime() + ASYNC_CLOSE_WAIT_MS * 1_000_000L
+        while (true) {
+            val alive = Thread.getAllStackTraces().keys.any { it.isAlive && it.name == threadName }
+            if (!alive) {
+                return
+            }
+            val remainingMs = (deadline - System.nanoTime()) / 1_000_000L
+            if (remainingMs <= 0L) {
+                PluginLog.d(TAG, "异步通道线程未在 ${ASYNC_CLOSE_WAIT_MS}ms 内退出（daemon，不阻塞停用）：$threadName")
+                return
+            }
+            try {
+                Thread.sleep(minOf(remainingMs, 20L))
+            } catch (e: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return
+            }
+        }
+    }
+
+    /** 一次 [stop]/启动失败要释放的整代对象；顺序固定：先控制器，后异步通道。 */
+    private class Closing(
+        val timer: Timer?,
+        val search: SearchController?,
+        val playlist: PlaylistController?,
+        val login: LoginController?,
+        val localSave: LocalSaveController?,
+        val verify: VerifyEmbedController?,
+        val loginAsync: LoginAsync?,
+        val localSaveAsync: LocalSaveAsync?,
+    )
 
     fun search(): SearchController? = searchController
 
@@ -200,7 +309,7 @@ internal object NativeUiSession {
                 captureLocalSave()
             }
             NativePage.SYNC -> refreshSync()
-            NativePage.SEARCH, NativePage.HOME -> Unit
+            NativePage.SEARCH, NativePage.HOME, NativePage.DEVELOPER -> Unit
         }
         return true
     }
@@ -344,10 +453,24 @@ internal object NativeUiSession {
         }
     }
 
-    /** 「存为本地歌单」：控制器负责空白校验、快照隔离、后台写盘与成功后刷新。 */
+    /**
+     * 「存为本地歌单」：在用户确认保存的调用栈内，从当前歌单状态**一次性**取出来源名与曲目列表
+     * （同一个 [PlaylistController.State] 快照，不会一个旧一个新），交给保存控制器在锁内固定后写盘。
+     *
+     * <p>不能依赖 [captureLocalSave] 的「来源名变了才刷新」快照：同一歌单重载内容、刷新同一来源
+     * 的列表或切到另一张同名歌单时来源名不变，旧列表会盖掉用户此刻看到的列表（REVIEW issue 5）。
+     * 提交后切页只改 [NativeUiState.playlist]；控制器已在 submit 调用栈内拷贝了曲目，写盘不受影响。</p>
+     */
     fun submitLocalSave(name: String) {
         try {
-            localSaveController?.submit(name)
+            val controller = localSaveController ?: return
+            // 只读一次 State：sourceName 与 tracks 必须来自同一份页面快照，避免「来源新、列表旧」。
+            val current = NativeUiState.playlist
+            controller.submit(
+                name,
+                current?.tracks() ?: emptyList(),
+                current?.sourceName() ?: "",
+            )
         } catch (t: Throwable) {
             PluginLog.w(TAG, "保存本地歌单失败（已隔离）：$t")
             NativeUiState.localNote = "保存本地歌单失败，请重试"
@@ -510,7 +633,7 @@ internal object NativeUiSession {
     }
 
     private class LoginAsync : LoginController.Async {
-        private val task = LatestTask("native-ui-login", REQUEST_TIMEOUT_MS) { r -> r.run() }
+        private val task = LatestTask(LOGIN_THREAD_NAME, REQUEST_TIMEOUT_MS) { r -> r.run() }
 
         override fun <T> run(
             work: LoginController.Fetcher<T>,
@@ -530,7 +653,7 @@ internal object NativeUiSession {
     }
 
     private class LocalSaveAsync : LocalSaveController.Async {
-        private val task = LatestTask("native-ui-local-save", REQUEST_TIMEOUT_MS) { r -> r.run() }
+        private val task = LatestTask(LOCAL_SAVE_THREAD_NAME, REQUEST_TIMEOUT_MS) { r -> r.run() }
 
         override fun <T> run(
             work: LocalSaveController.Fetcher<T>,
@@ -550,4 +673,11 @@ internal object NativeUiSession {
     }
 
     private const val REQUEST_TIMEOUT_MS = 20_000L
+
+    /** stop() 等待异步通道线程退出的上限（LatestTask.close 只 shutdownNow、不 join）。 */
+    private const val ASYNC_CLOSE_WAIT_MS = 1_000L
+
+    private const val LOGIN_THREAD_NAME = "native-ui-login"
+
+    private const val LOCAL_SAVE_THREAD_NAME = "native-ui-local-save"
 }

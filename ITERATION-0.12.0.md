@@ -1,20 +1,25 @@
 # 0.12.0 迭代记录
 
 本文件随源码交付（`docs/` 被忽略，故正式记录放仓库根）。依据 `docs/PLAN.md` 分批推进；
-自动检查通过不代表真机验收完成，未真机确认的项目一律标 `2`（待验），不写成通过。
+自动检查通过不代表真机验收完成，未真机确认的项目一律写「待验」，不写成通过。
 
-状态码：`0` 通过 / `1` 失败 / `2` 待验项。
+**三种数字不要混用**（REVIEW 指出旧稿互相冲突，此处统一）：
+
+- 本文件的批次状态只写文字：**已完成 / 待验**，不再使用数字。
+- 用户验收结论见 `ACCEPTANCE.md`：**0 = 未验/未开始，1 = 用户确认为通过，2 = 有问题**。
+- 自动检查的进程退出码是机器语义：**0 = 通过，1 = 失败，2 = 证据不足/待验**（例如真机项没有证据时验收工具返回 2）。
 
 ## 批次进度
 
 | 批次 | 内容 | 状态 | 说明 |
 | --- | --- | --- | --- |
-| 0 | 建立可复现基线 | 0 | 见下「已验证事实」 |
-| 1 | 构建迁移 + 最小原生 Compose 页面 | 0 | 构建/自动检查/真机验收全部完成；**用户已真机确认最小页面**（显示在主窗口内、关闭恢复宿主内容、重开正常） |
-| 2 | 业务控制器抽取、搜索与歌单 / 同步页面 | 2 | 实现、构建与自动检查全部完成；已做部分真机取证（搜索/播放/歌单页/同步状态），**待用户真机验收** |
-| 3 | 登录、账号及附属界面迁移 | 2 | 实现、构建与自动检查全部完成（登录/账号/本地命名控制器 + 原生页）；**待用户真机验收** |
-| 4 | WebView2 验证区域改造 | 2 | 助手严格挂载 + 控制器 + 内嵌验证面板 + 构建/自动检查全部完成；**待用户真机验收**（真实风控可见可操作、移动缩放、停用关闭） |
-| 5 | 旧 UI 清理与双渠道交付 | 2 | 旧窗口与注册表已删除、门禁/探针已改写、0.12.0 包与双渠道材料完成，构建与 9 项自动检查全部 exit 0；**交付候选，待用户按 `ACCEPTANCE.md` 真机验收**；WebView2 技术关卡仍未闭合 |
+| 0 | 建立可复现基线 | 已完成 | 见下「已验证事实」 |
+| 1 | 构建迁移 + 最小原生 Compose 页面 | 已完成 | 构建/自动检查/真机验收全部完成；**用户已真机确认最小页面**（显示在主窗口内、关闭恢复宿主内容、重开正常） |
+| 2 | 业务控制器抽取、搜索与歌单 / 同步页面 | 待验 | 实现、构建与自动检查全部完成；已做部分真机取证（搜索/播放/歌单页/同步状态），**待用户真机验收** |
+| 3 | 登录、账号及附属界面迁移 | 待验 | 实现、构建与自动检查全部完成（登录/账号/本地命名控制器 + 原生页）；**待用户真机验收** |
+| 4 | WebView2 验证区域改造 | 待验 | 助手严格挂载 + 控制器 + 内嵌验证面板 + 构建/自动检查全部完成；**待用户真机验收**（真实风控可见可操作、移动缩放、停用关闭） |
+| 5 | 旧 UI 清理与双渠道交付 | 待验 | 旧窗口与注册表已删除、门禁/探针已改写、0.12.0 包与双渠道材料完成，构建与 9 项自动检查全部 exit 0；**交付候选，待用户按 `ACCEPTANCE.md` 真机验收**；WebView2 技术关卡仍未闭合 |
+| 6 | 0.12.0 独立审查修复（7 项） | 待验 | 锁序、挂载范围、登录判据、会话生命周期、原子快照、宿主主题、键盘导航已修复并有探针；构建与 10 个检查步骤全部 exit 0（TOTAL_FAIL=0）；真机项待按 `ACCEPTANCE.md` 第 13–16 条复核 |
 
 ---
 
@@ -521,12 +526,16 @@ harness/run-regression.ps1 本批扩展：-Batch 5 编译并运行 SearchControl
     pwsh -NoProfile -File harness/run-regression.ps1 -Batch 5 -Spmod build/dist/plugin-com.example.netease-0.12.0.spmod   # 搜索/歌单控制器探针
     pwsh -NoProfile -File harness/run-regression.ps1 -Batch 6 -Spmod build/dist/plugin-com.example.netease-0.12.0.spmod   # 登录/本地命名控制器探针
     pwsh -NoProfile -File harness/run-regression.ps1 -Batch 7 -Spmod build/dist/plugin-com.example.netease-0.12.0.spmod   # 内嵌验证控制器探针（185 条）
-    pwsh -NoProfile -File harness/run-verifyhost-probe.ps1 -Out build/evidence/batch5/07-verifyhost-proto.txt  # 真实助手协议（41 条）
+    pwsh -NoProfile -File harness/run-regression.ps1 -Batch 8 -Spmod build/dist/plugin-com.example.netease-0.12.0.spmod   # 会话生命周期（59 条）
+    pwsh -NoProfile -File harness/run-regression.ps1 -Batch 9 -Spmod build/dist/plugin-com.example.netease-0.12.0.spmod   # 挂载范围/主题常量（31 条）
+    pwsh -NoProfile -File harness/run-verifyhost-probe.ps1 -Out build/evidence/batch6/07-verifyhost-proto.txt  # 真实助手协议（41 条）
 
-`run-regression.ps1` 的 `-Batch` 取值 1–7 或 all；批次 5 运行 `SearchControllerProbe`（**109** 条断言）
-与 `PlaylistControllerProbe`（146 条断言 + PlaylistIds 10 条等价性）；
-批次 6 运行 `LoginControllerProbe`（253 条断言）与 `LocalSaveControllerProbe`（156 条断言）；
-批次 7 运行 `VerifyEmbedControllerProbe` + `FakeVerifyHost`（**185** 条断言，假助手，不需要桌面）。
+`run-regression.ps1` 的 `-Batch` 取值 1–9 或 all；批次 5 运行 `SearchControllerProbe`（**109** 条断言）、
+`PlaylistControllerProbe`（146 条断言 + PlaylistIds 10 条等价性）、`PlaylistLockOrderProbe`（17 条锁序）与
+`SearchKeyboardProbe`（66 条键盘导航）；批次 6 运行 `LoginControllerProbe`（**296** 条断言）与
+`LocalSaveControllerProbe`（156 条断言）；批次 7 运行 `VerifyEmbedControllerProbe` + `FakeVerifyHost`
+（**185** 条断言，假助手，不需要桌面）；批次 8 运行 `NativeUiSessionProbe`（59 条会话生命周期，
+classpath 需带宿主 `app/ffmpeg-x64.dll`）；批次 9 运行 `UiMountScopeProbe`（31 条挂载范围与主题常量）。
 
 助手本体（C#）重建与验真：
 
@@ -582,3 +591,69 @@ harness/run-regression.ps1 本批扩展：-Batch 5 编译并运行 SearchControl
   0.12.0 包：`build/dist/plugin-com.example.netease-0.12.0.spmod`，14,282,949 B，sha256 `d5e43efa…a330a`。
   上述提交只含源码、脚本与本记录；不含 `build/`、`docs/`、日志、截图、真实数据。
 - 之后批次各自独立提交；`docs/`、`build/` 不入库。
+
+---
+
+## 十三、0.12.0 独立审查修复（2026-10-22）
+
+背景：`build/evidence/codex-review/REVIEW.md` 对 0.12.0 做独立审查，提出 7 项缺陷和文档数字冲突。
+本轮按该文件修复；审查材料在 `build/` 下（不入库），修复只改源码、探针、脚本与文档，不改插件 ID、
+主类、扩展类、数据格式和包布局。
+
+### 1. 七项问题与修复
+
+| # | REVIEW 指出的问题 | 修复 | 证据 |
+| --- | --- | --- | --- |
+| 1 | 控制器在 `synchronized` 内投递/取消/关闭后台任务，与 `LatestTask` 形成反向锁序，外部持锁时会死锁 | `PlaylistController`、`LocalSaveController` 改为私有锁对象：版本/代次状态在锁内，`async.run/cancel/close` 一律移到锁外；`tick` 在锁内决定取消，锁外执行；`close` 锁内置位、锁外关通道；`submit` 先在锁内取版本与 epoch，锁外投递，投递异常按失败回调；`SearchController` 复核本就符合 | `PlaylistLockOrderProbe`（17 条）：外部持有对象监视器时结果仍回传；真实 `LatestTask` 下原死锁复现不再发生且 JVM 无死锁线程；在途请求 `close()` 快速返回；epoch 变化 `tick()` 快速取消；迟到回调不再通知 |
+| 2 | 面板 Hook 对所有插件无条件挂载并拦输入，可能顶掉其它插件的配置页 | 新增 `HostUiMountScope`：只认 `ScreenRoute$ModConfigContent` 且 `getPluginId()` 精确等于 `com.example.netease`；其它插件、空/缺失/异常路由直接返回，不建入口、不消费指针；`install()` 不再强制 `visible=true`，首页以收起态出现 | `UiMountScopeProbe`（31 条，批次 9）：本插件/其它插件/空/空白/首尾空格/大小写/非该路由/无参数/null/异常全部过滤正确；`PanelHook` 字节码只在匹配后绘制；`visible` 初值 false；宿主主题桥接常量齐全 |
+| 3 | 登录成功判据用构造时快照，打开后“旧登录被恢复”会被误判成新登录成功并关面板 | `LoginController` 去掉 `final wasLoggedInAtOpen`，改为每次 `open()` 在 `startQr` 之后捕获 `openWasLoggedIn/openSession`；`tick()` 每到 `LOGGED_IN` 都实时读 `ports.wasLoggedInAtOpen()`，旧登录恢复则保持面板并显示「已登录」，只有新登录才关闭；读失败回退到打开时快照；`State.wasLoggedInAtOpen` 仍为打开时语义 | `LoginControllerProbe` 由 253 增至 **296** 条，新增 G15 四场景：登录前打开后成功、旧登录恢复、已登录后新扫码、同控制器关闭重开；含 `startQr` 调用顺序与读失败回退 |
+| 4 | 停用插件不释放登录/本地保存异步通道，线程与 `LatestTask` 残留，重启可能复用旧通道 | `NativeUiSession` 把 `LoginAsync`/`LocalSaveAsync` 存为 `@Volatile` 字段；`start()` 每次重建；`stop()` 经 `detachLocked()` 摘除控制器与通道后在锁外释放，并 `awaitWorkersGone`（`native-ui-login`/`native-ui-local-save`，上限 1 s）；`closeLogin()` 只关面板不销毁通道 | `NativeUiSessionProbe`（59 条，批次 8）：stop 后登录/本地保存线程归零、旧 `LatestTask.closed=true`、会话不再持有旧通道；连续 3 轮启动/停用不累积；再次 start 重建全新通道并真正执行任务；`closeLogin()` 不关通道 |
+| 5 | 保存本地歌单在确认后重新读页面快照，同名歌单刷新后会存成旧曲目/旧来源 | `LocalSaveController` 新增 `submit(name, tracks, sourceName)`：在确认调用栈内先复制曲目、固定来源与默认名，再发布保存态并在锁外投递；`NativeUiSession.submitLocalSave` 读取一次 `NativeUiState.playlist` 快照后传入 | `LocalSaveControllerProbe` 156 条 + `NativeUiSessionProbe` G2：同名不同歌单保存当前可见列表、来源与曲目同一快照、提交后切页不影响本次写盘、一次确认只写一次 |
+| 6 | 插件仍用 Material3 默认色板冒充宿主主题，测试信息挤在普通页面 | 新增 `HostSaltTheme`：从宿主 `SaltTheme` 的 `CompositionLocal` 读取配色/字体/形状/深浅色，失败才降级到 M3 并记录原因；`NativeUiPage` 用宿主值构造 `MaterialTheme`；密度/字体/挂载/自检等测试信息移到新的「开发者信息」页，首页保留入口；普通页头只显示插件版本 | `UiMountScopeProbe` 校验 6 个混淆类、主题 local、11 个配色/4 个字体/3 个形状 getter 存在且 local 是 `CompositionLocal`；`HostSaltTheme.read/describe` 入口存在；构建通过 |
+| 7 | 搜索结果不能只用键盘：结果区无可见焦点，↑/↓/Enter 不可用 | 抽出 `SearchKeyNav`（纯 Kotlin，无 Compose）：上下移动不循环、无选中时下选首/上选末、越界收敛；Enter 有选中则播放、有结果无选中只选首行、空结果不动作。结果区 `focusable` + `onKeyEvent`，聚焦时画 2 dp 主色边框并显示键盘提示；方向键选中并滚动到可见；输入框 Enter 只搜索，方向下键把焦点交给结果区 | `SearchKeyboardProbe`（66 条，批次 5）：移动/边界/空列表/零与负 delta、三种 Enter 动作、页面静态接线（焦点、按键、滚动、`selectRow`/`playSelected`、输入框不播放）与鼠标手势 |
+
+### 2. 文件与接线
+
+- 修改：`PlaylistController.java`、`LocalSaveController.java`、`LoginController.java`、`NativeUiSession.kt`、
+  `HostUiAdapter.kt`、`NativeUiPage.kt`、`NativeSearchPage.kt`、`harness/run-regression.ps1`。
+- 新增 internal object：`HostUiMountScope`、`HostSaltTheme`（`HostUiAdapter.kt`）、`SearchKeyNav`（`NativeSearchPage.kt`）。
+- 新增探针：`PlaylistLockOrderProbe.java`、`SearchKeyboardProbe.java`（默认包）、`NativeUiSessionProbe.java`、
+  `UiMountScopeProbe.java`（`com.example.netease.nativeui`）。
+- `run-regression.ps1`：批次 5 增加 lock-order / search-keyboard；新增批次 8（会话生命周期）与批次 9（挂载范围）；
+  批次 8/9 运行 classpath 追加宿主 `app/ffmpeg-x64.dll`（内含 Compose runtime）。
+
+### 3. 复验结果
+
+新包 `build/dist/plugin-com.example.netease-0.12.0.spmod`：**14,332,386 B**，
+sha256 `1dedd0028b08440122141b7a4cc261d6a71c1b07c1053a26e6ebf11063742271`，
+249 个 `.class`（原 233）、资源 15 个。证据 `build/evidence/batch6/01–09`，`TOTAL_FAIL=0`：
+
+| 检查 | 结果 |
+| --- | --- |
+| 构建 | exit 0；249 class / 15 资源 / 产物自检通过 |
+| 包结构 `verify-spmod` | 78 项 PASS |
+| 离线加载 `run-harness` | 56 PASS / 0 FAIL |
+| 全量回归 1–9 | 12 / 6+7+3 / 9+7 / 4+10 / 109+146+17+66 / 296+156 / 185 / 59 / 31 |
+| 行为回归 | 27+18+7+1 PASS |
+| 验收工具单测 | 5 个 OK |
+| 助手协议（真实 WebView2） | 41 PASS |
+| LoginShape | 40 PASS |
+| DevMode | 67 PASS |
+
+`UiMountScopeProbe` 编译有 1 个 varargs 警告（不影响退出码）；已记录，不当作失败。
+
+### 4. 仍未闭合（真机）
+
+- 宿主主题桥接（issue 6）只用离线探针和构建验证，宿主是 1.19.0 的混淆名；真实窗口里的配色、字体、深浅色
+  是否与宿主完全一致，未真机确认。宿主升级后需重核 §8.2 的常量。
+- 锁序、会话生命周期、原子快照（issue 1/4/5）在真实宿主机多次切换歌单、反复停用/启用下的表现，
+  仍要按 `ACCEPTANCE.md` 第 13–16 条走查；探针不能代替真机。
+- 搜索键盘（issue 7）需要真实键盘操作确认焦点框、上下选择与 Enter 播放；鼠标路径不受影响。
+- WebView2 真实风控、Steam/GitHub 双渠道等原有未闭合项不变，仍按 `RELEASE-0.12.0.md` §8 处理。
+
+### 5. 数字语义
+
+- 本文件批次状态只用文字「已完成 / 待验」；用户验收结论用 `ACCEPTANCE.md` 的 0/1/2；
+  自动检查的进程退出码是 0 通过 / 1 失败 / 2 证据不足。本批 10 个检查步骤全部 exit 0，故写「全部通过」，
+  但真机项仍写「待验」。
+
