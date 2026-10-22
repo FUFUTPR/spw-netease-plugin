@@ -5,6 +5,8 @@ $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $OutputEncoding = [System.Text.Encoding]::UTF8
 $Repo = Split-Path -Parent $PSScriptRoot
+. (Join-Path $Repo 'tools/jdk.ps1')
+$jdk = Resolve-RepoJdk
 $project = Get-Content (Join-Path $Repo 'project.json') -Raw | ConvertFrom-Json
 if (-not $Spmod) { $Spmod = Join-Path $Repo "build/dist/plugin-$($project.pluginId)-$($project.version).spmod" }
 $Spmod = (Resolve-Path -LiteralPath $Spmod).Path
@@ -21,7 +23,7 @@ $Libs = @(Get-ChildItem (Join-Path $Extract 'lib') -Filter '*.jar' | ForEach-Obj
 $Cp = (@($Build,$Cls) + $Libs + $HostJars) -join ';'
 $batches = if ($Batch -eq 'all') { @(1,2,3,4) } else { @([int]$Batch) }
 foreach ($n in $batches) {
-    & javac -encoding UTF-8 -d $Build -cp $Cp (Join-Path $PSScriptRoot "regression/cover/Batch${n}Probe.java")
+    & $jdk.Javac -encoding UTF-8 -d $Build -cp $Cp (Join-Path $PSScriptRoot "regression/cover/Batch${n}Probe.java")
     if ($LASTEXITCODE -ne 0) { throw "Regression compilation failed: batch $n" }
 }
 $rc = 0
@@ -34,7 +36,7 @@ try {
             New-Item -ItemType Directory -Path $Sandbox | Out-Null
             $env:APPDATA = $Sandbox
             $main = if ($n -eq 4) { 'com.example.netease.ui.Batch4Probe' } else { "Batch${n}Probe" }
-            & java '-Djava.awt.headless=true' '-Dfile.encoding=UTF-8' '-Dstdout.encoding=UTF-8' '-Dstderr.encoding=UTF-8' '--add-modules' 'jdk.httpserver' `
+            & $jdk.Java '-Djava.awt.headless=true' '-Dfile.encoding=UTF-8' '-Dstdout.encoding=UTF-8' '-Dstderr.encoding=UTF-8' '--add-modules' 'jdk.httpserver' `
                 -cp $Cp $main $Sandbox $project.version $phase 2>&1 |
                 Tee-Object -FilePath (Join-Path $Work "batch-$n-$phase.txt")
             if ($LASTEXITCODE -ne 0) { $rc = 1 }

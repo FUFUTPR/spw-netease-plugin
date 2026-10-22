@@ -10,9 +10,10 @@
         com/xuncorp/spw/workshop/**   ->  tools\.cache\spw-workshop-api-host.jar
         org/pf4j/**                   ->  tools\.cache\pf4j-3.12.0.jar
 
-    ⚠️ 必须使用「宿主自身抽取」的 API jar。
-       JitPack 上的 com.github.Moriafly:spw-workshop-api:0.1.0-dev21 是 25 个类，
-       而宿主 1.18.5 只有 19 个类；用 dev21 编译 → 可能引用到 1.18.5 不存在的成员
+    ⚠️ 必须使用「宿主自身抽取」的 API jar；版本以本机宿主为准，不要相信缓存。
+       历史：宿主 1.18.5 = 19 个 API class；宿主 1.19.0 = 37 个（新增 api/hook 包）。
+       抽取结果会打印宿主版本、class 数、SHA-256，数量对不上时给出警告。
+       用 JitPack 上其它版本的 API 编译 → 可能引用到本机宿主不存在的成员
        → 运行期 NoSuchMethodError / NoClassDefFoundError。
 
 .PARAMETER HostJar
@@ -138,16 +139,31 @@ $apiClasses  = Get-ClassCount -JarPath $apiOut
 $apiSize     = (Get-Item -LiteralPath $apiOut).Length
 $pf4jSize    = (Get-Item -LiteralPath $pf4jOut).Length
 
+# 宿主版本（jpackage 写在 app/*.cfg 的 -Djpackage.app-version= 里）
+$hostVer = 'unknown'
+$appDir = Split-Path -Parent $jar
+foreach ($cfg in @(Get-ChildItem -LiteralPath $appDir -Filter '*.cfg' -File -ErrorAction SilentlyContinue)) {
+    $m = Select-String -LiteralPath $cfg.FullName -Pattern 'jpackage\.app-version=([0-9][0-9.]*)' -AllMatches
+    if ($m) { $hostVer = $m.Matches[0].Groups[1].Value; break }
+}
+
+$sha = { param($p) (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash.ToLower() }
+
 Write-Host ''
+Write-Host "宿主版本 : $hostVer"
 Write-Host "宿主 JAR : $jar"
+Write-Host "           sha256 $(& $sha $jar)"
 Write-Host "API  JAR : $apiOut"
 Write-Host "           $apiClasses 个 class / $apiCount 条目 / $apiSize B"
+Write-Host "           sha256 $(& $sha $apiOut)"
 Write-Host "PF4J JAR : $pf4jOut"
 Write-Host "           $pf4jCount 条目 / $pf4jSize B"
+Write-Host "           sha256 $(& $sha $pf4jOut)"
 Write-Host ''
 
-if ($apiClasses -ne 19) {
-    Write-Warning "宿主 API class 数 = $apiClasses，而 1.18.5 预期 19。宿主可能已升级：请重新核对 docs/02-Workshop-API-参考.md 的类清单与签名。"
+$ExpectedApiClasses = 37   # 宿主 1.19.0（1.18.5 = 19，新增 api/hook 等 18 个）
+if ($apiClasses -ne $ExpectedApiClasses) {
+    Write-Warning "宿主 API class 数 = $apiClasses，本仓库基线（1.19.0）预期 $ExpectedApiClasses。宿主可能已升级：请重新核对 docs/02-Workshop-API-参考.md 的类清单与签名。"
 }
 if ($pf4jCount -lt 50) {
     Write-Warning "PF4J 条目数 = $pf4jCount，看起来偏少，宿主内嵌的 org.pf4j 可能已换版本。"

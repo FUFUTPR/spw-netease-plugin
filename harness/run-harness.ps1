@@ -71,8 +71,12 @@ $BuildDir   = Join-Path $HarnessDir 'build'          # harness 的 .class 输出
 $SrcDir     = Join-Path $HarnessDir 'src'
 $WorkRoot   = Join-Path $HarnessDir ('work/lifecycle-' + [guid]::NewGuid().ToString('N'))           # 临时插件目录（harness 独占）
 
-$Javac = 'javac'
-$Java  = 'java'
+# 宿主 1.19.0 的 API/宿主 class 都是 Java 25（class 69）；JDK 21 的 java 会直接
+# UnsupportedClassVersionError。统一从 tools/jdk.ps1 解析，保证与 build.ps1 同一个 JDK。
+. (Join-Path $RepoRoot 'tools\jdk.ps1')
+$jdk   = Resolve-RepoJdk
+$Javac = $jdk.Javac
+$Java  = $jdk.Java
 
 function Fail-Hard { param([string]$m) Write-Host ''; Write-Host "✗ $m" -ForegroundColor Red; Write-Host ''; exit 1 }
 
@@ -102,7 +106,7 @@ foreach ($j in $needJars) {
 $HarnessCp = ($cpParts -join ';')
 
 foreach ($exe in @($Javac, $Java)) {
-    if (-not (Get-Command $exe -ErrorAction SilentlyContinue)) { Fail-Hard "PATH 里找不到 $exe" }
+    if (-not (Test-Path -LiteralPath $exe)) { Fail-Hard "找不到 $exe（应由 tools\jdk.ps1 解析出 JDK 25）" }
 }
 
 Write-Host ("  javac : " + (& $Javac -version 2>&1)) -ForegroundColor DarkGray

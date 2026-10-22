@@ -6,7 +6,9 @@
 本机没有 gradle / 7z / jar，所以整条链路只用 javac + Python 标准库：
 
     1. 读取仓库根 project.json（唯一事实来源：插件 ID / 版本 / 打包参数）
-    2. javac --release 21 -cp "宿主抽取的 API jar;pf4j.jar" 编译 src/main/java
+    2. javac(JDK 25) --release 21 -cp "宿主抽取的 API jar;pf4j.jar" 编译 src/main/java
+       —— 宿主 1.19.0 的 API class 是 Java 25（class 69），必须用 JDK 25 的 javac 读；
+          产物仍按 --release 21 生成（宿主运行时 = JDK 25，可向下兼容）
     3. 把 src/main/resources 平铺进 classes/ 根
     4. 组装 .spmod 目录结构（这个结构就是宿主解压后的插件目录）：
          META-INF/MANIFEST.MF                     <- 根 manifest（PF4J 用 ManifPluginDescriptorFinder 读它）
@@ -32,6 +34,7 @@ import hashlib
 import json
 import locale
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -96,16 +99,64 @@ def load_project() -> dict:
     return data
 
 
-def find_javac() -> str:
-    java_home = os.environ.get("JAVA_HOME")
-    if java_home:
-        cand = Path(java_home) / "bin" / ("javac.exe" if os.name == "nt" else "javac")
-        if cand.exists():
-            return str(cand)
+# 宿主 1.19.0 的 API class 文件版本是 69（Java 25）；JDK 21 的 javac 会拒绝读取。
+MIN_JDK_MAJOR = 25
+
+
+def _javac_major(javac: str) -> int:
+    """读 javac -version 的 major（输出形如 "javac 25.0.4.1"）。"""
+    try:
+        proc = subprocess.run([javac, "-version"], capture_output=True, text=True)
+    except OSError:
+        return 0
+    raw = (proc.stdout or "") + (proc.stderr or "")
+    m = re.search(r"(\d+)(?:\.\d+)*", raw)
+    return int(m.group(1)) if m else 0
+
+
+def _jdk_candidates() -> list[Path]:
+    """顺序：SPW_JDK_HOME → JAVA_HOME → 常见安装位置 → PATH。"""
+    cands: list[Path] = []
+    for var in ("SPW_JDK_HOME", "JAVA_HOME"):
+        v = os.environ.get(var)
+        if v:
+            cands.append(Path(v))
+
+    home = Path.home()
+    patterns: list[Path] = [home / "tools" / "jdk25"]
+    patterns += list((home / "tools").glob("jdk-25*")) if (home / "tools").exists() else []
+    roots = []
+    for pf in (os.environ.get("ProgramFiles"), os.environ.get("ProgramFiles(x86)"), os.environ.get("LOCALAPPDATA")):
+        if pf:
+            roots += [Path(pf) / "Java", Path(pf) / "Eclipse Adoptium", Path(pf) / "Microsoft", Path(pf) / "Programs"]
+    for root in roots:
+        if root.exists():
+            patterns += list(root.glob("jdk-25*")) + list(root.glob("*jdk-25*"))
+    cands += patterns
+
     found = shutil.which("javac")
     if found:
-        return found
-    die("找不到 javac。请安装 JDK 21+ 并把 bin 加进 PATH，或设置 JAVA_HOME。")
+        cands.append(Path(found).resolve().parent.parent)
+    return cands
+
+
+def find_javac() -> str:
+    tried: list[str] = []
+    for cand in _jdk_candidates():
+        javac = cand / "bin" / ("javac.exe" if os.name == "nt" else "javac")
+        if not javac.exists():
+            continue
+        major = _javac_major(str(javac))
+        tried.append(f"{cand} (javac major={major})")
+        if major < MIN_JDK_MAJOR:
+            continue
+        return str(javac)
+    detail = "; ".join(tried) if tried else "未发现任何候选 JDK"
+    die(
+        f"找不到 JDK {MIN_JDK_MAJOR}+（宿主 1.19.0 起要求）。已尝试：{detail}\n"
+        "请设置 SPW_JDK_HOME 或 JAVA_HOME 指向 JDK 25，"
+        "或把 JDK 25 装到 %ProgramFiles%/Java/jdk-25*、<用户目录>/tools/jdk25。"
+    )
     raise AssertionError  # unreachable
 
 
@@ -447,7 +498,7 @@ def _run_build(args) -> int:
             if d.exists():
                 shutil.rmtree(d)
     CLASSES.mkdir(parents=True, exist_ok=True)
-    log(f"  javac = {javac}")
+    log(f"  javac = {javac} (major {_javac_major(javac)})")
     log(f"  API   = {API_JAR.name}  PF4J = {PF4J_JAR.name}")
 
     src_dir = ROOT / project["sourceDir"]

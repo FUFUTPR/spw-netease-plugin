@@ -18,7 +18,11 @@ Salt Player for Windows 的第三方插件，把网易云音乐接进本地播�
 
 ## 自己编译
 
-需要 JDK 21，机器上还要装好 Salt Player for Windows。
+需要 **JDK 25** 和 Salt Player for Windows 1.19.0（其 API 是 Java 25 字节码，JDK 21 的 javac 读不了）。
+
+`tools/jdk.ps1` 会自动探测：`SPW_JDK_HOME` → `JAVA_HOME` → `%ProgramFiles%\Java`、
+Eclipse Adoptium、`%USERPROFILE%\tools\jdk25` 等位置；都找不到且 `PATH` 上的 javac 低于 25 时会
+直接报错，不会悄悄退回 JDK 21。
 
     pwsh -File build.ps1
 

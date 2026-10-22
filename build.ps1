@@ -20,6 +20,15 @@ if (-not $root) { $root = (Get-Location).Path }
 
 $started = Get-Date
 
+# ---------------------------------------------------------------- 0. 统一 JDK
+# 宿主 1.19.0 的 API class 是 Java 25（class 69）；JDK 21 的 javac 读不了。
+# 这里显式解析并把 JAVA_HOME / PATH 固定成同一个 JDK，构建与 harness 共用。
+. (Join-Path $root 'tools\jdk.ps1')
+$jdk = Resolve-RepoJdk
+$env:JAVA_HOME = $jdk.Home
+$env:PATH = (Join-Path $jdk.Home 'bin') + ';' + $env:PATH
+Write-Host ("== 0/2 JDK {0} ({1}) ==" -f $jdk.Version, $jdk.Home) -ForegroundColor DarkGray
+
 # ---------------------------------------------------------------- 1. 抽取宿主 API
 if (-not $SkipApi) {
     Write-Host '== 1/2 抽取宿主 API ==' -ForegroundColor Cyan
