@@ -29,6 +29,7 @@ Salt Player for Windows 的第三方插件，把网易云音乐接进本地播�
     pwsh -File tools/verify-spmod.ps1
     pwsh -File harness/run-harness.ps1
     pwsh -File harness/run-regression.ps1
+    pwsh -File harness/run-behavior.ps1
     python -m unittest discover -s harness/regression -p test_acceptance.py -v
 
 `run-regression.ps1 -Batch 4 -Spmod <旧包路径>` 可运行封面负缓存的反向对照；
@@ -38,6 +39,8 @@ Salt Player for Windows 的第三方插件，把网易云音乐接进本地播�
 `-EvidenceDir` 和 `-DevMode Off`（或 `On`）运行 `-Phase Post`。
 退出码 0 表示通过、1 表示失败、2 表示仍有未验证项。声音和画面需要另附实际证据。
 原始日志、数据库、凭据、截图及生成的证据不进入仓库。
+
+当前迭代的改动、自动检查结果和待验项目见 [迭代记录](CHANGELOG.md) 与 [验收清单](ACCEPTANCE.md)。
 
 ## 目录
 

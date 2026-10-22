@@ -122,7 +122,6 @@ public final class SearchWindow {
         bottom.add(retryBtn);
         playBtn.setEnabled(false);
         retryBtn.setEnabled(false);
-        bottom.add(status);
         busy.setIndeterminate(true);
         busy.setVisible(false);
         busy.setPreferredSize(new Dimension(90, 14));
@@ -131,11 +130,16 @@ public final class SearchWindow {
         frame.setLayout(new BorderLayout());
         frame.add(top, BorderLayout.NORTH);
         frame.add(scroll(searchTable), BorderLayout.CENTER);
-        frame.add(bottom, BorderLayout.SOUTH);
+        JPanel feedback = new JPanel(new BorderLayout(0,4));
+        feedback.add(bottom, BorderLayout.NORTH);
+        feedback.add(status, BorderLayout.SOUTH);
+        feedback.setBorder(javax.swing.BorderFactory.createEmptyBorder(0,6,8,6));
+        frame.add(feedback, BorderLayout.SOUTH);
         frame.setDefaultCloseOperation(WindowConstants.DISPOSE_ON_CLOSE);
         frame.setMinimumSize(new Dimension(760, 480));
         frame.setSize(940, 620);
-        frame.setLocationByPlatform(true);
+        HostTheme.placeWindow(frame);
+        HostTheme.applyTree(frame.getContentPane());
 
         searchBtn.addActionListener(e -> doSearch());
         keyword.addActionListener(e -> doSearch());
@@ -145,7 +149,7 @@ public final class SearchWindow {
         searchTable.getSelectionModel().addListSelectionListener(e -> playBtn.setEnabled(searchTable.getSelectedRow() >= 0));
         searchTable.addMouseListener(new java.awt.event.MouseAdapter() {
             @Override public void mouseClicked(java.awt.event.MouseEvent e) {
-                if (e.getClickCount() == 2 && javax.swing.SwingUtilities.isLeftMouseButton(e)) { playSelected(); }
+                if (e.getClickCount() == 2 && searchTable.rowAtPoint(e.getPoint()) >= 0 && javax.swing.SwingUtilities.isLeftMouseButton(e)) { playSelected(); }
             }
         });
         searchTable.getInputMap().put(javax.swing.KeyStroke.getKeyStroke("ENTER"), "play-selected");
@@ -205,6 +209,7 @@ public final class SearchWindow {
     private void doSearch() {
         final String kw = keyword.getText() == null ? "" : keyword.getText().trim();
         if (kw.isEmpty()) {
+            requests.cancelCurrent(); busy.setVisible(false);
             say("请输入关键词");
             return;
         }

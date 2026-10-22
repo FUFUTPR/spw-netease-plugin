@@ -145,6 +145,9 @@ public final class VoxzenBridge {
         return t;
     });
 
+    private static volatile boolean stopped;
+    public static void stop() { stopped = true; SEQ.incrementAndGet(); NET.shutdownNow(); }
+
     private static final AtomicInteger SEQ = new AtomicInteger();
 
     /** 代理拦截器被宿主调用的次数（用于判定「清单是否真的生效」）。 */
@@ -202,9 +205,11 @@ public final class VoxzenBridge {
     }
     private static int requestOnline(long songId, String title, String artist, String album, String picUrl, String level) {
         final int seq = SEQ.incrementAndGet();
+        if (stopped) { set(seq,"播放失败：插件已停用"); return seq; }
         set(seq, "正在解析音源…");
         try {
             NET.execute(() -> {
+                if (stopped) { return; }
                 // level 为空表示“跟随插件配置”。必须先解析后再取直链：NeteaseApi 对空值有
                 // 自己的兼容默认值（exhigh）；若直接把 null 传下去，会把 320k 直链错误地
                 // 记到 lossless/hires 的缓存键下，表现成“切到最高音质仍然是低音质”。
@@ -232,6 +237,7 @@ public final class VoxzenBridge {
                 }
                 lastUrlMeta = meta == null ? "" : meta;
                 String url = direct;
+                if (stopped || seq != SEQ.get()) { return; }
                 if (NativeStreamServer.start() > 0) {
                     NativeStreamServer.rememberResolved(songId, effectiveLevel, direct);
                     url = NativeStreamServer.urlFor(songId, effectiveLevel);
@@ -275,6 +281,7 @@ public final class VoxzenBridge {
         final int seq = SEQ.incrementAndGet();
         try {
             NET.execute(() -> {
+                if (stopped) { return; }
                 try {
                     AccountService.State st;
                     long uid;
@@ -356,17 +363,23 @@ public final class VoxzenBridge {
      * @param source     来源标签（进日志，如「我的歌单」「我喜欢的音乐」「本地歌单」/playlist 名）
      */
     public static void playPlaylist(List<Dto.Song> songs, int startIndex, String level, String source) {
+        playPlaylistRequest(songs, startIndex, level, source);
+    }
+    public static int playPlaylistRequest(List<Dto.Song> songs, int startIndex, String level, String source) {
         final int seq = SEQ.incrementAndGet();
+        if (stopped) { set(seq,"播放失败：插件已停用"); return seq; }
+        set(seq, "正在准备歌单播放…");
         final String label = (source == null || source.isEmpty()) ? "整单播放" : "整单播放(" + source + ")";
         try {
             if (songs == null || songs.isEmpty()) {
                 set(seq, "整单播放失败：歌单里没有曲目");
                 PluginLog.w(TAG, label + " #" + seq + " 跳过：歌单为空");
-                return;
+                return seq;
             }
             final List<Dto.Song> all = new ArrayList<>(songs);
             final int start = Math.max(0, Math.min(startIndex, all.size() - 1));
             NET.execute(() -> {
+                if (stopped) { return; }
                 try {
                     // 与单曲播放一致：先把“跟随配置”的空档位解析成确定值，再去批量取链。
                     // 这样请求档位、直链缓存键与播放 URL 三者始终完全一致。
@@ -403,7 +416,8 @@ public final class VoxzenBridge {
                         meta = "";
                     }
                     lastUrlMeta = meta == null ? "" : meta;
-                    if (NativeStreamServer.start() > 0) {
+                    if (stopped || seq != SEQ.get()) { return; }
+                if (NativeStreamServer.start() > 0) {
                         List<String> proxied = new ArrayList<>(urls.size());
                         for (int i = 0; i < urls.size(); i++) {
                             String direct = urls.get(i);
@@ -423,8 +437,10 @@ public final class VoxzenBridge {
                             + (NativeStreamServer.running() ? "（边听边下）" : "（直连降级）")
                             + (lastUrlMeta.isEmpty() ? "" : " | " + lastUrlMeta));
                     final List<String> playbackUrls = new ArrayList<>(urls); // 不可播位保留 null 供下游跳过
-                    HostBridgeWorker.get().submit(
-                            () -> injectPlaylistOnWorker(seq, label, win, playbackUrls, start, all.size()));
+                    if (!HostBridgeWorker.get().submit(
+                            () -> injectPlaylistOnWorker(seq, label, win, playbackUrls, start, all.size()))) {
+                        set(seq,"歌单播放失败：宿主交互线程不可用，请启用插件后重试");
+                    }
                     // 0.6.0 歌词：整单预取（放在注入之前，理由同 playOnline）。
                     // win 与 urls 是按下标一一对应的（songUrls 保证同序），所以这里按位配对。
                     // 只投递给 netease-lyric 线程后立即返回，绝不阻塞 NET 线程上的整单注入。
@@ -442,8 +458,10 @@ public final class VoxzenBridge {
                 }
             });
         } catch (Throwable t) {
+            set(seq, "歌单播放请求失败：" + brief(t));
             PluginLog.e(TAG, "整单播放投递失败（已吞）", t);
         }
+        return seq;
     }
 
     /**
@@ -457,6 +475,7 @@ public final class VoxzenBridge {
         final int seq = SEQ.incrementAndGet();
         try {
             NET.execute(() -> {
+                if (stopped) { return; }
                 try {
                     long uid;
                     try {
@@ -757,6 +776,7 @@ public final class VoxzenBridge {
 
     private static void injectOnWorker(int seq, long songId, String title, String artist,
                                        String album, String url) {
+        if (stopped || seq != SEQ.get()) { return; }
         final String trackId = "netease-" + songId;
         try {
             // ① 注册表：trackId + location 必须与曲目项第 1、6 字段一致，拦截器才会命中
@@ -864,6 +884,7 @@ public final class VoxzenBridge {
      */
     private static void injectPlaylistOnWorker(int seq, String label, List<Dto.Song> win, List<String> urls,
                                                int startIndex, int total) {
+        if (stopped || seq != SEQ.get()) { return; }
         try {
             Object ctrl = staticInstance(CLS_CONTROLLER);
             if (ctrl == null) {
@@ -1729,6 +1750,7 @@ public final class VoxzenBridge {
     public static void tryLocal() {
         try {
             NET.execute(() -> {
+                if (stopped) { return; }
                 List<String> files = localAudioCandidates();
                 if (files.isEmpty()) {
                     PluginLog.w(TAG, "本地试播：本地没找到音频文件（跳过对照）");
@@ -1755,6 +1777,7 @@ public final class VoxzenBridge {
     }
 
     private static void injectLocalOnWorker(int seq, String path, String title, String artist, String album) {
+        if (stopped || seq != SEQ.get()) { return; }
         try {
             Class<?> itemCls = Class.forName(CLS_ITEM);
             Constructor<?> ctor = itemCls.getConstructor(String.class, String.class, String.class,

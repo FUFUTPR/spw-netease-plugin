@@ -101,6 +101,47 @@ public final class HostTheme {
     private HostTheme() {
     }
 
+    /** Apply existing theme tokens to the search/playlist controls without changing global LAF. */
+    public static void applyTree(java.awt.Component component) {
+        component.setFont(font(SMALL_PX));
+        component.setForeground(TEXT);
+        component.setBackground(PAGE_BG);
+        if (component instanceof javax.swing.text.JTextComponent text) {
+            text.setBackground(FIELD_BG); text.setForeground(TEXT); text.setCaretColor(TEXT);
+        } else if (component instanceof javax.swing.AbstractButton || component instanceof javax.swing.JComboBox<?>) {
+            component.setBackground(BTN2_BG);
+        } else if (component instanceof javax.swing.JTable table) {
+            table.setBackground(CARD_BG); table.setForeground(TEXT);
+            table.setSelectionBackground(ACCENT); table.setSelectionForeground(PAGE_BG);
+            table.setGridColor(CARD_EDGE);
+            table.getTableHeader().setBackground(CARD_BG); table.getTableHeader().setForeground(TEXT);
+        }
+        if (component instanceof javax.swing.JComponent jc
+                && jc.getBorder() instanceof javax.swing.border.TitledBorder border) {
+            border.setTitleColor(TEXT_DIM);
+        }
+        if (component instanceof java.awt.Container container) {
+            for (java.awt.Component child : container.getComponents()) { applyTree(child); }
+        }
+    }
+
+    /** Keep development/plugin windows on the secondary display when one exists. */
+    public static void placeWindow(java.awt.Window window) {
+        try {
+            var env = java.awt.GraphicsEnvironment.getLocalGraphicsEnvironment();
+            var primary = env.getDefaultScreenDevice();
+            var screen = primary;
+            for (var device : env.getScreenDevices()) { if (device != primary) { screen = device; break; } }
+            var config = screen.getDefaultConfiguration();
+            var bounds = config.getBounds();
+            var insets = java.awt.Toolkit.getDefaultToolkit().getScreenInsets(config);
+            int width = bounds.width - insets.left - insets.right;
+            int height = bounds.height - insets.top - insets.bottom;
+            window.setLocation(bounds.x + insets.left + Math.max(0,(width-window.getWidth())/2),
+                    bounds.y + insets.top + Math.max(0,(height-window.getHeight())/2));
+        } catch (Throwable unavailable) { window.setLocationByPlatform(true); }
+    }
+
     /** 挑一个系统里真的有的字体族（宿主不带字体 ⇒ 两边都吃系统字体）。 */
     private static String pickFamily() {
         String[] want = {"Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI"};

@@ -346,7 +346,7 @@ public final class HostSqlBridge {
         try {
             invoked = use.invoke(db, Boolean.FALSE, block, continuation);
         } catch (Throwable t) {
-            return Outcome.fail("useConnection 调用抛错：" + brief(t));
+            return Outcome.fail("useConnection 调用抛错：" + brief(t), t);
         }
         Object suspended = coroutineSuspended(db);
         boolean didSuspend = suspended != null && invoked == suspended;
@@ -365,6 +365,9 @@ public final class HostSqlBridge {
             if (!blockDone.await(BLOCK_GRACE_MS, TimeUnit.MILLISECONDS)) {
                 throw new TaskFailure(new java.util.concurrent.CancellationException("宿主写入块超时，禁止换通路重跑"));
             }
+        }
+        if (!blockDone.await(BLOCK_GRACE_MS, TimeUnit.MILLISECONDS)) {
+            throw new TaskFailure(new java.util.concurrent.CancellationException("宿主写入块尚未完成，禁止重复提交"));
         }
         if (failure.get() != null) {
             // 带上 cause：上层要能认出「这是数据失败（该抛）」还是「通路问题（可换）」
@@ -485,6 +488,7 @@ public final class HostSqlBridge {
         task.checkValid();
         boolean own = !inTransaction(conn);
         boolean begun = false;
+        String savepoint = null;
         if (own) {
             try {
                 sql.exec("BEGIN");
@@ -492,13 +496,16 @@ public final class HostSqlBridge {
             } catch (Throwable t) {
                 throw new TaskFailure(t); // no partial autocommit on failed BEGIN
             }
+        } else {
+            savepoint = "netease_task_" + Long.toUnsignedString(System.nanoTime());
+            sql.exec("SAVEPOINT " + savepoint);
         }
         try {
             T value = task.run(sql);
             task.checkValid();
             if (begun) {
                 sql.exec("COMMIT");
-            }
+            } else if (savepoint != null) { sql.exec("RELEASE SAVEPOINT " + savepoint); }
             return value;
         } catch (Throwable t) {
             if (begun) {
@@ -507,6 +514,10 @@ public final class HostSqlBridge {
                 } catch (Throwable ignored) {
                     // 回滚失败只能记日志：连接状态异常时再抛也没用
                 }
+            }
+            if (!begun && savepoint != null) {
+                try { sql.exec("ROLLBACK TO SAVEPOINT " + savepoint); sql.exec("RELEASE SAVEPOINT " + savepoint); }
+                catch (Throwable rollbackError) { t.addSuppressed(rollbackError); }
             }
             // 0.11.7（P0 铁律 4）：任务体在宿主连接上失败 = **数据失败**，打上 TaskFailure 标记上抛，
             // 让通路层拒绝「换一条连接把同一批语句重跑一遍」（那正是 5935 条孤儿关联行的来源）。

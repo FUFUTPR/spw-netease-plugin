@@ -78,6 +78,8 @@ public final class NativeStreamServer {
     private record Cached(String url, long at) {
     }
 
+    private static volatile boolean stopped;
+
     private NativeStreamServer() {
     }
 
@@ -85,6 +87,7 @@ public final class NativeStreamServer {
 
     /** 启动服务（幂等）。返回实际监听端口；失败返回 -1。 */
     public static synchronized int start() {
+        if (stopped) { return -1; }
         if (server != null) {
             return port;
         }
@@ -123,6 +126,7 @@ public final class NativeStreamServer {
     }
 
     public static synchronized void stop() {
+        stopped = true;
         try {
             // 先收预取线程（可中断、有界 join），再关服务端 —— 避免插件停用后留下 netease-* 线程。
             StreamPrefetcher.shutdown();

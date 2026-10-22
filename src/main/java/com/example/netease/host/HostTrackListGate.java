@@ -320,8 +320,14 @@ public final class HostTrackListGate {
      */
     private static boolean install119() {
         Class<?> holder;
-        try { holder = Class.forName("com.xuncorp.voxzen.data.\u0560"); }
-        catch (ClassNotFoundException absent) { return false; }
+        try {
+            holder = Class.forName("com.xuncorp.voxzen.data.\u0560", false, HostTrackListGate.class.getClassLoader());
+            Method getter = holder.getMethod("\u037f");
+            if (!java.lang.reflect.Modifier.isStatic(getter.getModifiers())
+                    || !getter.getReturnType().getName().equals("com.xuncorp.voxzen.data.AppDatabase")) {
+                return false; // A same-named class in an older host is not a 1.19 profile.
+            }
+        } catch (ReflectiveOperationException absent) { return false; }
         if (installed) { return true; }
         try {
             Class<?> dao = Class.forName("androidx.compose.ui.\u060b");

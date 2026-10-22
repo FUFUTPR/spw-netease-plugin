@@ -117,6 +117,8 @@ public final class BehaviorProbe {
         HostBridgeWorker.get().stopWithCleanup(() -> cleaned.set(HostBridgeWorker.get().isOnWorkerThread()));
         check(cleaned.get(),"cleanup executes on host worker before stop");
         check(!HostBridgeWorker.get().submit(() -> {}),"stopped host worker rejects work");
+        com.example.netease.svc.NativeStreamServer.stop();
+        check(com.example.netease.svc.NativeStreamServer.start()<0,"stopped stream service cannot be resurrected by a late callback");
         System.out.println("BEHAVIOR_RESULT="+passed+" PASS");
     }
 }

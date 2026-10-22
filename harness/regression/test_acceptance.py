@@ -7,6 +7,7 @@ import sqlite3
 import subprocess
 import tempfile
 import unittest
+import zipfile
 
 ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location('preservation', ROOT / 'tools/db-preservation.py')
@@ -64,6 +65,22 @@ class PreservationTests(unittest.TestCase):
                 c.execute("DELETE FROM Track WHERE id='local-1'")
                 c.commit()
                 self.assertEqual(1, gate.compare(before, gate.snapshot(db))[0])
+
+    def test_invalid_package_cannot_be_hidden_by_harness_success(self):
+        project = json.loads((ROOT / 'project.json').read_text(encoding='utf-8-sig'))
+        artifact = ROOT / 'build/dist' / f"plugin-{project['pluginId']}-{project['version']}.spmod"
+        self.assertTrue(artifact.exists(), 'build the current package before tests')
+        with tempfile.TemporaryDirectory() as temp:
+            bad = Path(temp) / 'invalid.spmod'
+            with zipfile.ZipFile(artifact) as source, zipfile.ZipFile(bad, 'w') as output:
+                for entry in source.infolist():
+                    if entry.filename == 'classes/preference_config.json':
+                        continue
+                    output.writestr(entry, source.read(entry.filename))
+            run = subprocess.run(['pwsh','-NoProfile','-File',str(ROOT/'harness/run-harness.ps1'),
+                                  '-Spmod',str(bad)],capture_output=True)
+            self.assertNotEqual(0, run.returncode)
+            self.assertNotIn('HARNESS_RESULT=ALL_PASS', run.stdout.decode(errors='replace'))
 
     def test_script_version_mode_and_unknown_are_not_pass(self):
         project = json.loads((ROOT / 'project.json').read_text(encoding='utf-8-sig'))

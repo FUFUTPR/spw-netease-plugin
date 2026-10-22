@@ -1251,6 +1251,7 @@ public final class NeteasePlugin extends SpwPlugin {
     @Override
     public void stop() {
         SYNC.stop();
+        VoxzenBridge.stop();
         try {
             // ① 先销毁插件窗口：窗口若留着，插件停用后仍会滞留在宿主进程里（验收 A9）
             UiRegistry.disposeAll();
@@ -1535,16 +1536,13 @@ public final class NeteasePlugin extends SpwPlugin {
      */
     public static void syncNow() {
         guard(() -> {
-            if (!PluginConfig.mergePlaylists()) {
-                Notifier.warn("合并歌单已关闭：歌曲里只显示本地歌单；要同步请先打开「合并歌单」");
-                return;
-            }
-            if (currentUid() <= 0) {
-                Notifier.warn("未登录，无法同步：请先在配置页完成登录");
-                return;
-            }
-            spawnNativeSync(java.util.List.of(), "force:配置页手动");
-            Notifier.success("已开始同步全部歌单；失败会有错误提示，进度见日志 tag: plugin / native-lib");
+            var result = SYNC.request(java.util.List.of(), "force:配置页手动");
+            com.example.netease.ui.PlaylistWindow.open();
+            if (result == com.example.netease.svc.SyncCoordinator.RequestResult.STARTED) {
+                Notifier.success("已提交同步请求，进度见歌单窗口");
+            } else if (result == com.example.netease.svc.SyncCoordinator.RequestResult.BUSY) {
+                Notifier.warn("已有同步任务或尚未到自动同步间隔，进度见歌单窗口");
+            } else { Notifier.warn(SYNC.status().describe()); }
         });
     }
 

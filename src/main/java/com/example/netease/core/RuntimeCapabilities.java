@@ -20,6 +20,8 @@ public final class RuntimeCapabilities {
     private static volatile String channel = "unknown";
 
     private static volatile boolean probed;
+    private static volatile boolean playbackShape, queueShape, refreshShape, writeShape;
+
     private static volatile boolean hasLibrary;
     private static volatile boolean hasKeyBindingManager;
     private static volatile boolean hasPermissionApi;
@@ -50,6 +52,12 @@ public final class RuntimeCapabilities {
         hasPermissionApi = classExists("com.xuncorp.spw.workshop.api.PluginPermission", loader);
         hasCurrentMediaItem = methodExists(WorkshopApi.Playback.class, "getCurrentMediaItem");
         hasNoArgCreateConfigManager = methodExists(WorkshopApi.Manager.class, "createConfigManager");
+        playbackShape = classExists("com.xuncorp.voxzen.service.PlaybackController", loader)
+                && classExists("com.xuncorp.pisces.PiscesMediaItem", loader);
+        queueShape = classExists("com.xuncorp.spc.core.queue.PlaybackQueue", loader);
+        refreshShape = namedMethodExists("com.xuncorp.voxzen.service.RepoService", "rebuildMusicLibrary", loader);
+        writeShape = classExists("com.xuncorp.voxzen.data.AppDatabase", loader)
+                && classExists("androidx.sqlite.SQLiteConnection", loader);
         probed = true;
         PluginLog.i("caps", report());
     }
@@ -89,6 +97,8 @@ public final class RuntimeCapabilities {
     /** 能力矩阵（启动时写日志首行）。 */
     public static String report() {
         return "能力矩阵 spw=" + spwVersion + " channel=" + channel
+                + " playbackShape=" + flag(playbackShape) + " queueShape=" + flag(queueShape)
+                + " refreshShape=" + flag(refreshShape) + " writeShape=" + flag(writeShape)
                 + " library=" + flag(hasLibrary)
                 + " keyBinding=" + flag(hasKeyBindingManager)
                 + " permission=" + flag(hasPermissionApi)
@@ -103,6 +113,11 @@ public final class RuntimeCapabilities {
 
     private static String flag(boolean b) {
         return b ? "有" : "无";
+    }
+
+    private static boolean namedMethodExists(String name, String method, ClassLoader loader) {
+        try { return methodExists(Class.forName(name, false, loader), method); }
+        catch (Throwable unavailable) { return false; }
     }
 
     private static boolean classExists(String name, ClassLoader loader) {

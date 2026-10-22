@@ -35,7 +35,10 @@ public final class LatestTask implements AutoCloseable {
         pending = pool.submit(() -> {
             try {
                 T value = work.call();
-                if (finished.compareAndSet(false,true)) { publish(id, () -> success.accept(value)); }
+                if (finished.compareAndSet(false,true)) { publish(id, () -> {
+                    try { success.accept(value); }
+                    catch (Throwable applyError) { failure.accept(applyError); }
+                }); }
             } catch (Throwable error) {
                 if (finished.compareAndSet(false,true)) { publish(id, () -> failure.accept(error)); }
             }
@@ -50,13 +53,20 @@ public final class LatestTask implements AutoCloseable {
     }
     private void publish(long id, Runnable apply) {
         dispatch.accept(() -> {
-            synchronized (this) { if (isCurrent(id)) { apply.run(); } }
+            synchronized (this) {
+                if (!isCurrent(id)) { return; }
+                try { apply.run(); }
+                catch (Throwable callbackError) { com.example.netease.core.PluginLog.e("ui.async", "窗口结果回调失败", callbackError); }
+            }
         });
     }
-    @Override public synchronized void close() {
-        closed = true; sequence++;
+    public synchronized void cancelCurrent() {
+        sequence++;
         if (pending != null) { pending.cancel(true); }
         if (deadline != null) { deadline.cancel(false); }
+    }
+    @Override public synchronized void close() {
+        closed = true; cancelCurrent();
         pool.shutdownNow(); timer.shutdownNow();
     }
 }

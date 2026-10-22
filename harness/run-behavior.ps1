@@ -26,6 +26,14 @@ try {
         & java '-Djava.awt.headless=true' '-Dfile.encoding=UTF-8' '-Dstdout.encoding=UTF-8' '-Dstderr.encoding=UTF-8' -cp $Cp AsyncProbe 2>&1 | Tee-Object -FilePath (Join-Path $Work 'async-result.txt')
         if ($LASTEXITCODE -ne 0) { $rc = 1 }
     }
+    if (Test-Path -LiteralPath (Join-Path $Work 'classes/HostTransactionProbe.class')) {
+        & java '-Djava.awt.headless=true' '-Dfile.encoding=UTF-8' '-Dstdout.encoding=UTF-8' '-Dstderr.encoding=UTF-8' -cp $Cp HostTransactionProbe 2>&1 | Tee-Object -FilePath (Join-Path $Work 'host-transaction-result.txt')
+        if ($LASTEXITCODE -ne 0) { $rc = 1 }
+    }
+    if (Test-Path -LiteralPath (Join-Path $Work 'classes/com/xuncorp/voxzen/data/HostProfileProbe.class')) {
+        & java '-Djava.awt.headless=true' '-Dfile.encoding=UTF-8' '-Dstdout.encoding=UTF-8' '-Dstderr.encoding=UTF-8' -cp $Cp com.xuncorp.voxzen.data.HostProfileProbe 2>&1 | Tee-Object -FilePath (Join-Path $Work 'host-profile-result.txt')
+        if ($LASTEXITCODE -ne 0) { $rc = 1 }
+    }
 } finally { $env:APPDATA = $oldAppData }
 Write-Host "Behavior evidence: $Work"
 exit $rc

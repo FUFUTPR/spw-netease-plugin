@@ -1,6 +1,7 @@
 package com.example.netease.ui;
 
 import com.example.netease.cfg.PluginConfig;
+import com.example.netease.NeteasePlugin;
 import com.example.netease.core.Levels;
 import com.example.netease.core.Notifier;
 import com.example.netease.core.PluginLog;
@@ -158,6 +159,16 @@ public final class PlaylistWindow {
     /** 当前载入的曲目来源名（进日志与状态栏）。 */
     private volatile String sourceName = "歌单";
     private volatile boolean busy;
+    private boolean closed;
+    private long accountEpoch = AccountService.sessionEpoch();
+    private final LatestTask loads = new LatestTask("netease-playlist-load");
+    private final JButton retryBtn = new JButton("重试");
+    private final JButton syncBtn = new JButton("同步到播放器");
+    private final JLabel syncLabel = new JLabel("同步状态：尚未同步");
+    private Runnable retryLoad = this::loadMine;
+    private int playbackRequest;
+    private long playbackUntil;
+
     private Timer ticker;
 
     private PlaylistWindow() {
@@ -251,10 +262,19 @@ public final class PlaylistWindow {
         JPanel actions = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 4));
         actions.add(new JLabel("音质"));
         actions.add(levelBox);
+        actions.add(retryBtn);
+        actions.add(syncBtn);
+        retryBtn.setEnabled(false);
+        retryBtn.addActionListener(e -> retryLoad.run());
+        syncBtn.addActionListener(e -> NeteasePlugin.syncNow());
 
         JPanel south = new JPanel(new BorderLayout());
         south.add(actions, BorderLayout.NORTH);
-        south.add(statusLabel, BorderLayout.SOUTH);
+        JPanel feedback = new JPanel(new java.awt.GridLayout(0,1,0,4));
+        feedback.setBorder(BorderFactory.createEmptyBorder(2,8,8,8));
+        feedback.add(statusLabel);
+        feedback.add(syncLabel);
+        south.add(feedback, BorderLayout.SOUTH);
         statusLabel.setBorder(BorderFactory.createEmptyBorder(0, 8, 6, 8));
 
         frame.setLayout(new BorderLayout());
@@ -264,8 +284,9 @@ public final class PlaylistWindow {
         frame.setMinimumSize(new Dimension(820, 460));
         frame.setPreferredSize(new Dimension(1000, 560));
         frame.pack();
-        frame.setLocationByPlatform(true);
+        HostTheme.placeWindow(frame);
         frame.setDefaultCloseOperation(WindowConstants.DISPOSE_ON_CLOSE);
+        HostTheme.applyTree(frame.getContentPane());
 
         // 0.11.30：独立的扫码窗退役 ⇒ 未登录时点这里开登录对话框（默认就是扫码档）。
         loginBtn.addActionListener(e -> LoginDialog.open(""));
@@ -282,7 +303,7 @@ public final class PlaylistWindow {
         loadIdBtn.addActionListener(e -> {
             long id = parseId(idField.getText());
             if (id <= 0) {
-                Notifier.warn("请填写歌单 ID 或链接，例如 https://music.163.com/#/playlist?id=3778678");
+                statusLabel.setText("请填写有效歌单 ID 或链接");
                 return;
             }
             loadPlaylist(id, "歌单 #" + id);
@@ -291,12 +312,15 @@ public final class PlaylistWindow {
         frame.addWindowListener(new WindowAdapter() {
             @Override
             public void windowClosed(WindowEvent e) {
+                closed = true;
+                loads.close();
                 if (ticker != null) {
                     ticker.stop();
                     ticker = null;
                 }
                 pool.shutdownNow();
                 if (instance == PlaylistWindow.this) {
+                    CoverCache.onLoaded(null);
                     instance = null;
                 }
                 PluginLog.i(TAG, "歌单窗口已关闭");
@@ -321,8 +345,18 @@ public final class PlaylistWindow {
     private void refreshStatus() {
         try {
             accountLabel.setText(AccountService.statusLine());
-            if (busy) {
-                statusLabel.setText("正在载入…");
+            syncLabel.setText("同步状态：" + NeteasePlugin.syncStatus());
+            if (accountEpoch != AccountService.sessionEpoch()) {
+                accountEpoch = AccountService.sessionEpoch();
+                loads.cancelCurrent(); busy = false;
+                briefs = List.of(); briefsLoaded = false; playlistModel.set(briefs);
+                playbackRequest = 0;
+                retryLoad = this::loadMine; retryBtn.setEnabled(true);
+                statusLabel.setText("账号状态变化，请重新载入；当前仍显示上次载入的曲目");
+            }
+            if (playbackRequest > 0 && System.nanoTime() < playbackUntil) {
+                String report = VoxzenBridge.playbackReport(playbackRequest);
+                if (report != null) { statusLabel.setText("播放请求：" + report); }
             }
         } catch (Throwable t) {
             PluginLog.d(TAG, "刷新歌单窗状态失败（忽略）：" + t);
@@ -429,7 +463,7 @@ public final class PlaylistWindow {
     private void saveCurrentToLocal() {
         List<Dto.Song> songs = trackModel.snapshot();
         if (songs.isEmpty()) {
-            Notifier.warn("当前没有曲目可保存");
+            statusLabel.setText("当前没有曲目可保存，请先载入歌单");
             return;
         }
         String def = sourceName == null || sourceName.isBlank() ? "我的本地歌单" : sourceName;
@@ -441,11 +475,9 @@ public final class PlaylistWindow {
         pool.submit(() -> {
             String key = LocalPlaylists.saveManual(finalName, songs);
             SwingUtilities.invokeLater(() -> {
-                if (key == null) {
-                    Notifier.warn("保存本地歌单失败（详见日志）");
-                } else {
-                    Notifier.success("已存为本地歌单「" + finalName + "」（" + songs.size() + " 首）");
-                }
+                if (closed) { return; }
+                statusLabel.setText(key == null ? "保存本地歌单失败，请重试"
+                        : "已存为本地歌单「" + finalName + "」（" + songs.size() + " 首）");
             });
             refreshLocalEntries();
         });
@@ -479,71 +511,46 @@ public final class PlaylistWindow {
 
     private void loadMine() {
         long uid = currentUid();
-        if (uid <= 0) {
-            Notifier.warn("请先扫码登录（我的歌单需要登录态）");
-            return;
-        }
-        submit("我的歌单", () -> {
-            List<Dto.PlaylistBrief> list = NeteaseApi.userPlaylists(uid, 200);
-            SwingUtilities.invokeLater(() -> {
-                briefs = list == null ? List.of() : List.copyOf(list);
-                briefsLoaded = true;
-                playlistModel.set(briefs);
-                int created = 0;
-                int collected = 0;
-                for (Dto.PlaylistBrief b : briefs) {
-                    if (b.mine()) {
-                        created++;
-                    } else {
-                        collected++;
-                    }
-                }
-                statusLabel.setText("已载入 " + briefs.size() + " 个歌单（创建 " + created
-                        + " / 收藏 " + collected + "），点「歌单切换 ▾」或左侧列表切换");
-            });
+        if (uid <= 0) { statusLabel.setText("请先登录；公开歌单仍可通过 ID 载入"); return; }
+        submit("我的歌单", () -> NeteaseApi.userPlaylists(uid, 200), list -> {
+            briefs = list == null ? List.of() : List.copyOf(list);
+            briefsLoaded = true;
+            playlistModel.set(briefs);
+            long created = briefs.stream().filter(Dto.PlaylistBrief::mine).count();
+            statusLabel.setText("已载入 " + briefs.size() + " 个歌单（创建 " + created + " / 收藏 "
+                    + (briefs.size()-created) + "），点左侧列表切换");
         });
     }
-
     private void loadDaily() {
-        submit("每日推荐", () -> {
-            List<Dto.Song> songs = NeteaseApi.dailySongs();
-            SwingUtilities.invokeLater(() -> setSongs("每日推荐", songs,
-                    "每日推荐 " + size(songs) + " 首（今日）"));
-            LocalPlaylists.saveSnapshot(-1L, "每日推荐", "网易云", songs);
+        submit("每日推荐", NeteaseApi::dailySongs, songs -> {
+            setSongs("每日推荐", songs, "每日推荐 " + size(songs) + " 首（今日）");
+            cacheSnapshot(-1L,"每日推荐","网易云",songs);
         });
     }
-
     private void loadLiked() {
         long uid = currentUid();
-        if (uid <= 0) {
-            Notifier.warn("请先扫码登录");
-            return;
-        }
-        submit("我喜欢的音乐", () -> {
-            List<Dto.Song> songs = NeteaseApi.likedSongs(uid);
-            SwingUtilities.invokeLater(() -> setSongs("我喜欢的音乐", songs,
-                    "我喜欢的音乐 " + size(songs) + " 首"));
-        });
+        if (uid <= 0) { statusLabel.setText("请先登录后载入我喜欢的音乐"); return; }
+        submit("我喜欢的音乐", () -> NeteaseApi.likedSongs(uid), songs ->
+                setSongs("我喜欢的音乐", songs, "我喜欢的音乐 " + size(songs) + " 首"));
     }
-
     private void loadPlaylist(long id, String label) {
-        submit(label, () -> {
-            Dto.Playlist pl = NeteaseApi.playlist(id);
-            SwingUtilities.invokeLater(() -> {
-                String name = pl.name() == null || pl.name().isBlank() ? label : pl.name();
-                setSongs("歌单「" + name + "」", pl.tracks(),
-                        "歌单「" + name + "」声明 " + pl.trackCount() + " 首，已载入 " + size(pl.tracks()) + " 首");
-            });
-            LocalPlaylists.saveSnapshot(pl.id(), pl.name(), pl.creator(), pl.tracks());
+        submit(label, () -> NeteaseApi.playlist(id), playlist -> {
+            String name = playlist.name() == null || playlist.name().isBlank() ? label : playlist.name();
+            setSongs("歌单「"+name+"」",playlist.tracks(),"歌单「"+name+"」声明 "+playlist.trackCount()
+                    +" 首，已载入 "+size(playlist.tracks())+" 首");
+            cacheSnapshot(playlist.id(),playlist.name(),playlist.creator(),playlist.tracks());
         });
     }
-
-    /** 载入一张本地歌单（断网也能看曲目；播放仍需联网换直链）。 */
     private void loadLocal(String key, String name) {
-        submit("本地歌单「" + name + "」", () -> {
-            List<Dto.Song> songs = LocalPlaylists.load(key);
-            SwingUtilities.invokeLater(() -> setSongs("本地歌单「" + name + "」", songs,
-                    "本地歌单「" + name + "」" + size(songs) + " 首（曲目来自本地快照，播放时再换直链）"));
+        submit("本地歌单「"+name+"」", () -> LocalPlaylists.load(key), songs ->
+                setSongs("本地歌单「"+name+"」",songs,"本地快照 "+size(songs)+" 首；播放时需要联网"));
+    }
+    private void cacheSnapshot(long id, String name, String creator, List<Dto.Song> songs) {
+        long version = loads.version();
+        pool.submit(() -> {
+            if (closed || !loads.isCurrent(version)) { return; }
+            LocalPlaylists.saveSnapshot(id,name,creator,songs);
+            if (!closed) { localEntries = LocalPlaylists.list(); }
         });
     }
 
@@ -588,26 +595,34 @@ public final class PlaylistWindow {
         return list == null ? 0 : list.size();
     }
 
-    /** 允许抛受检异常的载入任务（net 层接口会抛 {@code NeteaseException}）。 */
-    @FunctionalInterface
-    private interface Task {
-        void run() throws Exception;
-    }
-
-    /** 统一的后台任务入口：把网络调用丢到自有守护线程池，异常只记日志 + 提示。 */
-    private void submit(String what, Task task) {
+    /** Latest accepted load owns the rows, source label, error and retry together. */
+    private <T> void submit(String what, java.util.concurrent.Callable<T> task, java.util.function.Consumer<T> apply) {
+        if (closed) { return; }
+        playbackRequest = 0;
         busy = true;
-        pool.submit(() -> {
-            try {
-                task.run();
-            } catch (Throwable t) {
-                String msg = t.getMessage() == null ? t.toString() : t.getMessage();
-                PluginLog.w(TAG, "载入「" + what + "」失败：" + msg);
-                SwingUtilities.invokeLater(() -> Notifier.warn("载入「" + what + "」失败：" + msg));
-            } finally {
-                busy = false;
-            }
+        statusLabel.setText("正在载入「"+what+"」…（保留上次列表）");
+        retryBtn.setEnabled(false);
+        long epoch = AccountService.sessionEpoch();
+        retryLoad = () -> {
+            if (epoch != AccountService.sessionEpoch()) { loadMine(); }
+            else { submit(what,task,apply); }
+        };
+        loads.run(task, value -> {
+            if (epoch != AccountService.sessionEpoch()) { return; }
+            busy = false;
+            apply.accept(value);
+            retryBtn.setEnabled(true);
+        }, error -> {
+            if (epoch != AccountService.sessionEpoch()) { return; }
+            busy = false;
+            statusLabel.setText("载入「"+what+"」失败："+briefError(error)+"；保留上次列表，可重试");
+            retryBtn.setEnabled(true);
+            PluginLog.w(TAG,"载入歌单失败："+briefError(error));
         });
+    }
+    private static String briefError(Throwable error) {
+        if (error instanceof java.util.concurrent.TimeoutException) { return "请求超时"; }
+        return "网络或服务暂不可用";
     }
 
     // --------------------------------------------------------------- 在线播放
@@ -622,15 +637,19 @@ public final class PlaylistWindow {
     private void playFromRow(int modelRow) {
         List<Dto.Song> songs = trackModel.snapshot();
         if (songs.isEmpty()) {
-            Notifier.warn("曲目表是空的，先载入一张歌单");
+            statusLabel.setText("曲目表是空的，请先载入一张歌单");
             return;
         }
         int row = Math.max(0, Math.min(modelRow, songs.size() - 1));
         Dto.Song s = songs.get(row);
         String level = String.valueOf(levelBox.getSelectedItem());
         String source = sourceName;
-        VoxzenBridge.playPlaylist(songs, row, level, source);
-        statusLabel.setText("整单连播：" + source + " 自第 " + (row + 1) + " 首「" + s.name()
+        if (!s.playable()) { statusLabel.setText("这首歌当前无版权或不可播放"); return; }
+        playbackRequest = VoxzenBridge.playPlaylistRequest(songs, row, level, source);
+        playbackUntil = System.nanoTime() + 30_000_000_000L;
+        retryLoad = () -> playFromRow(modelRow);
+        retryBtn.setEnabled(true);
+        statusLabel.setText("播放请求：" + source + " 自第 " + (row + 1) + " 首「" + s.name()
                 + "」起（音质 " + level + "；失败原因见日志 bridge）");
         PluginLog.i(TAG, "请求整单连播 source=" + source + " start=" + (row + 1) + "/" + songs.size()
                 + " songId=" + s.id() + " level=" + level);

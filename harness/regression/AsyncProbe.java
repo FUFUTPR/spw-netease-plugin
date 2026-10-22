@@ -67,6 +67,9 @@ public final class AsyncProbe {
         var set=VoxzenBridge.class.getDeclaredMethod("set",int.class,String.class);set.setAccessible(true);
         set.invoke(null,901,"first");set.invoke(null,902,"second");
         check(VoxzenBridge.playbackReport(901).equals("first") && VoxzenBridge.playbackReport(902).equals("second"),"playback reports belong to their own request");
+        VoxzenBridge.stop();
+        int afterStop=VoxzenBridge.playOnlineRequest(songs.get(0),"standard");
+        check(VoxzenBridge.playbackReport(afterStop).contains("已停用"),"disabled plugin rejects playback without network work");
         System.out.println("ASYNC_RESULT="+passed+" PASS");
     }
 }
