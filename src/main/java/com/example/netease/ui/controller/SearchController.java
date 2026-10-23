@@ -55,7 +55,7 @@ public final class SearchController {
     private static final String TEXT_NO_SEARCH_RETRY = "没有可重试的搜索";
     private static final String TEXT_NO_PLAYBACK_RETRY = "没有可重试的播放请求";
     private static final String TEXT_PLAY_GONE = "上次播放的歌曲已不在当前结果中，无法重试";
-    private static final String TEXT_PLAYBACK_TIMEOUT = "播放请求：等待宿主反馈超时（30 秒），可重试";
+    private static final String TEXT_PLAYBACK_TIMEOUT = "播放失败：等待宿主开始播放超时，请重试";
     private static final String TEXT_FALLBACK_ERROR = "网络或服务暂不可用，请重试";
     private static final String TEXT_ACCOUNT_CHANGED = "账号状态已变化，旧的搜索请求与播放反馈已作废";
 
@@ -119,6 +119,7 @@ public final class SearchController {
     public interface Playback {
         int playOnline(Dto.Song song, String level);
         String report(int requestId);
+        default boolean started(int requestId) { return false; }
     }
 
     private final Listener listener;
@@ -126,6 +127,7 @@ public final class SearchController {
     private final Playback playback;
     private final Supplier<String> audioLevel;
     private final LongSupplier clock;
+    private int searchLimit = LIMIT;
     private final Object lock = new Object();
 
     // ---- 受 lock 保护的字段 ----
@@ -171,9 +173,15 @@ public final class SearchController {
      * 在 headless 探针里会炸）。因此 listener 可能在后台线程被调用，Compose 侧需自行切线程。</p>
      */
     public static SearchController createDefault(Listener listener) {
+        return createDefault(listener, LIMIT);
+    }
+
+    public static SearchController createDefault(Listener listener, int limit) {
         LatestTask requests = new LatestTask("netease-search", REQUEST_TIMEOUT_MS, Runnable::run);
-        return new SearchController(listener, new LatestTaskAsync(requests), new BridgePlayback(),
+        SearchController controller = new SearchController(listener, new LatestTaskAsync(requests), new BridgePlayback(),
                 PluginConfig::audioLevel, System::currentTimeMillis);
+        controller.searchLimit = Math.max(1, Math.min(limit, 100));
+        return controller;
     }
 
     /** 当前状态快照。 */
@@ -218,7 +226,7 @@ public final class SearchController {
             publishLocked();
         }
         try {
-            async.run(() -> NeteaseApi.search(keyword, LIMIT),
+            async.run(() -> NeteaseApi.search(keyword, searchLimit),
                     result -> onSearchOk(requestVersion, keyword, result),
                     error -> onSearchFail(requestVersion, error));
         } catch (Throwable dispatchError) {
@@ -370,11 +378,13 @@ public final class SearchController {
     }
 
     private void startPlaybackLocked(Dto.Song song) {
+        if (playing && lastPlaySongId != null && lastPlaySongId == song.id()
+                && clock.getAsLong() - playbackStart < 650L) return;
         int requestId = playback.playOnline(song, audioLevel.get());
         lastPlaySongId = song.id();
         playbackStart = clock.getAsLong();
         lastPlaybackReport = null; // 新请求 = 新窗口，不复用上个请求的反馈
-        playbackText = "播放请求：正在准备「" + safeName(song) + "」";
+        playbackText = "正在解析：" + safeName(song);
         message = playbackText;
         pendingPlayRequest = requestId;
         playing = true;
@@ -408,7 +418,14 @@ public final class SearchController {
             boolean changed = false;
             if (report != null && !report.isBlank()) {
                 lastPlaybackReport = report;
-                String text = "播放请求：" + report;
+                boolean failed = report.contains("失败") || report.contains("为空");
+                String text = failed ? "播放失败：" + report : playbackText;
+                if (playback.started(pendingPlayRequest)) {
+                    int row = lastPlaySongId == null ? -1 : indexOf(rows, lastPlaySongId);
+                    String name = row >= 0 ? safeName(rows.get(row)) : playbackText.replace("正在解析：", "");
+                    text = "正在播放：" + name;
+                    playing = false;
+                } else if (failed) playing = false;
                 if (!text.equals(playbackText)) {
                     playbackText = text;
                     message = text;
@@ -417,7 +434,7 @@ public final class SearchController {
             }
             if (clock.getAsLong() - playbackStart >= PLAYBACK_TIMEOUT_MS) {
                 playing = false;
-                if (lastPlaybackReport == null || lastPlaybackReport.isBlank()) {
+                if (playbackText.startsWith("正在解析：")) {
                     playbackText = TEXT_PLAYBACK_TIMEOUT;
                     message = TEXT_PLAYBACK_TIMEOUT;
                 }
@@ -595,8 +612,7 @@ public final class SearchController {
         }
 
         @Override
-        public String report(int requestId) {
-            return VoxzenBridge.playbackReport(requestId);
-        }
+        public String report(int requestId) { return VoxzenBridge.playbackReport(requestId); }
+        @Override public boolean started(int requestId) { return VoxzenBridge.playbackStarted(requestId); }
     }
 }

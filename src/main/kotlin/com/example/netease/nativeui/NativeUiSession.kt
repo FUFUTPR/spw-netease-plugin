@@ -200,6 +200,7 @@ internal object NativeUiSession {
 
     /** 关闭一代控制器与异步通道（不持有会话锁；[stop] 与 [start] 失败回滚共用）。 */
     private fun release(closing: Closing) {
+        NativeSongMenu.stop()
         try {
             closing.timer?.cancel()
         } catch (t: Throwable) {
@@ -373,8 +374,11 @@ internal object NativeUiSession {
             if (epoch >= 0L && epoch != lastAccountEpoch) {
                 lastAccountEpoch = epoch
                 searchController?.onAccountChanged()
+                NativeTopSearch.accountChanged()
+                NativeSongMenu.stop()
             }
             searchController?.tick()
+            NativeTopSearch.tick()
             playlistController?.tick()
             loginController?.tick()
             val n = ticks++

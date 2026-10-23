@@ -201,6 +201,9 @@ public final class PlaybarCover {
 
     /** 「起播」这一路已经认领过的曲目 id（认领即不再投；换曲自然失效）—— <b>一首只进一次场</b>的闸。 */
     private static volatile long musicDeliveredId = -1L;
+    private static final AtomicLong playbackCycle = new AtomicLong();
+    private static long deliveredCycle;
+    private static volatile long pendingCycle;
 
     /** 上一拍位置（毫秒）：用来识别「位置回落 = 新曲从头开始」（换曲瞬间宿主会先吐上一首的旧位置）。 */
     private static volatile long lastPosMs = -1L;
@@ -399,7 +402,15 @@ public final class PlaybarCover {
         }
         final long at = System.currentTimeMillis();
         final String w = why == null ? "" : why;
-        HostBridgeWorker.get().submitFast(() -> run(songId, w, at, force));
+        final long cycle = playbackCycle.get();
+        pendingCycle = cycle;
+        HostBridgeWorker.get().submitFast(() -> {
+            if (playbackCycle.get() != cycle) {
+                if (pendingCycle == cycle) pending.compareAndSet(songId, -1L);
+                return;
+            }
+            run(songId, w, at, force);
+        });
         return true;
     }
 
@@ -446,6 +457,7 @@ public final class PlaybarCover {
         if ("Ended".equals(hostState)) {
             // 0.11.21：「自动接续」这一轮的特征 —— 宿主自己那次失败刷新与我们的起播投递同拍（见 landCheck）
             endedAt = System.currentTimeMillis();
+            playbackCycle.incrementAndGet();
         }
     }
 
@@ -511,6 +523,36 @@ public final class PlaybarCover {
             sid = lagTolerantTarget(sid, auth);      // 0.11.49c：权威滞后（仍指上一首）时不覆盖刚认到的新曲
             currentSongId = sid;
         }
+        if ("Ended".equals(hostState)) return;
+        long cycle = playbackCycle.get();
+        if (auth > 0L && cycle != deliveredCycle) {
+            // Deduplication is per playback cycle. Repeating the same ID reloads
+            // the host artwork too; pause/resume and seeks never advance this key.
+            deliveredCycle = cycle;
+            musicDeliveredId = -1L;
+            lastOk = -1L;
+            clearLanding();
+            if (pendingCycle != cycle) pending.set(-1L);
+        }
+        if (hostPlaying && auth > 0L) VoxzenBridge.observePlaying(auth);
+        if (auth == sid && sid > 0 && (sid == musicDeliveredId || sid == lastOk)
+                && lastOwnerInjected != null && "lost:null".equals(currentSourceOf(lastOwnerInjected))) {
+            // Reloading the same track from a playlist can clear artwork without an Ended event.
+            // Reuse the decoded owner, only with positive evidence that the current source was cleared.
+            if (System.currentTimeMillis() - sameTrackRepairAt > 2000L) {
+                sameTrackRepairAt=System.currentTimeMillis();
+                if (ownerReusable(lastOwnerInjected)) {
+                    redeliverOnly(lastOwnerInjected);
+                    armLanding(sid,lastOwnerInjected);
+                } else {
+                    // The host may have released the previous owner during reload.
+                    // Decode already cached bytes instead of re-emitting a closed bitmap or downloading.
+                    String key=CoverStore.refKeyOf(sid);
+                    byte[] bytes=key==null ? null : cached(key);
+                    if(bytes!=null && inject(bytes,SIDE,sid)==null) armLanding(sid,lastOwnerInjected);
+                }
+            }
+        }
         if (sid <= 0L || sid == musicDeliveredId || sid == lastOk || pending.get() == sid) {
             return;             // 没认到曲 / 这一首已经进场（或正在投）：绝不第二次进场
         }
@@ -547,7 +589,7 @@ public final class PlaybarCover {
         if (!fresh && !reset) {
             return;             // 上一首的旧位置：不是起播信号（0.11.18 实证过两次）
         }
-        if (sid <= 0L || sid == musicDeliveredId || sid == lastOk) {
+        if (sid <= 0L || (playbackCycle.get() == deliveredCycle && (sid == musicDeliveredId || sid == lastOk))) {
             return;             // 已经进场过 / 认不到曲：只留时序证据，不投
         }
         HostBridgeWorker.get().submitFast(() -> onMusicStarted(
@@ -1130,6 +1172,23 @@ public final class PlaybarCover {
         } catch (Throwable ignored) {
             // 预热失败不影响任何用户可见路径
         }
+    }
+
+    private static volatile long sameTrackRepairAt;
+    private static boolean ownerReusable(Object owner) {
+        try { synchronized(owner) {
+            var closing=owner.getClass().getDeclaredField("closeRequested");closing.setAccessible(true);
+            var closed=owner.getClass().getDeclaredField("closed");closed.setAccessible(true);
+            return !closing.getBoolean(owner) && !closed.getBoolean(owner);
+        }} catch(Throwable unreadable) { return false; }
+    }
+    /** Background-only: keep search artwork warm before the newly added host row can be played. */
+    public static void warmSong(com.example.netease.net.Dto.Song song) {
+        CoverStore.planSong(song);
+        String key=CoverStore.refKeyOf(song.id());
+        if(key==null || cached(key)!=null) return;
+        byte[] bytes=CoverStore.originalImage(key);
+        if(bytes!=null && bytes.length>0) put(key,bytes);
     }
 
     /**

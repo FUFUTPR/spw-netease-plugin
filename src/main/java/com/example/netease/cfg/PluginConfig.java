@@ -55,7 +55,8 @@ public final class PluginConfig {
      */
     public static final String F_LEGACY_CLIENT = "client_cfg.json";
 
-    private static final String[] ALL_FILES = {F_MAIN, F_ACCOUNT, F_LEGACY_CLIENT};
+    public static final String F_MUSIC = "music_cfg.json";
+    private static final String[] ALL_FILES = {F_MAIN, F_ACCOUNT, F_LEGACY_CLIENT, F_MUSIC};
 
     /**
      * 账号组键（0.11.23）：**界面上唯一的那一行输入框**（{@code edittext}，标题「登录」）。
@@ -97,7 +98,7 @@ public final class PluginConfig {
             boolean audioCache,
             long audioCacheBytes,
             boolean devMode,
-            boolean mergePlaylists) {
+            boolean mergePlaylists, boolean searchBoxEnabled) {
 
         String summary() {
             // ⚠️ 手机号是 PII：只报「配没配」，绝不把号码写进日志。
@@ -109,12 +110,13 @@ public final class PluginConfig {
                     + " native_audio_cache=" + audioCache
                     + " audio_cache_gb=" + (audioCacheBytes / (1024L * 1024L * 1024L))
                     + " dev_mode=" + devMode
-                    + " merge_playlists=" + mergePlaylists;
+                    + " merge_playlists=" + mergePlaylists
+                    + " search_box_enabled=" + searchBoxEnabled;
         }
     }
 
     private static final Snapshot DEFAULTS = new Snapshot(
-            true, "info", "lossless", true, "", true, 10L * 1024 * 1024 * 1024, false, true);
+            true, "info", "lossless", true, "", true, 10L * 1024 * 1024 * 1024, false, true, true);
 
     private static final Map<String, ConfigHelper> HELPERS = new ConcurrentHashMap<>();
 
@@ -141,6 +143,9 @@ public final class PluginConfig {
      * 参数 = 新状态（true 开 / false 关）。
      */
     private static volatile java.util.function.Consumer<Boolean> mergePlaylistsHook;
+    private static volatile java.util.function.Consumer<Boolean> searchBoxHook;
+    public static boolean searchBoxEnabled() { return snap.searchBoxEnabled(); }
+    public static void setSearchBoxHook(java.util.function.Consumer<Boolean> hook) { searchBoxHook = hook; }
 
     private PluginConfig() {
     }
@@ -259,8 +264,12 @@ public final class PluginConfig {
                 bool(F_MAIN, "dev_mode", false),
                 // 0.11.46（合并歌单，用户需求）：默认开 —— 网易云与本地音乐合并显示在「歌曲」里；
                 // 关 ⇒ 同步链路整体停写 + 撤销已写入的 netease-* 行（落地动作走 mergePlaylistsHook）。
-                bool(F_MAIN, "merge_playlists", true));
+                bool(F_MAIN, "merge_playlists", true), bool(F_MUSIC, "search_box_enabled", true));
         snap = s;
+        if (before.searchBoxEnabled() != s.searchBoxEnabled()) {
+            var hook = searchBoxHook;
+            if (hook != null) hook.accept(s.searchBoxEnabled());
+        }
         PluginLog.setLevel(s.logLevel());
         if (!before.equals(s)) {
             // 配置面唯一可观测落点：改档位/容量/开关后，日志必须能看见快照真的变了

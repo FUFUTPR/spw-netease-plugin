@@ -4,7 +4,6 @@
 // 版本锁定依据（docs/ITERATION-0.12.0.md 有完整证据）：
 //   - Kotlin 2.4.20 = 宿主 1.19.0 自带 Kotlin 版本
 //   - Compose runtime/foundation/ui 1.12.2，编译出的 ABI 与宿主 androidx runtime 1.12.0-beta01 一致
-//   - material3 1.10.0-alpha05：公共方法集与宿主宿主 material3 逐类比对一致
 //   - JDK 25 = 宿主运行时；宿主 API class 是 major 69
 
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
@@ -59,7 +58,6 @@ dependencies {
     compileOnly("org.jetbrains.compose.runtime:runtime-desktop:1.12.2")
     compileOnly("org.jetbrains.compose.foundation:foundation-desktop:1.12.2")
     compileOnly("org.jetbrains.compose.ui:ui-desktop:1.12.2")
-    compileOnly("org.jetbrains.compose.material3:material3-desktop:1.10.0-alpha05")
 }
 
 val pluginClassesDir = layout.buildDirectory.dir("plugin-classes")

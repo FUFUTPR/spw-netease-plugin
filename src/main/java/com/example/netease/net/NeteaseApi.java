@@ -95,7 +95,45 @@ public final class NeteaseApi {
         PluginLog.i("netease", "搜索 \"" + keyword + "\" → HTTP " + Http.lastStatus()
                 + "，" + body.length() + " 字节");
         Object root = parse(Json.parse(body));
-        return parseSearch(root);
+        // Search's web response often has no album artwork. One batched detail
+        // request supplies missing URLs before publishing; the caller already
+        // runs this work on LatestTask, never in the Compose/render thread.
+        return searchArtwork(parseSearch(root), NeteaseApi::songsByIds);
+    }
+
+    private static final Map<Long, String> SEARCH_ARTWORK = java.util.Collections.synchronizedMap(
+            new java.util.LinkedHashMap<Long, String>(64, .75f, true) {
+                @Override protected boolean removeEldestEntry(Map.Entry<Long, String> entry) { return size() > 512; }
+            });
+    @FunctionalInterface
+    interface ArtworkDetails { List<Dto.Song> fetch(List<Long> ids) throws Exception; }
+
+    /** Keep original relevance, metadata and permissions; merge artwork by ID only. */
+    static List<Dto.Song> searchArtwork(List<Dto.Song> rows, ArtworkDetails details) {
+        var missing = new java.util.LinkedHashSet<Long>();
+        var pictures = new java.util.HashMap<Long, String>();
+        for (Dto.Song song : rows) {
+            String url = song.picUrl();
+            if (url == null || url.isBlank()) url = SEARCH_ARTWORK.get(song.id());
+            if (url == null || url.isBlank()) missing.add(song.id());
+            else { pictures.put(song.id(), url); SEARCH_ARTWORK.put(song.id(), url); }
+        }
+        if (!missing.isEmpty()) {
+            try {
+                for (Dto.Song detail : details.fetch(List.copyOf(missing))) {
+                    if (detail != null && missing.contains(detail.id()) && detail.picUrl() != null && !detail.picUrl().isBlank()) {
+                        pictures.put(detail.id(), detail.picUrl()); SEARCH_ARTWORK.put(detail.id(), detail.picUrl());
+                    }
+                }
+            } catch (Exception unavailable) { PluginLog.d("netease", "搜索封面批量详情暂不可用，保留搜索结果"); }
+        }
+        var result = new ArrayList<Dto.Song>(rows.size());
+        for (Dto.Song song : rows) {
+            String url = pictures.get(song.id());
+            result.add(url == null || url.equals(song.picUrl()) ? song : new Dto.Song(song.id(), song.name(), song.artists(),
+                    song.album(), song.durationMs(), song.fee(), song.playable(), url));
+        }
+        return List.copyOf(result);
     }
 
     static List<Dto.Song> parseSearch(Object root) {
@@ -1288,6 +1326,8 @@ public final class NeteaseApi {
                 Dto.PlaylistBrief brief = toPlaylistBrief(node, who);
                 if (brief != null) {
                     out.add(brief);
+                    if (brief.mine() && Json.integer(node,"specialType",0)==SPECIAL_TYPE_LIKED)
+                        likedPlaylistCache=new LikedPlaylistCache(who,brief.id(),System.currentTimeMillis());
                 }
             }
             boolean more = Json.bool(root, "more", false) || Json.bool(root, "data.more", false);
@@ -1740,11 +1780,15 @@ public final class NeteaseApi {
                 mine);
     }
 
+    private record LikedPlaylistCache(long uid,long id,long at) {}
+    private static volatile LikedPlaylistCache likedPlaylistCache;
     /** 「我喜欢的音乐」特制歌单 id；找不到返回 0（绝不抛）。 */
-    private static long specialLikedPlaylistId(long uid) {
+    public static long specialLikedPlaylistId(long uid) {
         if (uid <= 0L) {
             return 0L;
         }
+        var cached=likedPlaylistCache;
+        if(cached!=null && cached.uid()==uid && System.currentTimeMillis()-cached.at()<60_000) return cached.id();
         try {
             Map<String, Object> payload = Json.newObject();
             payload.put("uid", uid);
@@ -1805,6 +1849,12 @@ public final class NeteaseApi {
             PluginLog.d("netease", "likelist 响应解析失败：" + safeMessage(t));
         }
         return out;
+    }
+
+    /** Search responses may omit artwork; resolve only the selected song. */
+    public static Dto.Song songDetail(long id) throws NeteaseException {
+        if (id <= 0) return null;
+        return songsByIds(List.of(id)).stream().filter(song -> song.id() == id).findFirst().orElse(null);
     }
 
     /** 按 id 批量取曲目详情（每批 500 首，内部上限 1000 首）。 */
@@ -1973,6 +2023,46 @@ public final class NeteaseApi {
             }
         }
         return s;
+    }
+
+    /** Called by the serialized account worker, after validating account epoch/UID. */
+    public static void addSongToPlaylist(long songId, long playlistId, boolean like) throws NeteaseException {
+        editSongInPlaylist(songId,playlistId,like,false);
+    }
+    public static void editSongInPlaylist(long songId, long playlistId, boolean like, boolean remove) throws NeteaseException {
+        if (songId <= 0 || (!like && playlistId <= 0) || !isLoggedIn())
+            throw new NeteaseException("请先登录后再添加歌曲");
+        Map<String, Object> payload = playlistMutationPayload(songId, playlistId, like, remove);
+        String path = like ? "radio/like" : "playlist/manipulate/tracks";
+        payload.put("csrf_token", java.util.Objects.toString(Http.cookie("__csrf"), ""));
+        var enc = WeapiCrypto.encrypt(payload);
+        try {
+            String response = Http.postFormOnce(Http.BASE + "/weapi/" + path + "/?csrf_token="
+                    + java.util.Objects.toString(Http.cookie("__csrf"), ""),
+                    Map.of("params", enc.params(), "encSecKey", enc.encSecKey()));
+            requirePlaylistMutationSuccess(response);
+        } catch (IOException error) {
+            throw new NeteaseException("修改结果未确认，请先在网易云查看，避免重复操作");
+        }
+    }
+    static Map<String, Object> playlistMutationPayload(long songId, long playlistId, boolean like) {
+        return playlistMutationPayload(songId,playlistId,like,false);
+    }
+    static Map<String, Object> playlistMutationPayload(long songId, long playlistId, boolean like, boolean remove) {
+        Map<String,Object> payload=Json.newObject();
+        if (like) {
+            payload.put("trackId",songId); payload.put("like",!remove);
+            payload.put("alg","itembased"); payload.put("time","3");
+        } else {
+            payload.put("op",remove ? "del" : "add"); payload.put("pid",playlistId);
+            payload.put("trackIds","["+songId+"]"); payload.put("imme","true");
+        }
+        return payload;
+    }
+    static void requirePlaylistMutationSuccess(String response) throws NeteaseException {
+        Object root=Json.parse(response);
+        int code=Json.integer(root,"code",-1);
+        if(code!=200) throw new NeteaseException("网易云未确认添加：code="+code+" "+PluginLog.sanitize(wordsOf(root)));
     }
 
     private static Object weapi(String path, Map<String, Object> payload) throws NeteaseException {

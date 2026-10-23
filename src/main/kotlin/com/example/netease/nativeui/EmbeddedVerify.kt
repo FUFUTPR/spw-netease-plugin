@@ -14,9 +14,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.SideEffect
@@ -99,37 +96,38 @@ internal fun EmbeddedVerifyArea(url: String, source: String, onRetry: () -> Unit
     }
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(
+            SaltText(
                 text = headline(st),
-                style = MaterialTheme.typography.bodyMedium,
+                style = HostStyle.typography.bodyMedium,
                 fontWeight = FontWeight.SemiBold,
             )
             if (st?.retryable() == true) {
-                OutlinedButton(onClick = { controller?.retry() }) { Text("重试") }
+                SaltSecondaryButton(onClick = { controller?.retry() }) { SaltText("重试") }
             }
         }
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(400.dp)
-                .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(6.dp))
-                .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(6.dp))
+                .border(1.dp, HostStyle.colors.stroke, RoundedCornerShape(6.dp))
                 .onGloballyPositioned { coords ->
                     val bounds = coords.boundsInWindow()
-                    NativeUiSession.updateEmbeddedVerify(
-                        bounds.left,
-                        bounds.top,
-                        bounds.width,
-                        bounds.height,
-                        VerifyHostWindow.scale,
-                    )
+                    // The host dialog scrolls its content. Hide the native child
+                    // when its placeholder is completely clipped by that viewport.
+                    if (bounds.width < 1f || bounds.height < 1f) {
+                        NativeUiSession.hideEmbeddedVerify()
+                    } else {
+                        NativeUiSession.updateEmbeddedVerify(
+                            bounds.left, bounds.top, bounds.width, bounds.height, VerifyHostWindow.scale,
+                        )
+                    }
                 },
             contentAlignment = Alignment.Center,
         ) {
             // 网页区域就绪后会被原生子窗口盖住；这里只在启动中/失败/关闭时显示占位文案。
             val phase = st?.phase()
             if (phase != VerifyEmbedController.Phase.READY) {
-                Text(
+                SaltText(
                     text = when (phase) {
                         VerifyEmbedController.Phase.STARTING -> "正在启动内嵌验证组件…"
                         VerifyEmbedController.Phase.FAILED -> "验证区域未能显示（原因见下方），可点「重试」"
@@ -137,29 +135,29 @@ internal fun EmbeddedVerifyArea(url: String, source: String, onRetry: () -> Unit
                         null -> "正在准备验证区域…"
                         else -> "验证区域准备中…"
                     },
-                    style = MaterialTheme.typography.bodySmall,
+                    style = HostStyle.typography.bodySmall,
                     modifier = Modifier.padding(12.dp),
                 )
             }
         }
         if (st?.phase() == VerifyEmbedController.Phase.FAILED && !st.message().isBlank()) {
-            Text(
+            SaltText(
                 text = st.message(),
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.error,
+                style = HostStyle.typography.labelMedium,
+                color = HostStyle.colors.error,
             )
         }
-        Text(
+        SaltText(
             text = "验证页由本机 WebView2 在宿主主窗口内渲染，不会打开外部浏览器；" +
                 "加载失败或验证组件异常时在本区域内重试。验证完成后点下方「我已完成，重试」。",
-            style = MaterialTheme.typography.labelSmall,
+            style = HostStyle.typography.labelSmall,
         )
         if (url.isBlank()) {
-            Text("（当前没有验证地址）", style = MaterialTheme.typography.labelSmall)
+            SaltText("（当前没有验证地址）", style = HostStyle.typography.labelSmall)
         }
         if (st == null) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = onRetry) { Text("重新获取验证地址") }
+                SaltSecondaryButton(onClick = onRetry) { SaltText("重新获取验证地址") }
             }
         }
     }

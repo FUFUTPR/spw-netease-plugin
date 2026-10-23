@@ -1,154 +1,31 @@
 @file:OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
-
 package com.example.netease.nativeui
 
-import androidx.compose.foundation.background
-import androidx.compose.foundation.isSystemInDarkTheme
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CornerBasedShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Button
-import androidx.compose.material3.ColorScheme
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Shapes
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.material3.Typography
-import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.lightColorScheme
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.SideEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
+import androidx.compose.foundation.focusGroup
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.awt.LocalAwtWindow
-import androidx.compose.ui.graphics.Shape
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.unit.dp
 import com.example.netease.net.Dto
 import com.example.netease.svc.LocalPlaylists
 import com.example.netease.svc.SyncCoordinator
 import com.example.netease.svc.AccountService
-import com.example.netease.ui.controller.LocalSaveController
-import com.example.netease.ui.controller.LoginController
-import com.example.netease.ui.controller.PlaylistController
-import com.example.netease.ui.controller.SearchController
-import com.example.netease.ui.controller.VerifyEmbedController
+import com.example.netease.ui.controller.*
+import com.example.netease.cfg.PluginConfig
 
-/**
- * 主题适配（REVIEW issue6）。
- *
- * <p>宿主 1.19.0 的配置页不是 Material3 界面：宿主用自建的 SaltTheme CompositionLocal
- * （SaltColors/SaltTextStyles/SaltShapes/SaltConfigs）绘制全部原生页面。Hook 注入点
- * 位于宿主 AppTheme 之内，所以这里直接读取宿主实际提供的配色、字体与圆角
- * （见 [HostSaltTheme]），再交给 MaterialTheme——深浅色、品牌色、字体和圆角都与宿主
- * 当前页面一致，不再用 isSystemInDarkTheme() + 默认色板去猜。</p>
- *
- * <p>只有宿主混淆名失效、读不到 SaltTheme 时才降级到 Material3 默认主题；开发者页会
- * 显示实际主题来源与降级原因，默认色板不会被当作验收结果。</p>
- */
-@Composable
-private fun NativeUiTheme(content: @Composable () -> Unit) {
-    val host = HostSaltTheme.read()
-    if (host == null) {
-        MaterialTheme(
-            colorScheme = if (isSystemInDarkTheme()) darkColorScheme() else lightColorScheme(),
-            content = content,
-        )
-        return
-    }
-    MaterialTheme(
-        colorScheme = hostColorScheme(host),
-        typography = hostTypography(host),
-        shapes = hostShapes(host),
-        content = content,
-    )
-}
-
-/** 宿主 SaltColors → Material3 ColorScheme；只映射本插件页面实际用到的颜色角色。 */
-private fun hostColorScheme(host: HostSaltTheme.Snapshot): ColorScheme {
-    val p = host.palette
-    val scheme = if (host.dark) darkColorScheme() else lightColorScheme()
-    return scheme.copy(
-        primary = p.highlight,
-        onPrimary = p.onHighlight,
-        primaryContainer = p.highlight,
-        onPrimaryContainer = p.onHighlight,
-        secondary = p.highlight,
-        onSecondary = p.onHighlight,
-        secondaryContainer = p.subBackground,
-        onSecondaryContainer = p.text,
-        tertiary = p.success,
-        onTertiary = p.background,
-        background = p.background,
-        onBackground = p.text,
-        surface = p.background,
-        onSurface = p.text,
-        surfaceVariant = p.subBackground,
-        onSurfaceVariant = p.subText,
-        error = p.error,
-        onError = p.background,
-        errorContainer = p.subBackground,
-        onErrorContainer = p.error,
-        outline = p.stroke,
-        outlineVariant = p.stroke,
-    )
-}
-
-/** 宿主 SaltTextStyles → Material3 Typography：正文/次要文本/段落/大标题都用宿主字体。 */
-private fun hostTypography(host: HostSaltTheme.Snapshot): Typography {
-    val t = host.textStyles
-    return Typography(
-        displayLarge = t.largeTitle,
-        displayMedium = t.largeTitle,
-        displaySmall = t.largeTitle,
-        headlineLarge = t.largeTitle,
-        headlineMedium = t.largeTitle,
-        headlineSmall = t.largeTitle,
-        titleLarge = t.main,
-        titleMedium = t.main,
-        titleSmall = t.main,
-        bodyLarge = t.paragraph,
-        bodyMedium = t.main,
-        bodySmall = t.sub,
-        labelLarge = t.main,
-        labelMedium = t.sub,
-        labelSmall = t.sub,
-    )
-}
-
-/** 宿主 SaltShapes → Material3 Shapes（宿主返回 Shape，M3 只收 CornerBasedShape）。 */
-private fun hostShapes(host: HostSaltTheme.Snapshot): Shapes {
-    val s = host.shapes
-    return Shapes(
-        extraSmall = cornerShape(s.small, 4.dp),
-        small = cornerShape(s.small, 8.dp),
-        medium = cornerShape(s.medium, 12.dp),
-        large = cornerShape(s.large, 16.dp),
-        extraLarge = cornerShape(s.large, 20.dp),
-    )
-}
-
-private fun cornerShape(shape: Shape, fallback: Dp): CornerBasedShape =
-    shape as? CornerBasedShape ?: RoundedCornerShape(fallback)
-
-/** Hook 注册结果，供页面显示与真机排查（只写内存，不落盘）。 */
 internal object NativeUiRuntime {
     var hostVersion: String = "unknown"
     var pluginVersion: String = "unknown"
@@ -163,7 +40,7 @@ internal object NativeUiRuntime {
 internal enum class NativePage(val title: String) {
     HOME("首页"),
     SEARCH("搜索歌曲"),
-    PLAYLIST("歌单与同步"),
+    PLAYLIST("歌单与同步状态"),
     SYNC("同步状态"),
     LOGIN("登录"),
     ACCOUNT("账号"),
@@ -210,211 +87,76 @@ internal object NativeUiState {
     var localRefreshRequested by mutableStateOf(false)
 }
 
-/**
- * 插件在宿主「插件配置」页内容区之上的原生页面（docs/PLAN.md 批次 1/2）。
- *
- * <p>约束：只在宿主当前配置页属于本插件时才绘制（见 [HostUiMountScope]）；不创建
- * 独立窗口；主题沿用宿主 SaltTheme 的配色/字体/圆角；缩放跟随宿主 CompositionLocals；
- * 关闭后只撤掉本层，宿主内容不动；页面打开时吞掉指针事件，避免点穿到宿主配置项。</p>
- */
+/** Uses the host's actual Salt components inside its original CompositionLocals. */
 @Composable
-internal fun NativeUiPanel() = NativeUiTheme { NativeUiShell() }
+internal fun NativeUiPanel() {
+    val host = HostSaltTheme.read() ?: return
+    DisposableEffect(Unit) { onDispose { NativeUiPresentation.leaveHostRoute() } }
+    CompositionLocalProvider(LocalSaltSnapshot provides host) { NativeUiShell() }
+}
 
 @Composable
 private fun NativeUiShell() {
-    // 先于任何登录动作捕获真实宿主窗口（内容区/缩放）：验证助手要先核对窗口身份，
-    // 而风控可能由后台 tick 在登录页第一次组合前后触发，不能等验证区域自己组合时才拿。
     val awtWindow = LocalAwtWindow.current
+    NativeModalEscapeGate(awtWindow)
     SideEffect { VerifyHostWindow.capture(awtWindow) }
-    if (!NativeUiState.visible) {
-        // 关闭后仅保留入口；Box 本身不拦截指针事件，宿主配置页照常可操作。
+    val background = NativeUiPresentation.backgroundPage()
+    val modal = NativeUiPresentation.modalOpen()
+    if (background == NativePage.HOME && !NativeUiPresentation.anyDialogOpen() && PluginConfig.devMode()) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.BottomEnd) {
-            Surface(
-                tonalElevation = 3.dp,
-                shadowElevation = 3.dp,
-                shape = MaterialTheme.shapes.medium,
-                modifier = Modifier.padding(16.dp),
-            ) {
-                TextButton(onClick = { NativeUiState.visible = true }) {
-                    Text("打开网易云音乐")
-                }
-            }
-        }
-        return
-    }
-
-    Box(Modifier.fillMaxSize().consumeAllPointerEvents()) {
-        Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-            Column(Modifier.fillMaxSize().padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                NativeUiHeader()
-                Box(
-                    Modifier
-                        .fillMaxWidth()
-                        .height(1.dp)
-                        .background(MaterialTheme.colorScheme.outlineVariant),
-                )
-                when (NativeUiState.page) {
-                    NativePage.HOME -> NativeHomePage()
-                    NativePage.SEARCH -> NativeSearchPage()
-                    NativePage.PLAYLIST -> NativePlaylistPage()
-                    NativePage.SYNC -> NativeSyncPage()
-                    NativePage.LOGIN -> NativeLoginPage()
-                    NativePage.ACCOUNT -> NativeAccountPage()
-                    NativePage.DEVELOPER -> NativeDeveloperPage()
+            Row(Modifier.padding(16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (PluginConfig.devMode()) SaltPlainButton(onClick = { NativeUiPresentation.openPage(NativePage.DEVELOPER) }) {
+                    SaltText("开发者信息")
                 }
             }
         }
     }
+    if (NativeUiPresentation.isPage(background)) {
+        NativeUiBackground {
+            SaltScreen(background.title,
+                action = { SaltBackButton(onClick = { NativeUiPresentation.showConfiguration() }) },
+                tools = {},
+            ) { insets ->
+                Box(Modifier.fillMaxSize().padding(insets).padding(horizontal = 16.dp)) {
+                    if (background == NativePage.SEARCH) NativeSearchPage() else NativePlaylistPage()
+                }
+            }
+        }
+    }
+    if (modal) {
+        val page = NativeUiState.page
+        EmbeddedSaltDialog(page.title, onDismiss = { NativeUiPresentation.dismissModal() }) {
+            when (page) {
+                NativePage.LOGIN -> NativeLoginPage()
+                NativePage.ACCOUNT -> NativeAccountPage()
+                NativePage.SYNC -> NativeSyncPage()
+                NativePage.DEVELOPER -> NativeDeveloperPage()
+                else -> Unit
+            }
+        }
+    }
+    if (NativeUiPresentation.localSaveOpen) NativeUiState.playlist?.let { LocalSaveDialog(it) }
 }
 
+/** The modal stays above the existing page; block its focus and accessibility. */
 @Composable
-private fun NativeUiHeader() {
-    val page = NativeUiState.page
-    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        if (page != NativePage.HOME) {
-            OutlinedButton(
-                onClick = {
-                    // 离开登录页 = 关闭登录流程：停二维码轮询、关验证窗（恢复语义在 AccountService 内）。
-                    if (page == NativePage.LOGIN) {
-                        NativeUiSession.closeLogin()
-                    }
-                    NativeUiState.page = NativePage.HOME
-                },
-            ) {
-                Text("← 返回")
-            }
-        }
-        Column(Modifier.weight(1f)) {
-            Text(
-                text = "网易云音乐 · " + page.title,
-                style = MaterialTheme.typography.headlineSmall,
-            )
-            // 普通页面只保留用户可见信息：插件版本（宿主版本/密度/字体等诊断在开发者页）。
-            Text(
-                text = "插件版本 " + NativeUiRuntime.pluginVersion,
-                style = MaterialTheme.typography.labelMedium,
-            )
-        }
-        OutlinedButton(
-            onClick = {
-                if (page == NativePage.LOGIN) {
-                    NativeUiSession.closeLogin()
-                }
-                NativeUiState.visible = false
-            },
-        ) {
-            Text("关闭并返回宿主配置")
-        }
-    }
+internal fun NativeUiBackground(blocked: Boolean = NativeUiPresentation.anyDialogOpen(), content: @Composable () -> Unit) {
+    val modifier = if (blocked) Modifier.focusProperties { onEnter = { cancelFocusChange() } }
+        .focusGroup().clearAndSetSemantics {} else Modifier
+    Box(modifier.fillMaxSize()) { content() }
 }
 
-@Composable
-private fun NativeHomePage() {
-    Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text(
-            text = "网易云音乐功能内嵌在宿主主窗口里，不创建独立窗口；" +
-                "搜索、歌单同步、登录与账号都在下面的原生页面中完成。",
-            style = MaterialTheme.typography.bodyMedium,
-        )
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            Button(onClick = { NativeUiState.page = NativePage.SEARCH; NativeUiSession.requestLocalRefresh() }) {
-                Text("搜索歌曲")
-            }
-            Button(onClick = { NativeUiState.page = NativePage.PLAYLIST; NativeUiSession.requestLocalRefresh() }) {
-                Text("歌单与同步")
-            }
-            Button(onClick = { NativeUiState.page = NativePage.SYNC; NativeUiSession.refreshSync() }) {
-                Text("同步状态")
-            }
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            Button(onClick = { NativeUiSession.openLogin() }) {
-                Text("登录")
-            }
-            Button(
-                onClick = {
-                    NativeUiSession.refreshAccount()
-                    NativeUiState.page = NativePage.ACCOUNT
-                },
-            ) {
-                Text("账号")
-            }
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            OutlinedButton(onClick = { NativeUiState.visible = false }) {
-                Text("关闭并返回宿主配置")
-            }
-            TextButton(onClick = { NativeUiState.page = NativePage.DEVELOPER }) {
-                Text("开发者信息")
-            }
-        }
-        NativeSyncSummary()
-    }
-}
-
-/**
- * 开发者信息页：只放诊断与验收说明，正式用户页面不再出现这些内容（REVIEW issue6）。
- *
- * <p>「主题来源」一栏显示实际读取到的是宿主 SaltTheme 还是降级到默认 Material3，
- * 便于在真机上确认 issue6 的验收结果，而不是靠注释声称。</p>
- */
 @Composable
 private fun NativeDeveloperPage() {
     val density = LocalDensity.current
-    val theme = HostSaltTheme.read()
-    Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        Text("宿主适配诊断", style = MaterialTheme.typography.titleMedium)
-        NativeDeveloperRow("挂载状态", NativeUiState.status)
-        NativeDeveloperRow("插件版本", NativeUiRuntime.pluginVersion)
-        NativeDeveloperRow("宿主版本", NativeUiRuntime.hostVersion)
-        NativeDeveloperRow("主题来源", HostSaltTheme.describe(theme))
-        NativeDeveloperRow(
-            "宿主深浅色",
-            if (theme == null) "未知（未读到宿主 SaltTheme）" else if (theme.dark) "深色" else "浅色",
-        )
-        NativeDeveloperRow("系统深色检测", if (isSystemInDarkTheme()) "深色" else "浅色")
-        NativeDeveloperRow("宿主密度", String.format("%.2f×", density.density))
-        NativeDeveloperRow("字体缩放", String.format("%.2f×", density.fontScale))
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            OutlinedButton(onClick = { NativeUiState.clicks += 1 }) {
-                Text("状态自检 +1（" + NativeUiState.clicks + "）")
-            }
-        }
-        Text(
-            text = "安装/挂载：插件通过宿主工坊的 afterComposable Hook 注入配置页内容区，" +
-                "只在当前配置页的 pluginId 精确等于 com.example.netease 时绘制；" +
-                "其它插件页、路由缺失或类型不认识时直接返回，不创建入口、不消费指针事件。",
-            style = MaterialTheme.typography.bodySmall,
-        )
-        Text(
-            text = "验收点：关闭后宿主原有配置内容应照常显示与操作；再次进入本插件配置页时，" +
-                "右下角会保留「打开网易云音乐」入口，不会重复注册 Hook。" +
-                "搜索与歌单页的请求超时仍为 20 秒，播放反馈只回显宿主回报，界面不伪造进度。" +
-                "登录页与账号页都消费 AccountService 的同一份快照，不新增 cookie 或账号状态；" +
-                "关闭登录页会停掉二维码轮询并走 AccountService 原有的取消/恢复语义。",
-            style = MaterialTheme.typography.bodySmall,
-        )
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        SaltText("挂载状态：" + NativeUiState.status)
+        SaltText("宿主：" + NativeUiRuntime.hostVersion + " · 插件：" + NativeUiRuntime.pluginVersion)
+        SaltText("组件：" + HostSaltComponents.describe())
+        SaltText("主题：" + HostSaltTheme.describe(HostSaltTheme.read()))
+        SaltText("密度：${density.density} · 字体缩放：${density.fontScale}")
+        SaltSecondaryButton(onClick = { NativeUiState.clicks++ }) { SaltText("状态自检（${NativeUiState.clicks}）") }
     }
-}
-
-/** 开发者页的一行诊断：左列标签、右列值。 */
-@Composable
-private fun NativeDeveloperRow(label: String, value: String) {
-    Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text(label, style = MaterialTheme.typography.labelMedium, modifier = Modifier.weight(0.34f))
-        Text(value, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(0.66f))
-    }
-}
-
-/** 首页的一行同步摘要（详细状态见同步页与歌单页）。 */
-@Composable
-private fun NativeSyncSummary() {
-    val status = NativeUiState.sync
-    val text = if (status == null) "尚未取得同步状态" else "同步：" + describeStatus(status)
-    Text(text = text, style = MaterialTheme.typography.bodyMedium)
 }
 
 internal fun syncPhaseLabel(status: SyncCoordinator.Status): String = when (status.phase()) {

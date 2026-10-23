@@ -72,6 +72,7 @@ public final class NativeStreamServer {
 
     private final Map<String, Cached> cache = new LinkedHashMap<>();
     private final AtomicLong served = new AtomicLong();
+    private final java.util.Set<Socket> clients = java.util.concurrent.ConcurrentHashMap.newKeySet();
     /** 0.11.19 首字节打点的节流表（songId → 上次打点毫秒）：同一首一秒内只报一次，防宿主重试刷屏。 */
     private final Map<Long, Long> firstByteAt = new LinkedHashMap<>();
 
@@ -84,6 +85,9 @@ public final class NativeStreamServer {
     }
 
     // ------------------------------------------------------------------ 生命周期
+
+    /** Explicit plugin re-enable boundary. Ordinary late start() calls remain terminal after stop(). */
+    public static synchronized void beginLifecycle() { stopped = false; }
 
     /** 启动服务（幂等）。返回实际监听端口；失败返回 -1。 */
     public static synchronized int start() {
@@ -135,6 +139,11 @@ public final class NativeStreamServer {
             server = null;
             port = -1;
             closeQuietly(ss);
+            NativeStreamServer old = instance;
+            if (old != null) {
+                for (Socket client : old.clients) closeQuietly(client);
+                old.clients.clear();
+            }
             ExecutorService p = pool;
             pool = null;
             if (p != null) {
@@ -241,25 +250,28 @@ public final class NativeStreamServer {
     // ------------------------------------------------------------------ 连接循环
 
     private void acceptLoop(ServerSocket ss) {
-        while (true) {
+        while (server == ss) {
             Socket sock;
             try {
                 sock = ss.accept();
             } catch (Throwable t) {
-                if (server == null) {
+                if (server != ss) {
                     return;          // 正常停止
                 }
                 PluginLog.d(TAG, "accept 异常（继续）：" + t);
                 continue;
             }
             ExecutorService p = pool;
-            if (p == null || p.isShutdown()) {
+            if (server != ss || p == null || p.isShutdown()) {
                 closeQuietly(sock);
                 return;
             }
+            clients.add(sock);
+            if (server != ss) { clients.remove(sock); closeQuietly(sock); return; }
             try {
                 p.submit(() -> handle(sock));
             } catch (Throwable t) {
+                clients.remove(sock);
                 closeQuietly(sock);
             }
         }
@@ -336,7 +348,7 @@ public final class NativeStreamServer {
             proxy(songId, method, headers, out, requestedLevel);
         } catch (Throwable t) {
             PluginLog.d(TAG, "连接处理异常（忽略）：" + t);
-        }
+        } finally { clients.remove(sock); }
     }
 
     /** 逐字节读一行（只读到 LF），不越过请求头 —— 避免 BufferedReader 预读走 body。 */

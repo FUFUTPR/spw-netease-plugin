@@ -4,7 +4,9 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -15,11 +17,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.material3.Button
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -28,6 +25,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -46,7 +49,7 @@ internal fun NativePlaylistPage() {
     val controller = NativeUiSession.playlist()
     val state = NativeUiState.playlist
     if (controller == null || state == null) {
-        Text("歌单控制器尚未就绪（插件可能正在启动或已停用）", style = MaterialTheme.typography.bodyMedium)
+        SaltText("歌单控制器尚未就绪（插件可能正在启动或已停用）", style = HostStyle.typography.bodyMedium)
         return
     }
     BoxWithConstraints(Modifier.fillMaxSize()) {
@@ -55,7 +58,7 @@ internal fun NativePlaylistPage() {
         val showNav = !narrow || navOpen
         Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             PlaylistToolbar(controller, state, narrow, navOpen, onToggleNav = { navOpen = !navOpen })
-            PlaylistInputs(controller)
+            PlaylistInputs(controller, onSave = { NativeUiPresentation.openLocalSave() })
             LocalPlaylistBox(controller)
             Row(Modifier.fillMaxWidth().weight(1f), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 if (showNav) {
@@ -66,7 +69,23 @@ internal fun NativePlaylistPage() {
                     TracksList(controller, state, Modifier.weight(1f))
                 }
             }
-            NativeSyncBlock(compact = true)
+            SaltGroup { Column(Modifier.padding(12.dp)) { NativeSyncBlock(compact = true) } }
+        }
+    }
+}
+
+@Composable
+internal fun LocalSaveDialog(state: PlaylistController.State) {
+    val focus = remember { androidx.compose.ui.focus.FocusRequester() }
+    androidx.compose.runtime.LaunchedEffect(Unit) { focus.requestFocus() }
+    fun cancel() { NativeUiPresentation.closeLocalSave(cancel = true) }
+    EmbeddedSaltDialog("存为本地歌单", onDismiss = { cancel() },
+        onConfirm = { NativeUiSession.submitLocalSave(NativeUiState.saveName); NativeUiPresentation.closeLocalSave(cancel = false) },
+        confirmVisible = true, cancelText = "取消", confirmText = "保存") {
+        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            SaltText("保存当前列表中的 ${state.tracks().size} 首歌曲", style = HostStyle.typography.titleMedium)
+            SaltInput(NativeUiState.saveName, { NativeUiState.saveName = it }, Modifier.fillMaxWidth().focusRequester(focus),
+                hint = NativeUiState.localSave?.defaultName().orEmpty().ifBlank { "歌单名称" })
         }
     }
 }
@@ -79,70 +98,45 @@ private fun PlaylistToolbar(
     navOpen: Boolean,
     onToggleNav: () -> Unit,
 ) {
-    Row(
+    FlowRow(
         Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalAlignment = Alignment.CenterVertically,
+        verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         if (narrow) {
-            OutlinedButton(onClick = onToggleNav) { Text(if (navOpen) "收起歌单列表" else "歌单列表") }
+            SaltSecondaryButton(onClick = onToggleNav) { SaltText(if (navOpen) "收起歌单列表" else "歌单列表") }
         }
-        OutlinedButton(onClick = { controller.loadLiked() }) { Text("我喜欢的音乐") }
-        OutlinedButton(onClick = { controller.loadDaily() }) { Text("每日推荐") }
-        OutlinedButton(onClick = { controller.loadMine() }) { Text(if (state.briefsLoaded()) "刷新我的歌单" else "载入我的歌单") }
-        OutlinedButton(onClick = { NativeUiSession.requestLocalRefresh() }) { Text("刷新本地歌单") }
-        OutlinedButton(
+        SaltSecondaryButton(onClick = { controller.loadLiked() }) { SaltText("我喜欢的音乐") }
+        SaltSecondaryButton(onClick = { controller.loadDaily() }) { SaltText("每日推荐") }
+        SaltSecondaryButton(onClick = { controller.loadMine() }) { SaltText(if (state.briefsLoaded()) "刷新我的歌单" else "载入我的歌单") }
+        SaltSecondaryButton(onClick = { NativeUiSession.requestLocalRefresh() }) { SaltText("刷新本地歌单") }
+        if (state.canRetry()) SaltSecondaryButton(
             onClick = { controller.retry() },
             enabled = state.canRetry(),
         ) {
-            Text(if (state.retryLabel().isBlank()) "重试" else state.retryLabel())
+            SaltText(if (state.retryLabel().isBlank()) "重试" else state.retryLabel())
         }
     }
 }
 
 @Composable
-private fun PlaylistInputs(controller: PlaylistController) {
+private fun PlaylistInputs(controller: PlaylistController, onSave: () -> Unit) {
     val save = NativeUiState.localSave
     val busy = save?.busy() == true
-    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Row(
-            Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            OutlinedTextField(
-                value = NativeUiState.playlistInput,
-                onValueChange = { NativeUiState.playlistInput = it },
-                singleLine = true,
-                modifier = Modifier.weight(1f),
-                placeholder = { Text("歌单 ID 或链接（如 https://music.163.com/playlist?id=123456）") },
-            )
-            Button(onClick = { controller.loadPlaylistText(NativeUiState.playlistInput) }) { Text("载入歌单") }
-            OutlinedTextField(
-                value = NativeUiState.saveName,
-                onValueChange = { NativeUiState.saveName = it },
-                singleLine = true,
-                modifier = Modifier.width(200.dp),
-                placeholder = {
-                    val def = save?.defaultName().orEmpty()
-                    Text(if (def.isBlank()) "本地歌单名" else "默认：" + def)
-                },
-            )
-            OutlinedButton(
-                onClick = { NativeUiSession.submitLocalSave(NativeUiState.saveName) },
-                enabled = !busy,
-            ) {
-                Text(if (busy) "保存中…" else "存为本地歌单")
-            }
-            OutlinedButton(onClick = { NativeUiSession.cancelLocalSave() }, enabled = !busy) {
-                Text("取消命名")
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        SaltGroup { SaltInput(NativeUiState.playlistInput, { NativeUiState.playlistInput = it }, Modifier.fillMaxWidth(),
+            hint = "粘贴歌单链接或输入歌单 ID") }
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            SaltButton(onClick = { controller.loadPlaylistText(NativeUiState.playlistInput) }) { SaltText("载入歌单") }
+            SaltSecondaryButton(onClick = onSave, enabled = !busy && NativeUiState.playlist?.tracks()?.isNotEmpty() == true) {
+                SaltText(if (busy) "保存中…" else "存为本地歌单")
             }
         }
         val msg = save?.message().orEmpty()
         if (msg.isNotBlank()) {
-            Text(
+            SaltText(
                 text = "本地命名：" + msg + "（待保存 " + (save?.trackCount() ?: 0) + " 首）",
-                style = MaterialTheme.typography.labelSmall,
+                style = HostStyle.typography.labelSmall,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -155,31 +149,31 @@ private fun LocalPlaylistBox(controller: PlaylistController) {
     val entries: List<LocalPlaylists.Entry> = NativeUiState.localEntries
     var open by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(
+        Row(Modifier.padding(vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            SaltText(
                 text = "本地歌单（" + entries.size + "）",
-                style = MaterialTheme.typography.bodySmall,
+                style = HostStyle.typography.bodyMedium,
                 modifier = Modifier.clickable { open = !open },
             )
-            Text(
+            SaltText(
                 text = if (open) "收起" else "展开载入",
-                style = MaterialTheme.typography.labelSmall,
+                style = HostStyle.typography.labelSmall,
                 modifier = Modifier.clickable { open = !open },
             )
             if (NativeUiState.localNote.isNotBlank()) {
-                Text(NativeUiState.localNote, style = MaterialTheme.typography.labelSmall)
+                SaltText(NativeUiState.localNote, style = HostStyle.typography.labelSmall)
             }
         }
         if (open) {
             if (entries.isEmpty()) {
-                Text("还没有本地歌单；可用上方「存为本地歌单」把当前曲目表存下来。", style = MaterialTheme.typography.bodySmall)
+                SaltText("还没有本地歌单；可用上方「存为本地歌单」把当前曲目表存下来。", style = HostStyle.typography.bodySmall)
             } else {
                 Column(Modifier.fillMaxWidth().height(88.dp)) {
                     LazyColumn(Modifier.fillMaxWidth().weight(1f)) {
                         itemsIndexed(entries) { _, e ->
-                            Text(
+                            SaltText(
                                 text = "本地歌单「" + e.name() + "」 · " + e.trackCount() + " 首",
-                                style = MaterialTheme.typography.bodySmall,
+                                style = HostStyle.typography.bodySmall,
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .clickable { controller.loadLocal(e.key(), e.name()) }
@@ -196,33 +190,19 @@ private fun LocalPlaylistBox(controller: PlaylistController) {
 @Composable
 private fun BriefsPane(controller: PlaylistController, state: PlaylistController.State, modifier: Modifier) {
     val briefs: List<Dto.PlaylistBrief> = state.briefs()
-    Column(modifier) {
-        Text("我的歌单（创建 / 收藏）", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        SaltText("我的歌单", style = HostStyle.typography.titleMedium, fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.padding(horizontal = 12.dp))
         if (briefs.isEmpty()) {
-            Text(
+            SaltText(
                 text = if (state.briefsLoaded()) "没有歌单；可用上方 ID 载入公开歌单。" else "点上方「载入我的歌单」拉取列表。",
-                style = MaterialTheme.typography.bodySmall,
+                style = HostStyle.typography.bodySmall,
             )
         } else {
             LazyColumn(Modifier.fillMaxWidth().weight(1f)) {
                 itemsIndexed(briefs) { _, b ->
-                    Column(
-                        Modifier
-                            .fillMaxWidth()
-                            .clickable { controller.loadPlaylist(b.id(), b.name()) }
-                            .padding(vertical = 5.dp, horizontal = 4.dp),
-                    ) {
-                        Text(
-                            text = b.name().orEmpty(),
-                            style = MaterialTheme.typography.bodyMedium,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        Text(
-                            text = (if (b.mine()) "创建" else "收藏") + " · " + b.trackCount() + " 首",
-                            style = MaterialTheme.typography.labelSmall,
-                        )
-                    }
+                    SaltItem(b.name().orEmpty(), (if (b.mine()) "创建" else "收藏") + " · " + b.trackCount() + " 首",
+                        Modifier.fillMaxWidth()) { controller.loadPlaylist(b.id(), b.name()) }
                 }
             }
         }
@@ -232,29 +212,30 @@ private fun BriefsPane(controller: PlaylistController, state: PlaylistController
 @Composable
 private fun TracksHeader(controller: PlaylistController, state: PlaylistController.State) {
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-        Text(
+        SaltText(
             text = if (state.sourceName().isBlank()) "来源：未载入" else "来源：" + state.sourceName() + " · " + state.tracks().size + " 首",
-            style = MaterialTheme.typography.bodyMedium,
+            style = HostStyle.typography.titleMedium,
             fontWeight = FontWeight.SemiBold,
         )
-        Text(state.message(), style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        if (state.message().isNotBlank() && state.message() != "就绪")
+            SaltText(state.message(), style = HostStyle.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             if (state.busy()) {
-                Text(
+                SaltText(
                     text = "载入中：" + state.pendingLabel() + "（保留上次列表）",
-                    style = MaterialTheme.typography.labelSmall,
+                    style = HostStyle.typography.labelSmall,
                 )
             }
             if (state.playbackText().isNotBlank()) {
-                Text(
-                    text = "播放反馈（宿主回报，不代表已实际出声）：" + state.playbackText(),
-                    style = MaterialTheme.typography.labelSmall,
+                SaltText(
+                    text = "播放状态：" + state.playbackText(),
+                    style = HostStyle.typography.labelSmall,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            OutlinedButton(onClick = { controller.retryPlayback() }, enabled = state.playing() || state.pendingPlayRequest() > 0) {
-                Text("重试上次播放")
+            if (state.pendingPlayRequest() > 0) SaltSecondaryButton(onClick = { controller.retryPlayback() }, enabled = !state.playing()) {
+                SaltText("重试上次播放")
             }
         }
     }
@@ -264,11 +245,11 @@ private fun TracksHeader(controller: PlaylistController, state: PlaylistControll
 private fun TracksList(controller: PlaylistController, state: PlaylistController.State, modifier: Modifier) {
     val tracks: List<Dto.Song> = state.tracks()
     if (tracks.isEmpty()) {
-        Text(
-            text = "曲目表是空的：先从上排选一个来源，或在左栏选歌单 / 用 ID 载入。",
-            style = MaterialTheme.typography.bodyMedium,
-            modifier = modifier.padding(vertical = 12.dp),
-        )
+        Box(modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { SaltText(
+            text = if (state.busy()) "正在载入歌曲…" else "选择一个歌单，或粘贴歌单链接载入歌曲",
+            style = HostStyle.typography.bodyMedium,
+            modifier = Modifier.padding(24.dp),
+        ) }
         return
     }
     LazyColumn(modifier.fillMaxWidth()) {
@@ -280,36 +261,5 @@ private fun TracksList(controller: PlaylistController, state: PlaylistController
 
 @Composable
 private fun TrackRow(index: Int, song: Dto.Song, onPlay: () -> Unit) {
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .pointerInput(song.id()) { detectTapGestures(onTap = { onPlay() }) }
-            .padding(horizontal = 8.dp, vertical = 6.dp),
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text((index + 1).toString(), style = MaterialTheme.typography.bodySmall, modifier = Modifier.width(34.dp))
-        Text(
-            text = song.name().orEmpty(),
-            style = MaterialTheme.typography.bodyMedium,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(3f),
-        )
-        Text(
-            text = song.artists().orEmpty(),
-            style = MaterialTheme.typography.bodySmall,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(2f),
-        )
-        Text(
-            text = song.album().orEmpty(),
-            style = MaterialTheme.typography.bodySmall,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(2f),
-        )
-        Text(trackNote(song), style = MaterialTheme.typography.bodySmall, modifier = Modifier.width(96.dp))
-    }
+    SaltTrack(song, index, Modifier.fillMaxWidth(), onSelect = onPlay)
 }

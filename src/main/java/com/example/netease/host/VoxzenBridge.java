@@ -139,14 +139,22 @@ public final class VoxzenBridge {
     private static final int OPENER_CODE_POINT = 0x0145;
 
     /** 直链解析线程（网络）。 */
-    private static final ExecutorService NET = Executors.newSingleThreadExecutor(r -> {
+    private static volatile ExecutorService NET = newNetworkWorker();
+    private static ExecutorService newNetworkWorker() { return Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "netease-online");
         t.setDaemon(true);
         return t;
-    });
+    }); }
 
     private static volatile boolean stopped;
-    public static void stop() { stopped = true; SEQ.incrementAndGet(); NET.shutdownNow(); }
+    /** Only the plugin lifecycle may reopen a stopped executor; late requests cannot do so. */
+    public static synchronized void beginLifecycle() {
+        if (!stopped && !NET.isShutdown()) return;
+        SEQ.incrementAndGet();
+        NET = newNetworkWorker();
+        stopped = false;
+    }
+    public static synchronized void stop() { stopped = true; SEQ.incrementAndGet(); NET.shutdownNow(); }
 
     private static final AtomicInteger SEQ = new AtomicInteger();
 
@@ -165,6 +173,16 @@ public final class VoxzenBridge {
     private static final java.util.concurrent.ConcurrentMap<Integer, String> PLAY_REPORTS = new java.util.concurrent.ConcurrentHashMap<>();
     public static String playbackReport(int requestId) { return PLAY_REPORTS.get(requestId); }
 
+    private static volatile long onlineSong, onlineAt;
+    private static volatile int onlineSeq, submittedOnlineSeq, startedSeq;
+    public static boolean playbackStarted(int requestId) { return requestId > 0 && requestId == startedSeq; }
+    /** Called on the host worker after a real isPlaying/position callback. */
+    public static void observePlaying(long actualSongId) {
+        int seq = onlineSeq;
+        String report = PLAY_REPORTS.get(seq);
+        if (!stopped && seq == SEQ.get() && submittedOnlineSeq == seq && actualSongId > 0 && actualSongId == onlineSong
+                && report != null && !report.contains("失败") && !report.contains("为空")) startedSeq = seq;
+    }
     private static volatile String lastResult = "在线播放：未开始";
     private static volatile long lastPlayAtMs;
     private static volatile String lastUrlMeta = "";
@@ -203,19 +221,26 @@ public final class VoxzenBridge {
     public static int playOnlineRequest(Dto.Song song, String level) {
         return requestOnline(song.id(), song.name(), song.artists(), song.album(), song.picUrl(), level);
     }
-    private static int requestOnline(long songId, String title, String artist, String album, String picUrl, String level) {
+    private static synchronized int requestOnline(long songId, String title, String artist, String album, String picUrl, String level) {
+        long now = System.currentTimeMillis();
+        String prior = PLAY_REPORTS.get(onlineSeq);
+        boolean failed = prior != null && (prior.contains("失败") || prior.contains("为空"));
+        if (!stopped && onlineSeq == SEQ.get() && songId == onlineSong && !failed
+                && (now - onlineAt < 650L || (startedSeq != onlineSeq && now - onlineAt < 30_000L))) return onlineSeq;
         final int seq = SEQ.incrementAndGet();
         if (stopped) { set(seq,"播放失败：插件已停用"); return seq; }
+        onlineSong = songId; onlineSeq = seq; onlineAt = now;
         set(seq, "正在解析音源…");
         try {
             NET.execute(() -> {
-                if (stopped) { return; }
+                if (stopped || seq != SEQ.get()) { return; }
                 // level 为空表示“跟随插件配置”。必须先解析后再取直链：NeteaseApi 对空值有
                 // 自己的兼容默认值（exhigh）；若直接把 null 传下去，会把 320k 直链错误地
                 // 记到 lossless/hires 的缓存键下，表现成“切到最高音质仍然是低音质”。
                 String effectiveLevel = effectiveLevel(level);
-                try { com.example.netease.svc.CoverStore.ensure(album, artist, picUrl); }
+                try { prepareOnlineCover(new Dto.Song(songId, title, artist, album, 0L, 0, true, picUrl)); }
                 catch (Throwable coverError) { PluginLog.d(TAG, "搜索封面准备失败，播放继续"); }
+                if (stopped || seq != SEQ.get()) return;
                 String direct;
                 try {
                     direct = NeteaseApi.songUrl(songId, effectiveLevel);
@@ -254,7 +279,7 @@ public final class VoxzenBridge {
                 LyricService.prefetch(
                         List.of(new Dto.Song(songId, title, artist, album, 0L, 0, true, "")),
                         Map.of(songId, playbackUrl));
-                if (!HostBridgeWorker.get().submit(
+                if (!HostBridgeWorker.get().submitFast(
                         () -> injectOnWorker(seq, songId, title, artist, album, playbackUrl))) {
                     set(seq, "播放失败：宿主交互线程不可用，请启用插件后重试");
                 }
@@ -264,6 +289,20 @@ public final class VoxzenBridge {
             PluginLog.e(TAG, "在线播放投递失败（已吞）", t);
         }
         return seq;
+    }
+
+    private static void prepareOnlineCover(Dto.Song song) {
+        String picture = song.picUrl();
+        if (picture == null || picture.isBlank()) {
+            try {
+                Dto.Song detail = NeteaseApi.songDetail(song.id());
+                if (detail != null) picture = detail.picUrl();
+            } catch (Throwable unavailable) { PluginLog.d(TAG, "单曲封面详情暂不可用，播放继续"); }
+        }
+        Dto.Song coverSong = new Dto.Song(song.id(), song.name(), song.artists(), song.album(),
+                song.durationMs(), song.fee(), song.playable(), picture == null ? "" : picture);
+        com.example.netease.svc.CoverStore.planSong(coverSong);
+        com.example.netease.svc.CoverStore.ensure(coverSong.album(), coverSong.artists(), coverSong.picUrl());
     }
 
     // ------------------------------------------------------------ 对外：试一首
@@ -281,7 +320,7 @@ public final class VoxzenBridge {
         final int seq = SEQ.incrementAndGet();
         try {
             NET.execute(() -> {
-                if (stopped) { return; }
+                if (stopped || seq != SEQ.get()) { return; }
                 try {
                     AccountService.State st;
                     long uid;
@@ -328,7 +367,10 @@ public final class VoxzenBridge {
                     Dto.Song s = songs.get(ThreadLocalRandom.current().nextInt(songs.size()));
                     PluginLog.i(TAG, "试播 #" + seq + " 随机选中 songId=" + s.id() + " 「" + s.name()
                             + "」（曲库 " + songs.size() + " 首）");
-                    playOnline(s.id(), s.name(), s.artists(), s.album(), null);
+                    synchronized (VoxzenBridge.class) {
+                        if (stopped || seq != SEQ.get()) return;
+                        playOnline(s.id(), s.name(), s.artists(), s.album(), null);
+                    }
                 } catch (Throwable t) {
                     set(seq, "试播失败：" + brief(t));
                     PluginLog.w(TAG, "试播 #" + seq + " 异常", t);
@@ -379,13 +421,17 @@ public final class VoxzenBridge {
             final List<Dto.Song> all = new ArrayList<>(songs);
             final int start = Math.max(0, Math.min(startIndex, all.size() - 1));
             NET.execute(() -> {
-                if (stopped) { return; }
+                if (stopped || seq != SEQ.get()) { return; }
                 try {
                     // 与单曲播放一致：先把“跟随配置”的空档位解析成确定值，再去批量取链。
                     // 这样请求档位、直链缓存键与播放 URL 三者始终完全一致。
                     String effectiveLevel = effectiveLevel(level);
                     int end = Math.min(all.size(), start + PLAYLIST_WINDOW);
                     List<Dto.Song> win = new ArrayList<>(all.subList(start, end));
+                    try {
+                        com.example.netease.svc.CoverStore.plan(List.of(new com.example.netease.svc.NativeLibrary.Entry(0, "在线播放队列", win)));
+                        prepareOnlineCover(win.getFirst());
+                    } catch (Throwable coverError) { PluginLog.d(TAG, "队列封面准备暂不可用，播放继续"); }
                     List<Long> ids = new ArrayList<>();
                     for (Dto.Song s : win) {
                         ids.add(s.id());
@@ -475,7 +521,7 @@ public final class VoxzenBridge {
         final int seq = SEQ.incrementAndGet();
         try {
             NET.execute(() -> {
-                if (stopped) { return; }
+                if (stopped || seq != SEQ.get()) { return; }
                 try {
                     long uid;
                     try {
@@ -520,7 +566,10 @@ public final class VoxzenBridge {
                     int start = ThreadLocalRandom.current().nextInt(pl.tracks().size());
                     PluginLog.i(TAG, "整单试播 #" + seq + " 随机选中歌单「" + pl.name() + "」(" + pl.tracks().size()
                             + " 首) 起点=" + (start + 1) + " songId=" + pl.tracks().get(start).id());
-                    playPlaylist(pl.tracks(), start, null, "试播");
+                    synchronized (VoxzenBridge.class) {
+                        if (stopped || seq != SEQ.get()) return;
+                        playPlaylist(pl.tracks(), start, null, "试播");
+                    }
                 } catch (Throwable t) {
                     set(seq, "整单试播失败：" + brief(t));
                     PluginLog.w(TAG, "整单试播 #" + seq + " 异常", t);
@@ -842,6 +891,8 @@ public final class VoxzenBridge {
                     + "（曲目项位置=真链" + (ONLINE_INSTALL_SWITCHER ? "；切换器已开启" : "；本版不装切换器") + "）");
 
             driveOnWorker(seq, item, probeItem, "在线播放", title, artist, trackId, url);
+            String report = PLAY_REPORTS.get(seq);
+            if (report != null && report.startsWith("已提交给宿主播放器")) submittedOnlineSeq = seq;
         } catch (Throwable t) {
             // 兜底：退到 addToPlay（有些队列状态不允许整体替换）
             try {
@@ -970,21 +1021,18 @@ public final class VoxzenBridge {
                 try {
                     ctrl.getClass().getMethod("setPlaybackQueue", itemCls).invoke(ctrl, startItem);
                     steps.append(" + setPlaybackQueue(单曲退路)");
+                    queued = true;
                 } catch (Throwable t) {
                     steps.append(" + setPlaybackQueue(单曲退路) 失败(").append(brief(t)).append(')');
                 }
             }
+            if (!queued) { set(seq, "失败：宿主未接受播放队列"); return; }
             try {
-                ctrl.getClass().getMethod("playMusicAt", int.class, boolean.class).invoke(ctrl, 0, true);
-                steps.append(" + playMusicAt(0,true)");
-            } catch (Throwable t) {
-                steps.append(" + playMusicAt(0,true) 失败(").append(brief(t)).append(')');
-            }
-            try {
+                ctrl.getClass().getMethod("prepare").invoke(ctrl);
                 ctrl.getClass().getMethod("play").invoke(ctrl);
-                steps.append(" + play()");
+                steps.append(" + prepare() + play()");
             } catch (Throwable t) {
-                steps.append(" + play() 失败(").append(brief(t)).append(')');
+                set(seq, "失败：宿主未接受播放请求"); return;
             }
             PluginLog.i(TAG, label + " #" + seq + " ③ " + steps
                     + "（代理调用=" + PROXY_CALLS.get() + "/总计=" + PROXY_ALL.get() + "）");
@@ -996,11 +1044,11 @@ public final class VoxzenBridge {
                 PluginLog.d(TAG, label + " #" + seq + " ③‴ 立即读回失败：" + brief(t));
             }
 
-            // ③⁺ 保活登记 + ⑤ 二次起播 + ⑥ 进度探针 + ④ 分级读回（与单曲版同一套判定口径）
+            // ③⁺ 有界保活；开发者模式下才进行只读状态诊断
             keepRegistryAlive(seq, label, startTrackId, startLoc);
-            scheduleReplay(seq, label, startTrackId, startLoc);
-            progressLater(seq, label, startTrackId, startLoc);
-            scheduleStateReadback(seq, label);
+
+
+            if (PluginConfig.devMode()) scheduleStateReadback(seq, label);
             set(seq, "已提交给宿主播放器：整单 " + items.size() + " 首，从「" + nz(win.get(0).name()) + "」开始连播");
         } catch (Throwable t) {
             PluginLog.w(TAG, label + " #" + seq + " 整单注入失败：" + brief(t), t);
@@ -1013,18 +1061,15 @@ public final class VoxzenBridge {
     /**
      * 把曲目项交给宿主播放器：级联 + 直驱 + 分级读回。
      *
-     * <p>0.3.4 级联：{@code setPlaybackQueue(单曲)} → {@code playMusicAt(0,true)} → {@code play()}；
-     * 0.3.7 直驱：绕过协程/命令通道直接调播放器上「单参 = 曲目项」的方法；
-     * 0.3.8 立即读回：直驱之后马上读一次宿主真状态；
-     * 0.3.6 分级读回：1.5 s / 4 s / 8 s 三次。</p>
+     * <p>与宿主原生「播放所选队列」一致：设置队列、prepare、play 各一次。
+     * 实际开始播放由宿主回调结合当前曲目 ID 确认。</p>
      *
      * @param label 日志前缀（在线播放 / 本地试播）
      */
     private static void driveOnWorker(int seq, Object item, Object probeItem, String label, String title,
                                       String artist, String trackId, String location) {
         try {
-            // 0.3.3 真机实证：只 setPlaybackQueue(单曲) + play() 时，队列里有项（自检队列项=1）
-            // 但宿主什么也没播（代理调用=0、界面回落空态）⇒ 缺的是「选中当前项」这一步。
+            // prepare is required to load the selected item before the single play command.
             Class<?> itemCls = item.getClass();
             Object ctrl = staticInstance(CLS_CONTROLLER);
             if (ctrl == null) {
@@ -1037,67 +1082,22 @@ public final class VoxzenBridge {
                 steps.append("setPlaybackQueue(单曲)");
             } catch (Throwable t) {
                 steps.append("setPlaybackQueue 跳过(").append(brief(t)).append(')');
+                set(seq, "失败：宿主未接受播放队列");
+                return;
             }
             boolean selected = false;
             try {
-                ctrl.getClass().getMethod("playMusicAt", int.class, boolean.class).invoke(ctrl, 0, true);
-                steps.append(" + playMusicAt(0,true)");
+                // Identical to the host's native "play selected queue" action.
+                // playMusicAt's boolean is isRandomQueue, not autoplay.
+                ctrl.getClass().getMethod("prepare").invoke(ctrl);
+                ctrl.getClass().getMethod("play").invoke(ctrl);
+                steps.append(" + prepare() + play()");
                 selected = true;
             } catch (Throwable t) {
-                steps.append(" + playMusicAt(0,true) 失败(").append(brief(t)).append(')');
+                steps.append(" + prepare/play 失败(").append(brief(t)).append(')');
             }
-            if (!selected) {
-                try {
-                    ctrl.getClass().getMethod("playMusicAt", int.class, boolean.class).invoke(ctrl, 0, false);
-                    steps.append(" + playMusicAt(0,false)");
-                    selected = true;
-                } catch (Throwable t) {
-                    steps.append(" + playMusicAt(0,false) 失败(").append(brief(t)).append(')');
-                }
-            }
-            // 0.3.6：无论选曲那条路是否抛异常，都**无条件**补一次 transport「播放」。
-            // 取证（javap）：playMusicAt 是异步协程（serviceScope.launch → queue mutex → 两次队列
-            // suspend 调用 → Dispatchers.getMain()），真机上只有「已调用」而播放器一直 Idle；
-            // play() 走的是另一条路（playbackCommandChannel.trySend(PlaybackCommand$Play)），
-            // 两条路都记下来，才能判断卡在哪一段。
-            try {
-                ctrl.getClass().getMethod("play").invoke(ctrl);
-                steps.append(" + play()");
-            } catch (Throwable t) {
-                steps.append(" + play() 失败(").append(brief(t)).append(')');
-            }
-            if (!selected) {
-                try {
-                    ctrl.getClass().getMethod("playOrPause").invoke(ctrl);
-                    steps.append(" + playOrPause()");
-                } catch (Throwable t) {
-                    steps.append(" + playOrPause() 失败(").append(brief(t)).append(')');
-                }
-            }
-            PluginLog.i(TAG, label + " #" + seq + " ③ " + steps
-                    + "（代理调用=" + PROXY_CALLS.get() + "/总计=" + PROXY_ALL.get() + "）");
-
-            // ③″ 0.3.7：绕过宿主的协程 / 命令通道，**直接驱动播放器**。
-            //     取证（javap -p）：`PlaybackService$playMusicAt$1$1$1$1` 的协程体最终就是调
-            //     `PiscesPlayer` 上「单参 = PiscesMediaItem」的方法（public final Object 版 +
-            //     public final void 版）。真机上 ③ 一路「已调用」而播放器恒为 Idle，
-            //     所以这一步单独验证「播放器到底收不收我们的曲目项」，并把它自己的异常抓出来
-            //     （宿主对这类失败不写日志）。
-            try {
-                Object svc = staticField(ctrl.getClass(), "PlaybackService", "service");
-                Object player = findPlayer(svc);
-                PluginLog.i(TAG, label + " #" + seq + " ③″ 直驱播放器：" + drivePlayer(player, item));
-            } catch (Throwable t) {
-                PluginLog.w(TAG, label + " #" + seq + " ③″ 直驱失败：" + brief(t), t);
-            }
-
-            // ③⁺ 0.3.13：**本版故意不调** setPlaybackAudioSource。
-            //     0.3.12 真机反证：调它之后 ③⁺′ 与 ③‴ 都显示「注册表源=空」——切换器拿到 Request 后
-            //     走 createLoadPlan，发现播放器当前项的位置**已经等于**目标位置（就是我们的 http 直链）
-            //     ⇒ 判「无需切换」→ finishSourceSwitch → clearSource() 把登记清掉；随后宿主装载这个
-            //     条目时没有任何 http 源登记，就把直链当文件打开 ⇒ FileNotOpened ⇒ 播放器退回 Idle。
-            //     （③‴ 抓到过 播放器=Buffering：宿主确实开始装了，只是装法不对。）
-            //     所以本版只做「保活登记 + 真拦截器也放进清单」，把装载交给宿主自己的链路。
+            if (!selected) { set(seq, "失败：宿主未接受选曲请求"); return; }
+            PluginLog.i(TAG, label + " #" + seq + " " + steps);
             if (location != null && location.startsWith("http")) {
                 PluginLog.i(TAG, label + " #" + seq + " ③⁺ 声源切换：本版不调 setPlaybackAudioSource（它会清空登记）；"
                         + "改为保活登记 登记=" + registryActivate(trackId, location)
@@ -1105,81 +1105,8 @@ public final class VoxzenBridge {
                 keepRegistryAlive(seq, label, trackId, location);
             }
 
-            // ③⁺ᵃ 0.3.16：让宿主自己的声源切换器**真的发一次切换请求**。
-            //     0.3.15 真机决定性进展：直调装载器已经能把这条网易云直链开成流、并分析出真曲目
-            //     （装载器回调=MorvaniumAnalyzedTrack(trackProfile=MorvaniumTrackProfile(
-            //     trackId=netease-3406368630, durationMs=170584, audibleRange=MorvaniumTimeRange(
-            //     startMs=208, endMs=1669…)))）⇒ **取流层已通**（0.3.13/0.3.14 同一处是 FileNotOpened）。
-            //     但 ③⁺′ 与 ④ 里 pendingSource / activeSource / lastManagedLoad 恒为空、播放器恒 Idle
-            //     ⇒ 唯一解释：切换器只被「登记」喂养过，**从没收到过 select 请求**（宿主音乐视频走的
-            //     就是 select → createLoadPlan → pendingSource → 播放器 adopt 这条临时声源的路）。
-            if (location != null && location.startsWith("http")) {
-                PluginLog.i(TAG, label + " #" + seq + " ③⁺ᵃ 切换请求：" + switcherSelect(trackId, location));
-                chainReadbackLater(seq, label, 1200L, "③⁺ᵃ′");
-            }
-
-            // ③⁺′ 0.3.11：把「声源切换链」的中间状态读出来。0.3.10 真机里 ③⁺ 调了却毫无动静，
-            //     必须分清三种情形：① select 没进 channel（latestRequest 空）；② createLoadPlan 判
-            //     「不可用」（pendingSource 空）——它要求播放器**当前项**的 trackId 与请求一致；
-            //     ③ 登记了但没人来装载（pendingSource 非空而播放器恒 Idle）。
-            try {
-                PluginLog.i(TAG, label + " #" + seq + " ③⁺′ 切换链：" + switcherDump()
-                        + " 注册表源=" + registrySourceDump());
-            } catch (Throwable t) {
-                PluginLog.d(TAG, label + " #" + seq + " ③⁺′ 切换链读回失败：" + brief(t));
-            }
-
-            // ③‴ 0.3.8：直驱之后**立刻**读一次——1.5 秒后才读会漏掉「短暂进了 Loading 又退回 Idle」。
-            try {
-                PluginLog.i(TAG, label + " #" + seq + " ③‴ 立即读回：" + hostStateDump());
-            } catch (Throwable t) {
-                PluginLog.d(TAG, label + " #" + seq + " ③‴ 立即读回失败：" + brief(t));
-            }
-
-            // ③⁗ 0.3.11：直调宿主自己的「流装载器」。
-            //     取证（javap + 常量池扫描）：`androidx.compose.ui.Ņ` 持有拦截器 List，其
-            //     `Ņ(?, PlatformContext, List)` 构造 + 唯一公开方法 `(PiscesMediaItem, Continuation)`
-            //     → 新建 `Ӂ$Ϳ$Ԩ(List, PlatformContext, item, J, J, I, ?, Ref$IntRef, Continuation)`
-            //     → 逐个拦截器调 createStream，返回 Result<BASS 句柄>；而**唯一调用者**是宿主具体
-            //     播放器 `com.xuncorp.pisces.Ԩ`（+ 它的两个内部类）。所以这一步只回答一个问题：
-            //     「拦截器链能不能真的把 https 位置变成 BASS 句柄」——能，则缺的只是「让播放器自己
-            //     触发装载」；若 代理调用 仍是 0，则说明装载器读的清单不是我们追加的那一份。
-            try {
-                Object svc2 = staticField(ctrl.getClass(), "PlaybackService", "service");
-                Object player2 = findPlayer(svc2);
-                PluginLog.i(TAG, label + " #" + seq + " ③⁗ 直调装载器："
-                        + directLoad(seq, player2, probeItem, trackId, location));
-                // ③⁗′ 0.3.12：把**真**音乐视频拦截器（不是代理）直接调一次——0.3.11 真机里
-                //     装载器对 http 位置直接抛 FileNotOpened（根本没走拦截器链）。这一步只回答：
-                //     「宿主自带的 HTTP-Range 流创建，对**我们这个**位置到底能不能出句柄？」
-                //     0.3.13：调用前先重新登记（0.3.12 里那一刻登记已被清空），并把 matches 结果打出来。
-                PluginLog.i(TAG, label + " #" + seq + " ③⁗′ 真拦截器："
-                        + probeRealInterceptor(player2, probeItem, trackId, location));
-                // ③⁗″ 0.3.19：直接调**播放器自己的取流方法**（javap 产物 `…Ԩ.bytecode.txt` 行 6201：
-                //     `(PiscesMediaItem, Long, Continuation) → Result<androidx.compose.ui.Ӂ>`）。
-                //     它的第一跳就是取 `Properties.ԯ()` 那份清单——所以本条同时回答两个问题：
-                //     ① 播放器自己这条路能不能把 http 位置开成流；② ①′⁺ 的注入有没有接到正地方。
-                PluginLog.i(TAG, label + " #" + seq + " ③⁗″ 播放器取流路径："
-                        + streamPathProbe(player2, probeItem, trackId, location));
-            } catch (Throwable t) {
-                PluginLog.w(TAG, label + " #" + seq + " ③⁗ 直调装载器失败：" + brief(t), t);
-            }
-
-            // ⑤ 0.3.10：真机实证「本地普通路径 1.5 s 后 播放器=Idle→Ready」，但 Ready ≠ Playing。
-            //     ③ 里的 play() 是在加载**之前**发的，所以 2.5 s 后（宿主加载完成之后）再补一次
-            //     「选曲 + 播放」，验证「加载完了还得再点一次播放」这个假设。
-            //     0.3.12：同时在这一刻**重激活注册表 + 重发声源切换**——0.3.11 真机证明 ③⁺ 发得太早
-            //     （那一刻播放器的当前项还是上一首，createLoadPlan 的 trackId 闸门直接判不可用）。
-            scheduleReplay(seq, label, trackId, location);
-
-            // ⑥ 0.3.20：装载完成后的多拍「播放进度」探针（12/18/24 秒）。
-            //     0.3.19 真机首次让在线条目从 Idle 走到 Ready（10:48:17 ④+4s），而 javap 实证
-            //     宿主的状态枚举只有 {Buffering, Ended, Idle, Ready}——**没有 Playing**，
-            //     所以「Ready 到底是在放还是只是装载完成」只能靠位置是否推进 + 宿主 logs.txt 里
-            //     HTTP range 流是否保持打开来判。每拍顺便补一脚 playMusicAt+play（状态不是 Ready 时）。
-            progressLater(seq, label, trackId, location);
-
-            scheduleStateReadback(seq, label);
+            // No direct player invocation, stream-opening probes, delayed reselection or replay.
+            // Native playback callbacks provide the completion evidence.
             set(seq, "已提交给宿主播放器：" + nz(title) + " - " + nz(artist));
         } catch (Throwable t) {
             PluginLog.w(TAG, label + " #" + seq + " 交给播放器失败：" + brief(t), t);
@@ -1689,6 +1616,9 @@ public final class VoxzenBridge {
                     try {
                         HostBridgeWorker.get().submit(() -> {
                             try {
+                                if (stopped || seq != SEQ.get()) return;
+                                long actual = playingTrackId();
+                                if (actual > 0 && !trackId.equals("netease-" + actual)) return;
                                 PluginLog.i(TAG, label + " #" + seq + " ③⁺" + d + "ms 保活：" + registryActivate(trackId, location)
                                         + " 读回=" + registrySourceDump());
                             } catch (Throwable t) {
@@ -1748,9 +1678,10 @@ public final class VoxzenBridge {
      * 可能吃的是普通路径——两种各跑一次，日志里按 {@code 本地试播 #N} 序号区分。</p>
      */
     public static void tryLocal() {
+        final int seq = SEQ.incrementAndGet();
         try {
             NET.execute(() -> {
-                if (stopped) { return; }
+                if (stopped || seq != SEQ.get()) { return; }
                 List<String> files = localAudioCandidates();
                 if (files.isEmpty()) {
                     PluginLog.w(TAG, "本地试播：本地没找到音频文件（跳过对照）");
@@ -1760,12 +1691,12 @@ public final class VoxzenBridge {
                 String title = baseName(file);
                 PluginLog.i(TAG, "本地试播：对照文件=" + esc(file));
                 HostBridgeWorker.get().submit(() -> injectLocalOnWorker(
-                        SEQ.incrementAndGet(), file, title, "本地文件", "本地对照"));
+                        seq, file, title, "本地文件", "本地对照"));
                 final String uri = toFileUri(file);
                 Timers.later(12000L, () -> {
                     try {
                         HostBridgeWorker.get().submit(() -> injectLocalOnWorker(
-                                SEQ.incrementAndGet(), uri, title, "本地文件(file://)", "本地对照"));
+                                seq, uri, title, "本地文件(file://)", "本地对照"));
                     } catch (Throwable t) {
                         PluginLog.w(TAG, "本地试播（URI 形态）投递失败：" + brief(t), t);
                     }
@@ -1866,48 +1797,6 @@ public final class VoxzenBridge {
      * 但 {@code Ready} 不等于 {@code Playing}——③ 里的 {@code play()} 是在加载**之前**发的。
      * 这里 2.5 s 后再补一次，验证「宿主加载完了还得再点一次播放」这个假设（对在线/本地都跑）。</p>
      */
-    private static void scheduleReplay(int seq, String label, final String trackId, final String location) {
-        try {
-            final Object ctrl = staticInstance(CLS_CONTROLLER);
-            if (ctrl == null) {
-                return;
-            }
-            Timers.later(2500L, () -> {
-                try {
-                    HostBridgeWorker.get().submit(() -> {
-                        try {
-                            Object before = callAnyNoArg(ctrl, "getPlayerState");
-                            ctrl.getClass().getMethod("playMusicAt", int.class, boolean.class)
-                                    .invoke(ctrl, 0, true);
-                            ctrl.getClass().getMethod("play").invoke(ctrl);
-                            PluginLog.i(TAG, label + " #" + seq + " ⑤ 二次起播（之前状态="
-                                    + (before == null ? "取不到" : summary(before))
-                                    + "）：playMusicAt(0,true) + play() 已调用");
-                            // ⑤′ 0.3.13：只重登记、**不调** setPlaybackAudioSource——0.3.12 真机证明
-                            //     调它会把登记清空（切换器判「无需切换」→ clearSource），而登记一空，
-                            //     宿主装载 http 位置时就当文件打开（FileNotOpened）。
-                            //     0.3.16：在重登记之后补一次切换器 select（第二次机会：此时队列里已经有
-                            //     我们的条目、播放器也刚被 ⑤ 推过一脚），再 2 秒读切换链。
-                            if (location != null && location.startsWith("http")) {
-                                PluginLog.i(TAG, label + " #" + seq + " ⑤′ 重登记 + 重发切换请求："
-                                        + registryActivate(trackId, location)
-                                        + " 读回=" + registrySourceDump()
-                                        + "；" + switcherSelect(trackId, location));
-                            }
-                            chainReadbackLater(seq, label, 2000L, "⑤″");
-                        } catch (Throwable t) {
-                            PluginLog.w(TAG, label + " #" + seq + " ⑤ 二次起播失败：" + brief(t), t);
-                        }
-                    });
-                } catch (Throwable t) {
-                    PluginLog.w(TAG, label + " #" + seq + " ⑤ 投递宿主线程失败：" + brief(t), t);
-                }
-            });
-        } catch (Throwable t) {
-            PluginLog.w(TAG, label + " #" + seq + " ⑤ 定时器不可用：" + brief(t), t);
-        }
-    }
-
     /** 0.3.12：延迟后在宿主线程打一行「切换链 + 注册表源」（判定 ⑤′ 有没有被宿主看在眼里）。 */
     private static void chainReadbackLater(int seq, String label, long delayMs, String tag) {
         try {
@@ -1996,58 +1885,6 @@ public final class VoxzenBridge {
             // 探测失败按取不到处理
         }
         return -1L;
-    }
-
-    /**
-     * 0.3.20 ⑥：装载完成后的多拍进度探针（+12/+18/+24 秒）。
-     *
-     * <p>每拍打一行「播放器状态 + 位置 + 当前项 + 代理调用」，并在状态不是 {@code Ready}
-     * 时补一脚 {@code playMusicAt(0,true) + play()}（排除「装载完了但没收到播放命令」）。
-     * 判定：位置在两拍之间明显推进 ⇒ 宿主真的在放这条在线流（北极星判据）。</p>
-     */
-    private static void progressLater(int seq, String label, String trackId, String location) {
-        long[] delays = {12000L, 18000L, 24000L};
-        for (long d : delays) {
-            final long delay = d;
-            try {
-                Timers.later(delay, () -> {
-                    try {
-                        HostBridgeWorker.get().submit(() -> {
-                            try {
-                                Object ctrl = staticInstance(CLS_CONTROLLER);
-                                Object service = ctrl == null ? null
-                                        : staticField(ctrl.getClass(), "PlaybackService", "service");
-                                Object player = findPlayer(service);
-                                long pos = playerPosition(player);
-                                Object st = ctrl == null ? null : callAnyNoArg(ctrl, "getPlayerState");
-                                String stt = st == null ? "取不到" : summary(st);
-                                String kick = "";
-                                if (ctrl != null && !stt.contains("Ready")) {
-                                    ctrl.getClass().getMethod("playMusicAt", int.class, boolean.class)
-                                            .invoke(ctrl, 0, true);
-                                    ctrl.getClass().getMethod("play").invoke(ctrl);
-                                    kick = "；补 playMusicAt(0,true)+play()";
-                                }
-                                Object cur = player == null ? null : instanceField(player, CLS_ITEM, null);
-                                PluginLog.i(TAG, label + " #" + seq + " ⑥+" + (delay / 1000L) + "s 播放进度：播放器="
-                                        + stt + " 位置=" + (pos < 0 ? "取不到" : pos + "ms")
-                                        + " 当前项=" + (cur == null ? "空" : summarizeItem(cur))
-                                        + " 代理调用=" + PROXY_CALLS.get() + "/总计=" + PROXY_ALL.get()
-                                        + kick);
-                            } catch (Throwable t) {
-                                PluginLog.w(TAG, label + " #" + seq + " ⑥+" + (delay / 1000L) + "s 读回失败："
-                                        + brief(t), t);
-                            }
-                        });
-                    } catch (Throwable t) {
-                        PluginLog.w(TAG, label + " #" + seq + " ⑥+" + (delay / 1000L) + "s 投递失败："
-                                + brief(t), t);
-                    }
-                });
-            } catch (Throwable t) {
-                PluginLog.w(TAG, label + " #" + seq + " ⑥+" + (delay / 1000L) + "s 定时失败：" + brief(t), t);
-            }
-        }
     }
 
     /**

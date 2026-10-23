@@ -51,6 +51,13 @@ public final class SyncCoordinator {
         timeoutNanos = Math.max(1L, timeoutMs) * 1_000_000L;
     }
     public Status status() { return status; }
+    /** Only an explicit plugin start may reopen admission; old tickets remain invalid. */
+    public synchronized void beginLifecycle() {
+        lifecycle++;
+        stopped = false;
+        status = new Status(worker == null ? Phase.IDLE : Phase.WAITING, sequence,
+                worker == null ? "" : "等待上一轮同步退出", 0, 0);
+    }
     public Ticket ticket() { return current.get(); }
     public boolean isValid(Ticket t) {
         return t != null && !stopped && lifecycle == t.lifecycle() && session.getAsLong() == t.session()
@@ -110,15 +117,20 @@ public final class SyncCoordinator {
                 }
             }
         } catch (CancellationException cancelled) {
-            synchronized (this) { status = new Status(Phase.ABORTED, ticket.id(), cancelled.getMessage(), 0, 0); }
+            synchronized (this) { if (lifecycle == ticket.lifecycle()) status = new Status(Phase.ABORTED, ticket.id(), cancelled.getMessage(), 0, 0); }
         } catch (Throwable error) {
-            synchronized (this) { status = new Status(Phase.FAILED, ticket.id(), "同步异常，详情见日志", 0, 0); }
+            synchronized (this) { if (lifecycle == ticket.lifecycle()) status = new Status(Phase.FAILED, ticket.id(), "同步异常，详情见日志", 0, 0); }
             PluginLog.e("sync", "同步任务失败", error);
         } finally {
-            try { end.accept(status.describe()); }
+            try { end.accept(lifecycle == ticket.lifecycle() ? status.describe() : "上一轮同步已中止"); }
             finally {
                 current.remove();
-                synchronized (this) { worker = null; notifyAll(); }
+                synchronized (this) {
+                    worker = null;
+                    if (!stopped && lifecycle != ticket.lifecycle() && status.phase() == Phase.WAITING)
+                        status = new Status(Phase.IDLE, sequence, "", 0, 0);
+                    notifyAll();
+                }
             }
         }
     }

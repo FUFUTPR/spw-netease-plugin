@@ -261,6 +261,9 @@ public final class NeteasePlugin extends SpwPlugin {
         return SYNC.status().describe();
     }
 
+    /** A confirmed cloud edit supersedes any older full-sync snapshot. */
+    public static void invalidateSyncForPlaylistEdit() { SYNC.invalidate("云端歌单已编辑"); }
+
     /**
      * 只读结构化同步状态（原生页面直接映射 {@link com.example.netease.svc.SyncCoordinator.Phase}，见 docs/PLAN §7.4）。
      *
@@ -367,6 +370,9 @@ public final class NeteasePlugin extends SpwPlugin {
                     + " 插件版本(上下文)=" + pluginVersion
                     + " 插件版本(MANIFEST)=" + PluginVersions.read());
             RuntimeCapabilities.setRuntime(spwVersion, channel);
+            SYNC.beginLifecycle();
+            VoxzenBridge.beginLifecycle();
+            NativeStreamServer.beginLifecycle();
 
             // ③ 原生 UI 适配层（0.11.60 批次 1）：只在生命周期入口注册一次；
             // 混淆名只出现在 Kotlin 适配层，Java 侧经反射进入，失败也只记日志。
@@ -933,9 +939,10 @@ public final class NeteasePlugin extends SpwPlugin {
     }
 
     private static void runNativeSync(java.util.List<String[]> list) {
-        var ticket = SYNC.ticket();
+        var coordinator = SYNC;
+        var ticket = coordinator.ticket();
         try {
-            SYNC.check(ticket);
+            coordinator.check(ticket);
             int port = NativeStreamServer.start();
             if (port <= 0) {
                 throw new IllegalStateException("本地流服务未启动，无法同步");
@@ -978,13 +985,13 @@ public final class NeteasePlugin extends SpwPlugin {
             java.util.List<NativeLibrary.Entry> entries = new java.util.ArrayList<>();
             int fetched = 0;
             for (java.util.Map.Entry<Long, String> kv : want.entrySet()) {
-                SYNC.check(ticket);
-                SYNC.progress(ticket, com.example.netease.svc.SyncCoordinator.Phase.FETCHING, "获取歌单详情", fetched, want.size());
+                coordinator.check(ticket);
+                coordinator.progress(ticket, com.example.netease.svc.SyncCoordinator.Phase.FETCHING, "获取歌单详情", fetched, want.size());
                 try {
                     Dto.Playlist pl = NeteaseApi.playlist(kv.getKey());
                     NativeLibrary.Entry entry =
                             new NativeLibrary.Entry(kv.getKey(), pl.name(), pl.tracks(), pl.coverUrl());
-                    SYNC.check(ticket);
+                    coordinator.check(ticket);
                     entries.add(entry);
                     fetched++;
                     PluginLog.i(TAG, "原生同步取到歌单「" + pl.name() + "」（" + pl.tracks().size() + " 首）");
@@ -1004,7 +1011,7 @@ public final class NeteasePlugin extends SpwPlugin {
             if (entries.size() != want.size()) {
                 throw new IllegalStateException("部分歌单未取全，本轮未写入曲库，请重试");
             }
-            SYNC.check(ticket);
+            coordinator.check(ticket);
             // 封面（0.11.1）：这一轮**不等下载**。只把「已经有桩」的专辑随库写进去（纯离线、瞬间），
             // 曲库行先落地（用户打开就能看到列表）；缺图的专辑由下载池并行补、补好一张写一张
             // （见 CoverStore.startFill + onCoverBatch 的「封面实时写库」）。
@@ -1028,7 +1035,7 @@ public final class NeteasePlugin extends SpwPlugin {
             // 0.7.0 主线：把行交给**宿主自己的 Room 连接**写。只有同连接写入才会点着 Room 的
             // TEMP 触发器失效表，宿主 UI 的 Flow 才会立刻 re-emit；外部 JDBC 是另一条连接，
             // 触发器不响 ⇒ 必须重启宿主才看得见（真机实证 + 字节码逆向，见 host/HostSqlBridge）。
-            SYNC.check(ticket);
+            coordinator.check(ticket);
             String backup = NativeLibrary.backupOnce("sync");
             // 0.11.46（合并歌单写库门闩）：写库段与开关落定互斥（见 {@link #MERGE_WRITE_LOCK}）——
             // 用户在这个拉取耗时里把开关关掉时：同步还在网络阶段 ⇒ 这里看到 false 直接不写；
@@ -1036,8 +1043,8 @@ public final class NeteasePlugin extends SpwPlugin {
             NativeLibrary.Result r;
             boolean viaHost;
             synchronized (MERGE_WRITE_LOCK) {
-                SYNC.check(ticket);
-                SYNC.progress(ticket, com.example.netease.svc.SyncCoordinator.Phase.WRITING, "提交曲库事务", fetched, want.size());
+                coordinator.check(ticket);
+                coordinator.progress(ticket, com.example.netease.svc.SyncCoordinator.Phase.WRITING, "提交曲库事务", fetched, want.size());
                 if (!PluginConfig.mergePlaylists()) {
                     PluginLog.i(TAG, "原生同步（本轮到写库前）发现合并歌单已关闭：本轮不写库"
                             + "（歌曲里只显示本地歌单）");
@@ -1047,7 +1054,7 @@ public final class NeteasePlugin extends SpwPlugin {
                 }
                 NativeLibrary.Result hostResult = HostSqlBridge.onHostConnection(
                         NativeLibrary.dbPath().toString(),
-                        HostSqlBridge.guarded(() -> SYNC.isValid(ticket),
+                        HostSqlBridge.guarded(() -> coordinator.isValid(ticket),
                                 sql -> NativeLibrary.writeOn(sql, entries, prefix, backup, covers, plCovers)));
                 viaHost = hostResult != null;
                 if (viaHost) {
@@ -1055,10 +1062,10 @@ public final class NeteasePlugin extends SpwPlugin {
                 } else {
                     PluginLog.w(TAG, "宿主同连接写库不可用，回退外部 JDBC（回退路线写完需重启宿主才会在原生 UI 出现）"
                             + com.example.netease.host.HostSqlBridge.routeNote());
-                    r = NativeLibrary.sync(entries, prefix, covers, plCovers, () -> SYNC.isValid(ticket));
+                    r = NativeLibrary.sync(entries, prefix, covers, plCovers, () -> coordinator.isValid(ticket));
                 }
             }
-            SYNC.check(ticket);
+            coordinator.check(ticket);
             if (r.error() != null) { throw new IllegalStateException(r.error()); }
             // 0.11.7（P0 铁律 6）：结果摘要必须写明**这一轮到底走了哪条通路**。0.11.6 的
             // 5935 条孤儿行就是「摘要说『宿主同连接』、实际走的是自带连接」瞒下来的。
@@ -1115,7 +1122,7 @@ public final class NeteasePlugin extends SpwPlugin {
             }
             // 免重启：写库发生在宿主读库之后 ⇒ 请宿主在自己的运行期重建一次曲库快照。
             // 曲目表通常立刻可见；侧栏「歌单」列表要不要重启，看宿主自己的实现（另有记录）。
-            SYNC.check(ticket);
+            coordinator.check(ticket);
             VoxzenBridge.refreshHostLibrary();
             // 宿主重建曲库快照时会按 Track 的 path 重新派生 Album/Artist 的 cover ⇒ 上面那一遍封面
             // 会被抹掉（真机实证：只读核对 32/32 命中，重建后全变回 http URL、revision 归 0）。
@@ -1128,10 +1135,10 @@ public final class NeteasePlugin extends SpwPlugin {
                 PluginLog.i(TAG, "已清理旧版预下载音频 " + legacy + " 个（曲库路径已恢复为流地址）");
             }
         } catch (Throwable t) {
-            if (!SYNC.isValid(ticket) || t instanceof java.util.concurrent.CancellationException) {
+            if (!coordinator.isValid(ticket) || t instanceof java.util.concurrent.CancellationException) {
                 throw new java.util.concurrent.CancellationException("同步已中止：任务失效或已停用");
             }
-            SYNC.progress(ticket, com.example.netease.svc.SyncCoordinator.Phase.FAILED, "同步失败，请重试；详情见日志", 0, 0);
+            coordinator.progress(ticket, com.example.netease.svc.SyncCoordinator.Phase.FAILED, "同步失败，请重试；详情见日志", 0, 0);
             // 0.11.7（P0 铁律 6 · 禁止静默失败）：同步失败必须 ERROR + 中止本轮 + 界面可见。
             // 0.11.6 这里是 WARN，且日志里「曲目 5935 首」与「曲目 0」并存也没人报警。
             String why = t.getClass().getSimpleName() + (t.getMessage() == null ? "" : ": " + t.getMessage());
@@ -1240,9 +1247,9 @@ public final class NeteasePlugin extends SpwPlugin {
 
     @Override
     public void stop() {
-        SYNC.stop();
-        VoxzenBridge.stop();
         try {
+            SYNC.stop();
+            VoxzenBridge.stop();
             // ① 摘原生 UI Hook：宿主页面不再渲染，250ms tick 与各控制器由 Kotlin 侧 stop() 统一收尾。
             // 0.12.0 起不再有插件自建 Swing 窗口，也不需要窗口注册表。
             HostUiBridge.uninstall();
@@ -1262,6 +1269,13 @@ public final class NeteasePlugin extends SpwPlugin {
             PluginLog.i(TAG, "已停止（数据目录保留：" + DataPaths.display() + "）");
         } catch (Throwable t) {
             safeLogError("停止过程异常（已忽略）", t);
+        } finally {
+            try {
+                int released = com.example.netease.core.JdbcResources.releaseCachedArchive(getClass().getClassLoader());
+                if (released > 0) PluginLog.i(TAG, "已释放 SQLite 资源归档句柄，允许旧插件目录移动/删除");
+            } catch (Throwable t) {
+                safeLogError("释放 SQLite 资源归档句柄失败", t);
+            }
         }
     }
 
