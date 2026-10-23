@@ -24,12 +24,24 @@ try {
     New-Item -ItemType Directory -Path $env:APPDATA | Out-Null
     & $jdk.Java '-Djava.awt.headless=true' '-Dfile.encoding=UTF-8' '-Dstdout.encoding=UTF-8' '-Dstderr.encoding=UTF-8' -cp $Cp BehaviorProbe $env:APPDATA 2>&1 | Tee-Object -FilePath (Join-Path $Work 'result.txt')
     $rc = $LASTEXITCODE
+    foreach ($probe in @('InteractionPlaybackProbe', 'StreamShutdownProbe', 'com.example.netease.net.CloudPlaylistWriteProbe')) {
+        & $jdk.Java '-Djava.awt.headless=true' '-Dfile.encoding=UTF-8' '-Dstdout.encoding=UTF-8' '-Dstderr.encoding=UTF-8' -cp $Cp $probe 2>&1 | Tee-Object -FilePath (Join-Path $Work ($probe + '-result.txt'))
+        if ($LASTEXITCODE -ne 0) { $rc = 1 }
+    }
     if (Test-Path -LiteralPath (Join-Path $Work 'classes/AsyncProbe.class')) {
         & $jdk.Java '-Djava.awt.headless=true' '-Dfile.encoding=UTF-8' '-Dstdout.encoding=UTF-8' '-Dstderr.encoding=UTF-8' -cp $Cp AsyncProbe 2>&1 | Tee-Object -FilePath (Join-Path $Work 'async-result.txt')
         if ($LASTEXITCODE -ne 0) { $rc = 1 }
     }
     if (Test-Path -LiteralPath (Join-Path $Work 'classes/HostTransactionProbe.class')) {
         & $jdk.Java '-Djava.awt.headless=true' '-Dfile.encoding=UTF-8' '-Dstdout.encoding=UTF-8' '-Dstderr.encoding=UTF-8' -cp $Cp HostTransactionProbe 2>&1 | Tee-Object -FilePath (Join-Path $Work 'host-transaction-result.txt')
+        if ($LASTEXITCODE -ne 0) { $rc = 1 }
+    }
+    if (Test-Path -LiteralPath (Join-Path $Work 'classes/SearchArtworkProbe.class')) {
+        & $jdk.Java '-Djava.awt.headless=true' '-Dfile.encoding=UTF-8' '-Dstdout.encoding=UTF-8' '-Dstderr.encoding=UTF-8' -cp $Cp SearchArtworkProbe 2>&1 | Tee-Object -FilePath (Join-Path $Work 'search-artwork-result.txt')
+        if ($LASTEXITCODE -ne 0) { $rc = 1 }
+    }
+    if (Test-Path -LiteralPath (Join-Path $Work 'classes/com/example/netease/net/SearchArtworkMergeProbe.class')) {
+        & $jdk.Java '-Djava.awt.headless=true' '-Dfile.encoding=UTF-8' '-Dstdout.encoding=UTF-8' '-Dstderr.encoding=UTF-8' -cp $Cp com.example.netease.net.SearchArtworkMergeProbe 2>&1 | Tee-Object -FilePath (Join-Path $Work 'search-artwork-merge-result.txt')
         if ($LASTEXITCODE -ne 0) { $rc = 1 }
     }
     if (Test-Path -LiteralPath (Join-Path $Work 'classes/com/xuncorp/voxzen/data/HostProfileProbe.class')) {

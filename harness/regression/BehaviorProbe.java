@@ -51,6 +51,32 @@ public final class BehaviorProbe {
         c.stop();
         check(c.request(List.of(), "force:after stop") == SyncCoordinator.RequestResult.STOPPED, "stop is terminal");
         check(!gate.get(), "sync finally releases gate");
+        c.beginLifecycle();
+        check(!c.isValid(ticket.get()), "explicit re-enable never revives old sync ticket");
+        check(c.request(List.of(), "force:re-enabled") == SyncCoordinator.RequestResult.STARTED, "explicit re-enable admits new synchronization");
+        await(() -> ends.get() == 2);
+        check(c.status().phase() == SyncCoordinator.Phase.COMPLETED, "re-enabled synchronization completes normally");
+        c.stop();
+
+        var drainRef = new AtomicReference<SyncCoordinator>();
+        var drainTicket = new AtomicReference<SyncCoordinator.Ticket>();
+        var drainEntered = new CountDownLatch(1); var drainRelease = new CountDownLatch(1);
+        var drainEnds = new AtomicInteger();
+        var draining = new SyncCoordinator(() -> true, () -> 1L, () -> 0L, r -> 0L, g -> true,
+                list -> { drainTicket.set(drainRef.get().ticket()); drainEntered.countDown();
+                    waitIgnoringInterrupt(drainRelease); drainRef.get().check(drainRef.get().ticket()); },
+                () -> "done", text -> drainEnds.incrementAndGet());
+        drainRef.set(draining); draining.request(List.of(), "old lifecycle");
+        check(drainEntered.await(2, TimeUnit.SECONDS), "old lifecycle work entered");
+        draining.stop(); draining.beginLifecycle();
+        check(!draining.isValid(drainTicket.get()), "re-enable invalidates same-account old ticket even if I/O ignores interruption");
+        check(draining.request(List.of(), "new lifecycle") == SyncCoordinator.RequestResult.BUSY,
+                "new lifecycle waits for old worker to release the shared write gate");
+        drainRelease.countDown(); await(() -> drainEnds.get() == 1 && draining.status().phase() == SyncCoordinator.Phase.IDLE);
+        check(draining.status().phase() == SyncCoordinator.Phase.IDLE, "late old lifecycle completion cannot overwrite new sync status");
+        check(draining.request(List.of(), "new lifecycle") == SyncCoordinator.RequestResult.STARTED,
+                "new lifecycle synchronization starts after old worker exits");
+        await(() -> drainEnds.get() == 2); draining.stop();
 
         AtomicReference<SyncCoordinator> timeout = new AtomicReference<>();
         AtomicInteger timeoutEnds = new AtomicInteger();

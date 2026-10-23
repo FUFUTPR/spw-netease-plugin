@@ -91,8 +91,8 @@ internal object HostUiMountScope {
  * 之内，因此可以在组合期用 Composer.consume 读到宿主真实提供的 SaltConfigs /
  * SaltDynamicColors / SaltTextStyles / SaltShapes。</p>
  *
- * <p>混淆名只在宿主 1.19.0 上核对过（javap 验证）。任何一步失败都返回 null：页面据此
- * 降级到默认 Material3 主题，并在开发者页明确标注降级原因，不用默认色板冒充宿主主题。</p>
+ * <p>混淆名只在宿主 1.19.0 上核对过。安装 Hook 前核对 ABI；组合期读取失败则停止绘制
+ * 并记录原因，不切换到另一套组件或默认主题。</p>
  */
 internal object HostSaltTheme {
     private const val TAG = "native-ui"
@@ -242,9 +242,11 @@ internal object HostSaltTheme {
 
     private val reader: Reader? by lazy {
         runCatching { load() }
-            .onFailure { PluginLog.w(TAG, "宿主 SaltTheme 不可用（页面将降级）：" + it) }
+            .onFailure { PluginLog.w(TAG, "宿主 SaltTheme 不可用（暂停绘制原生页面）：" + it) }
             .getOrNull()
     }
+
+    fun validate() { check(reader != null) { "宿主 SaltTheme ABI 不可用" } }
 
     @Suppress("UNCHECKED_CAST")
     private fun load(): Reader {
@@ -270,7 +272,7 @@ internal object HostSaltTheme {
         )
     }
 
-    /** 组合期读取宿主主题；不可用返回 null（调用方降级并展示原因）。 */
+    /** 组合期读取宿主主题；不可用返回 null，不绘制错误主题。 */
     @Composable
     fun read(): Snapshot? {
         val current = reader ?: return null
@@ -278,14 +280,14 @@ internal object HostSaltTheme {
         return try {
             current.read(composer)
         } catch (t: Throwable) {
-            PluginLog.w(TAG, "读取宿主 SaltTheme 失败（已降级）：" + t)
+            PluginLog.w(TAG, "读取宿主 SaltTheme 失败（已暂停绘制）：" + t)
             null
         }
     }
 
     /** 开发者页使用的主题来源说明（不参与正式页面布局）。 */
     fun describe(snapshot: Snapshot?): String = if (snapshot == null) {
-        "降级：未读到宿主 SaltTheme（混淆名可能已随宿主版本变化，已回退 Material3 默认主题）"
+        "不可用：未读到宿主 SaltTheme（混淆名可能已随宿主版本变化，已暂停绘制）"
     } else {
         "宿主 SaltTheme（" + (if (snapshot.dark) "深色" else "浅色") +
             "；颜色/字体/圆角来自宿主 CompositionLocal）"
@@ -313,8 +315,9 @@ internal object HostUiAdapter {
     //   2) 公共 ModConfigScreen 在整个宿主里只在
     //      com.xuncorp.voxzen.ui.navigation.ComposableSingletons$AppNavigation_desktopKt
     //      被调用一次（导航目标的内容 lambda），调用点唯一；
-    //   3) afterComposable 只追加、不改写原调用，所以调用点上的默认参数 mask=2 不影响挂载。
-    // 关闭页面只是让插件层不渲染，宿主配置内容始终由宿主自己绘制。
+    //   3) replaceComposable replaces this navigation call site only. Active pages use
+    //      the host BasicScreenBox; no configuration rows or solid overlay sit below.
+    //      Other plugins and the collapsed state invoke the original method directly.
     private const val HOST_VERSION_VERIFIED = "1.19.0"
     private const val TARGET_CLASS = "androidx.compose.ui.ȫ"
     private const val TARGET_METHOD = "Ϳ"
@@ -329,11 +332,12 @@ internal object HostUiAdapter {
 
     /** JVM 实际签名：Compose 编译器追加 Composer + int changed + int defaultMask。 */
     private val TARGET_JVM_PARAMETERS =
-        TARGET_PARAMETERS + listOf("androidx.compose.runtime.Composer", "int", "int")
+        TARGET_PARAMETERS.map(HostUiAbi::name) + listOf("androidx.compose.runtime.Composer", "int", "int")
     private const val PRIORITY = 100
 
     @Volatile
     private var handle: HookHandle? = null
+    private var defaultsCompatibility: AutoCloseable? = null
 
     /** 安装（幂等）。失败时只更新页面状态与日志，不抛异常。 */
     fun install(hostVersion: String, pluginVersion: String) {
@@ -345,8 +349,10 @@ internal object HostUiAdapter {
             return
         }
         try {
+            HostSaltComponents.validate()
+            HostSaltTheme.validate()
             val clazz = try {
-                Class.forName(TARGET_CLASS)
+                HostUiAbi.type(TARGET_CLASS)
             } catch (t: Throwable) {
                 fail(
                     "宿主 " + hostVersion + " 中找不到目标类 " + TARGET_CLASS +
@@ -379,14 +385,24 @@ internal object HostUiAdapter {
                 )
                 return
             }
-            val h = WorkshopApi.hookRegistrar.afterComposable(
-                TARGET_CLASS,
+            HostConfigContent.bind(matches.single())
+            val h = WorkshopApi.hookRegistrar.replaceComposable(
+                HostUiAbi.name(TARGET_CLASS),
                 TARGET_METHOD,
                 TARGET_IN_CLASS,
-                TARGET_PARAMETERS,
+                TARGET_PARAMETERS.map(HostUiAbi::name),
                 PRIORITY,
                 PanelHook,
             )
+            try {
+                defaultsCompatibility = HostReplacementDefaults.prepare(WorkshopApi.hookRegistrar, matches.single(), TARGET_IN_CLASS)
+                HostGlobalSearch.install()
+            } catch (failure: Throwable) {
+                defaultsCompatibility?.close()
+                defaultsCompatibility = null
+                h.unhook()
+                throw failure
+            }
             handle = h
             NativeUiSession.start()
             // 不在这里打开整页界面：是否显示由 PanelHook 按当前配置路由的 pluginId 决定，
@@ -407,6 +423,7 @@ internal object HostUiAdapter {
 
     /** 卸载（幂等）：停用插件后不留页面。 */
     fun uninstall() {
+        HostGlobalSearch.uninstall()
         val h = handle
         if (h == null) {
             return
@@ -414,7 +431,12 @@ internal object HostUiAdapter {
         handle = null
         NativeUiSession.stop()
         try {
-            h.unhook()
+            try {
+                defaultsCompatibility?.close()
+            } finally {
+                defaultsCompatibility = null
+                h.unhook()
+            }
             NativeUiState.status = "已卸载"
             PluginLog.i(TAG, "uninstall 完成：Hook 已摘除")
         } catch (t: Throwable) {
@@ -438,19 +460,48 @@ internal object HostUiAdapter {
         /** 跳过日志去重：同一个路由只记录一次，避免每次重组都写插件日志。 */
         @Volatile
         private var lastSkippedRoute: String? = null
+        private var observed = false
 
         @Composable
         override fun Content(call: UiHookCall) {
             val route = HostUiMountScope.routeOf(call)
+            if (!observed) {
+                observed = true
+                PluginLog.i(TAG, "PanelHook 已实际执行：" + HostUiMountScope.describe(route))
+            }
             if (!HostUiMountScope.shouldMountRoute(route)) {
                 val desc = HostUiMountScope.describe(route)
                 if (desc != lastSkippedRoute) {
                     lastSkippedRoute = desc
                     PluginLog.i(TAG, "PanelHook 跳过（非本插件配置页）：" + desc)
                 }
+                HostConfigContent.draw(call, currentComposer)
                 return
             }
+            if (NativeUiPresentation.showsConfiguration()) {
+                NativeUiBackground { HostConfigContent.draw(call, currentComposer) }
+            }
             NativeUiPanel()
+        }
+    }
+}
+
+/** The hook replaces one navigation call site, not this method's implementation.
+ * A direct invocation therefore preserves the host configuration page for every
+ * other plugin and for this plugin's collapsed state, without recursive hooks.
+ */
+internal object HostConfigContent {
+    private lateinit var original: Method
+    fun bind(method: Method) { original = method.apply { isAccessible = true } }
+    fun draw(call: UiHookCall, composer: Composer) {
+        val args = call.arguments
+        val viewModel = args.getOrNull(1)
+        // The installed navigation call uses the default ViewModel (mask=2).
+        // Preserve an explicit ViewModel if one was supplied by the host.
+        try {
+            original.invoke(null, args.getOrNull(0), viewModel, composer, 0, if (viewModel == null) 2 else 0)
+        } catch (e: java.lang.reflect.InvocationTargetException) {
+            throw e.targetException
         }
     }
 }

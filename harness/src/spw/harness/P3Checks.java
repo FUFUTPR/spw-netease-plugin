@@ -255,6 +255,7 @@ final class P3Checks {
      * 那是普通用户入口、不设开发者闸）⇒ 本清单从 12 条变 11 条。</p>
      */
     private static final List<String> DEV_TARGETS = List.of(
+            PLUGIN_CLASS + ".openPlaylist",
             PLUGIN_CLASS + ".pipelineStatus", PLUGIN_CLASS + ".coverStats", PLUGIN_CLASS + ".lyricStats",
             PLUGIN_CLASS + ".audioLevelStatus", PLUGIN_CLASS + ".openDataDir",
             PLUGIN_CLASS + ".rebuildMapping", PLUGIN_CLASS + ".testConnection",
@@ -263,7 +264,6 @@ final class P3Checks {
 
     /** 0.11.30：用户档（开发者模式关闭时的那一档）里应有的按钮接线。 */
     private static final List<String> USER_TARGETS = List.of(
-            PLUGIN_CLASS + ".openSearch", PLUGIN_CLASS + ".openPlaylist",
             PLUGIN_CLASS + ".currentAccount",
             PLUGIN_CLASS + ".openLoginDialog", PLUGIN_CLASS + ".logout",
             PLUGIN_CLASS + ".clearCoverCache", PLUGIN_CLASS + ".clearLyricCache",
@@ -372,8 +372,9 @@ final class P3Checks {
         List<String> devLeak = DEV_TARGETS.stream().filter(targets::contains).collect(Collectors.toList());
         rep.check("H9.3", "用户档 preference_config.json 的 on_click 覆盖用户可见入口（登录/退出登录/封面·歌词·播放缓存三清 + 同步，"
                         + "共 " + all.size() + " 个接线），且不含任何开发者入口",
-                missingUser.isEmpty() && devLeak.isEmpty(),
-                "缺失：" + join(missingUser) + "；开发者入口泄漏进用户档：" + join(devLeak));
+                missingUser.isEmpty() && devLeak.isEmpty() && !targets.contains(PLUGIN_CLASS + ".openSearch"),
+                "缺失：" + join(missingUser) + "；开发者入口泄漏进用户档：" + join(devLeak)
+                        + "；顶栏搜索不在配置中重复：" + !targets.contains(PLUGIN_CLASS + ".openSearch"));
 
         // ---------- H9.4 全部 on_click 都是 public static 无参 void（两档一起查；方法名拼错 / 签名漂移都在这暴露）
         //  开发者档的接线同样要能反射到包内真实类——否则打开开发者模式后按钮是死的。

@@ -43,7 +43,8 @@ public final class VerifyEmbedControllerProbe {
     }
 
     public static void main(String[] args) {
-        logRoot = Path.of("build", "_tmp", "verify-probe-logs");
+        logRoot = args.length > 0 ? Path.of(args[0]).resolve("verify-probe-logs")
+                : Path.of("build", "_tmp", "verify-probe-logs", java.util.UUID.randomUUID().toString());
         try {
             Files.createDirectories(logRoot);
         } catch (IOException ignored) {
@@ -282,6 +283,7 @@ public final class VerifyEmbedControllerProbe {
             delayed.c.setBounds(10, 20, 300, 200, 1.25);
             sleep(250);
             check("adopted 之前只缓存不发 rect", delayed.rectLines().isEmpty());
+            releaseAdoption(delayed);
             check("延迟 adopted 后 READY", awaitPhase(delayed.rec, Phase.READY, 8_000) != null);
             check("adopted 后补发最新 rect", awaitLine(delayed.launcher.logPath, "rect 13 25 375 250", 2_000));
             check("adopted 后只补发一次", delayed.rectLines().size() == 1);
@@ -328,6 +330,7 @@ public final class VerifyEmbedControllerProbe {
             sleep(250);
             check("adopted 之前不发 hide", delayed.lineCount("hide") == 0);
             check("adopted 之前不发 show", delayed.lineCount("show") == 0);
+            releaseAdoption(delayed);
             check("延迟 adopted 后 READY", awaitPhase(delayed.rec, Phase.READY, 8_000) != null);
             check("adopted 后按期望补发 hide", awaitLine(delayed.launcher.logPath, "hide", 2_000));
             check("adopted 后不补发 show", delayed.lineCount("show") == 0);
@@ -592,6 +595,11 @@ public final class VerifyEmbedControllerProbe {
             }
             return n;
         }
+    }
+
+    private static void releaseAdoption(Env env) {
+        try { Files.writeString(Path.of(env.launcher.logPath + ".adopt"), "go"); }
+        catch(IOException error) { throw new AssertionError("Cannot release fixture adoption gate",error); }
     }
 
     private static final class FakeHost implements VerifyEmbedController.Host {

@@ -16,6 +16,7 @@ object NativeUiHost {
     @JvmStatic
     fun uninstall() {
         HostUiAdapter.uninstall()
+        NativeUiPresentation.showConfiguration()
     }
 
     /**
@@ -33,6 +34,6 @@ object NativeUiHost {
             "account" -> NativePage.ACCOUNT
             else -> return false
         }
-        return NativeUiSession.openPage(target)
+        return NativeUiPresentation.openPage(target)
     }
 }

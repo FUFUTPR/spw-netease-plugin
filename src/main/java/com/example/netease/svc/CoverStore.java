@@ -1250,6 +1250,12 @@ public final class CoverStore {
      * 登记「专辑 → 歌手 / 图 URL」工作清单（同步线程调用，只写内存 + 索引）。
      * 之后 {@link #startFill} 的线程会一张张补齐，不够就无限重试（退避 1/2/5/30 秒）。
      */
+    public static void planSong(com.example.netease.net.Dto.Song song) {
+        if (song == null || song.id() <= 0) return;
+        // Planning metadata only; this does not create a host playlist/Track row.
+        plan(List.of(new NativeLibrary.Entry(0, "在线曲目", List.of(song))));
+    }
+
     public static void plan(List<NativeLibrary.Entry> entries) {
         if (entries == null || entries.isEmpty()) {
             return;
@@ -1939,15 +1945,15 @@ public final class CoverStore {
     /**
      * 桩文件是「占位图」、且它对应的真图 URL 还在 ⇒ 这次不许当已就绪，要重取（0.11.51）。
      *
-     * <p>只认「桩名反查出的 idx == 当前 URL 的 idx」：URL 变更的专辑不在此列（走正常下载路径）。
-     * 无图源的占位（URL 为空）是合法终态，永远返回 {@code false}。</p>
+     * <p>后来取得新图源（包括旧无图源占位对应的 URL 变化）也必须允许重取。
+     * 当前仍无图源（URL 为空）时，占位是合法终态，返回 {@code false}。</p>
      */
     private static boolean refetchableStub(String stubFile, String url) {
         if (stubFile == null || url == null || url.isEmpty()) {
             return false;
         }
         String idx = idxFromStub(stubFile);
-        return idx != null && idx.equals(idxOf("", url)) && placeholderStub(idx);
+        return idx != null && placeholderStub(idx);
     }
 
     /**

@@ -534,6 +534,7 @@ def main() -> int:
     parser.add_argument("--no-clean", action="store_true", help="不清理 build/classes 与 build/stage")
     parser.add_argument("--package-only", action="store_true", help="只打包：复用 --classes-dir 的编译产物，不调用 javac、不清空输入目录")
     parser.add_argument("--classes-dir", default=None, help="编译产物目录（--package-only 必填，默认 build/classes）")
+    parser.add_argument("--dist-dir", default=None, help="构建暂存目录；验证完成前不覆盖交付目录")
     args = parser.parse_args()
     if args.package_only and not args.classes_dir:
         parser.error("--package-only 必须配合 --classes-dir <目录>")
@@ -547,6 +548,8 @@ def main() -> int:
 def _run_build(args) -> int:
     t0 = time.time()
     project = load_project()
+    if args.dist_dir:
+        project["distDir"] = args.dist_dir
     log(f"== 构建 {project['pluginId']} v{project['version']} ({project['name']}) ==")
 
     classes_dir = (ROOT / args.classes_dir).resolve() if args.classes_dir else CLASSES
@@ -614,9 +617,7 @@ def _run_build(args) -> int:
     log(f"  sha256  : {digest}")
     log(f"  耗时    : {time.time() - t0:.1f}s")
     log("")
-    log("  手动安装：把 .spmod 解压到")
-    log("    %APPDATA%\\Salt Player for Windows\\workshop\\plugins\\plugin-{}-{}".format(project["pluginId"], project["version"]))
-    log("  然后重启 Salt Player for Windows。")
+    log("  安装／升级：在椒盐的模组管理中导入此 .spmod，应用可保持打开。")
     return 0
 
 

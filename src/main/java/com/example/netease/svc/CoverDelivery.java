@@ -112,11 +112,22 @@ public final class CoverDelivery {
      * @return 本次新写入并回验通过的键数（0 = 已就绪或无图/失败）
      */
     private static int deliverSizes(long songId, int[] sizes) {
+        return deliverSizes(songId,sizes,null);
+    }
+    /** Seed the live image cache before a new host row becomes visible. Cached images only. */
+    public static void deliverPlanned(com.example.netease.net.Dto.Song song,String prefix) {
+        String album=NativeLibrary.text(song.album(),"未知专辑"), artist=NativeLibrary.text(song.artists(),"未知歌手");
+        if(CoverStore.originalImage(CoverStore.refKey(album,artist))==null) return;
+        String[] row=readRow(song.id());
+        if(row==null) row=new String[]{album,artist,prefix+song.id(),"0","0"};
+        deliverSizes(song.id(),SIZES,row);
+    }
+    private static int deliverSizes(long songId, int[] sizes, String[] planned) {
         if (songId <= 0L || sizes == null || sizes.length == 0) {
             return 0;
         }
         try {
-            String[] row = readRow(songId);
+            String[] row = planned == null ? readRow(songId) : planned;
             if (row == null) {
                 fail("投递跳过 #" + songId + "：宿主库里没有这一行");
                 return 0;

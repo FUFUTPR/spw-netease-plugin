@@ -221,14 +221,16 @@ public final class NextTrack {
 
     /** 当前曲所属歌单：先用完整 id（{@code netease-<id>}）查，无行再用裸 id 重试（宿主历史行两种都出现过）。 */
     private static long playlistOf(Connection c, long currentSongId) throws Exception {
+        String query = modernLinks(c)
+                ? "SELECT pt.playlistId,pt.`order` FROM PlaylistTrack pt JOIN SyncTrack s ON s.scopeId=pt.scopeId AND s.id=pt.syncTrackId WHERE s.playbackTrackId=? AND pt.isRemoved=0 ORDER BY pt.`order` LIMIT 1"
+                : "SELECT playlistId, \"order\" FROM PlaylistTrack WHERE trackId = ? ORDER BY \"order\" LIMIT 1";
         for (String key : new String[]{"netease-" + currentSongId, String.valueOf(currentSongId)}) {
-            try (PreparedStatement ps = c.prepareStatement(
-                    "SELECT playlistId, \"order\" FROM PlaylistTrack WHERE trackId = ? ORDER BY \"order\" LIMIT 1")) {
+            try (PreparedStatement ps = c.prepareStatement(query)) {
                 ps.setQueryTimeout(3);
                 ps.setString(1, key);
                 try (ResultSet rs = ps.executeQuery()) {
                     if (rs.next()) {
-                        return numericId(rs.getString(1));
+                        return bareId(rs.getString(1));
                     }
                 }
             }
@@ -239,8 +241,11 @@ public final class NextTrack {
     /** 该歌单的全序（裸 id，按 order 升序）。 */
     private static List<Long> orderOf(Connection c, long playlistId) throws Exception {
         List<Long> out = new ArrayList<>();
+        String query = (modernLinks(c)
+                ? "SELECT s.playbackTrackId FROM PlaylistTrack pt JOIN SyncTrack s ON s.scopeId=pt.scopeId AND s.id=pt.syncTrackId WHERE pt.playlistId=? AND pt.isRemoved=0 ORDER BY pt.`order`,pt.syncId LIMIT "
+                : "SELECT trackId FROM PlaylistTrack WHERE playlistId = ? ORDER BY \"order\" LIMIT ") + PLAYLIST_SCAN_MAX;
         try (PreparedStatement ps = c.prepareStatement(
-                "SELECT trackId FROM PlaylistTrack WHERE playlistId = ? ORDER BY \"order\" LIMIT " + PLAYLIST_SCAN_MAX)) {
+                query)) {
             ps.setQueryTimeout(5);
             ps.setString(1, "netease-pl-" + playlistId);
             try (ResultSet rs = ps.executeQuery()) {
@@ -255,7 +260,7 @@ public final class NextTrack {
         if (out.isEmpty()) {
             // 兜底：宿主某些行 playlistId 不带 netease-pl- 前缀
             try (PreparedStatement ps = c.prepareStatement(
-                    "SELECT trackId FROM PlaylistTrack WHERE playlistId = ? ORDER BY \"order\" LIMIT " + PLAYLIST_SCAN_MAX)) {
+                    query)) {
                 ps.setQueryTimeout(5);
                 ps.setString(1, String.valueOf(playlistId));
                 try (ResultSet rs = ps.executeQuery()) {
@@ -269,6 +274,13 @@ public final class NextTrack {
             }
         }
         return out;
+    }
+
+    private static boolean modernLinks(Connection c) throws Exception {
+        try (var statement = c.createStatement(); var columns = statement.executeQuery("PRAGMA table_info('PlaylistTrack')")) {
+            while (columns.next()) if ("syncTrackId".equals(columns.getString("name"))) return true;
+        }
+        return false;
     }
 
     /**

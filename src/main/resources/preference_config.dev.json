@@ -32,18 +32,11 @@
       "config": "music_cfg.json",
       "preferences": [
         {
-          "type": "button",
-          "title": "搜索歌曲",
-          "summary": "搜索网易云歌曲并播放",
-          "arrow_type": "arrow",
-          "on_click": "com.example.netease.NeteasePlugin.openSearch"
-        },
-        {
-          "type": "button",
-          "title": "歌单与同步状态",
-          "summary": "浏览歌单、播放歌曲并查看同步进度",
-          "arrow_type": "arrow",
-          "on_click": "com.example.netease.NeteasePlugin.openPlaylist"
+          "type": "switch",
+          "key": "search_box_enabled",
+          "title": "搜索框",
+          "summary": "在顶栏显示网易云歌曲搜索框",
+          "default_value": true
         }
       ]
     },
@@ -268,6 +261,19 @@
           "title": "开发者模式",
           "summary": "显示排查与自检入口，重进插件生效",
           "default_value": false
+        }
+      ]
+    },
+    {
+      "title": "开发者工具",
+      "config": "music_cfg.json",
+      "preferences": [
+        {
+          "type": "button",
+          "title": "歌单与同步状态",
+          "summary": "浏览歌单、播放歌曲并查看同步进度",
+          "arrow_type": "arrow",
+          "on_click": "com.example.netease.NeteasePlugin.openPlaylist"
         }
       ]
     }

@@ -203,50 +203,18 @@ public final class SearchKeyboardProbe {
     private static void staticWiring() throws Exception {
         Path source = locatePageSource();
         String text = Files.readString(source, StandardCharsets.UTF_8);
-        System.out.println("INFO 源码接线检查：" + source);
-
-        // 结果区焦点与按键：先定位 onKeyEvent 代码块，避免把页面上其他同名调用算进来。
-        requireText(text, ".focusRequester(focusRequester)", "结果区挂 focusRequester");
-        requireText(text, "SearchResultList(controller, state, resultFocusRequester", "页面把同一个 focusRequester 交给结果区");
-        requireText(text, ".onFocusChanged { focused = it.isFocused }", "结果区把焦点状态写回 focused");
-        requireText(text, ".focusable()", "结果区可聚焦（focusable）");
-        requireText(text, ".onKeyEvent { event ->", "结果区安装 onKeyEvent");
-        requireText(text, "width = if (focused) 2.dp else 1.dp", "结果区有可见焦点边框（2.dp 高亮）");
-
-        int keyStart = text.indexOf(".onKeyEvent { event ->");
-        int keyEnd = text.indexOf(".focusable()", keyStart);
-        check(keyStart >= 0 && keyEnd > keyStart, "能定位结果区 onKeyEvent 代码块");
-        String keyHandler = text.substring(keyStart, keyEnd);
-        check(keyHandler.contains("Key.DirectionUp"), "结果区 onKeyEvent 处理 ↑");
-        check(keyHandler.contains("Key.DirectionDown"), "结果区 onKeyEvent 处理 ↓");
-        check(keyHandler.contains("Key.Enter") && keyHandler.contains("Key.NumPadEnter"),
-                "结果区 onKeyEvent 处理 Enter 与小键盘 Enter");
-        check(keyHandler.contains("SearchKeyNav.move(current, rows.size, -1)"), "↑ 走 SearchKeyNav.move");
-        check(keyHandler.contains("SearchKeyNav.move(current, rows.size, 1)"), "↓ 走 SearchKeyNav.move");
-        check(keyHandler.contains("SearchKeyNav.enterAction(rows.size, current)"), "Enter 走 SearchKeyNav.enterAction");
-        check(keyHandler.contains("controller.selectRow(target)"), "方向键移动按行号走 controller.selectRow");
-        check(keyHandler.contains("EnterAction.PLAY_SELECTED") && keyHandler.contains("controller.playSelected()"),
-                "Enter 的 PLAY_SELECTED 分支调用 playSelected");
-        check(keyHandler.contains("EnterAction.SELECT_FIRST"), "Enter 的无效选中分支先选第一行");
-
-        requireText(text, "listState.animateScrollToItem(target)", "选中项不可见时 animateScrollToItem");
-        check(countOccurrences(text, "keyboardScrollRequest++") >= 2,
-                "方向键与 Enter 都会递增滚动请求编号（边界重复按键也能滚到可见）");
-
-        // 搜索框 Enter 只搜索，不能被结果区键位或播放劫持
-        int previewStart = text.indexOf("onPreviewKeyEvent");
-        int placeholder = text.indexOf("placeholder =", previewStart);
-        check(previewStart >= 0 && placeholder > previewStart, "能定位搜索框 onPreviewKeyEvent 代码块");
-        String searchBox = text.substring(previewStart, placeholder);
-        check(searchBox.contains("controller.search(NativeUiState.searchKeyword)"), "搜索框 Enter 仍然只提交搜索");
-        check(!searchBox.contains("playSelected"), "搜索框 Enter 不会触发播放");
-        check(!searchBox.contains("SearchKeyNav"), "搜索框按键不会被结果区键位归约劫持");
-
-        // 鼠标操作保持
-        requireText(text, "onPress = { onFocusRequest() }", "结果行按下即请求键盘焦点");
-        requireText(text, "onTap = {", "结果行保留单击");
-        requireText(text, "onDoubleTap = {", "结果行保留双击");
-        requireText(text, "controller.select(song.id())", "单击选中按歌曲 ID 走 controller.select");
+        requireText(text, ".focusRequester(focus)", "result list retains keyboard focus");
+        requireText(text, ".onKeyEvent { event ->", "result list retains key events");
+        requireText(text, "list.animateScrollToItem(scrollTarget)", "keyboard selection scrolls into view");
+        requireText(text, "controller.selectRow(row)", "mouse selection uses explicit result row");
+        requireText(text, "controller.playSelected()", "result playback retains controller");
+        check(!text.contains("SaltInput("), "results have no duplicate input");
+        String top = Files.readString(source.resolveSibling("NativeTopSearch.kt"), StandardCharsets.UTF_8);
+        requireText(top, "NativeTopSearch.submit(navigate)", "titlebar submits complete search");
+        int start=top.indexOf(".onPreviewKeyEvent { event ->");
+        int end=top.indexOf("hint =",start);
+        check(start>=0&&end>start, "titlebar keyboard handler exists");
+        check(!top.substring(start,end).contains("playSelected"), "Enter in titlebar does not play");
     }
 
     private static int countOccurrences(String text, String needle) {

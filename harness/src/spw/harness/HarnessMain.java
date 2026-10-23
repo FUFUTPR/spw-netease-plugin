@@ -427,6 +427,21 @@ public final class HarnessMain {
         P3Checks.Reporter rep = (cid, cdesc, cok, cdet) -> check(cid, cdesc, cok, cdet);
         P3Checks.phaseWiring(rep, pluginDir, dataDir, pcl, id);
 
+        // 先触发真实插件类加载器中的 SQLite 版本读取，确保 stop() 必须释放其缓存归档。
+        // 仅使用内存数据库，不读取或修改用户曲库。
+        try {
+            Class<?> jdbc = Class.forName("org.sqlite.JDBC", true, pcl);
+            java.sql.Driver driver = (java.sql.Driver) jdbc.getConstructor().newInstance();
+            try (java.sql.Connection connection = driver.connect("jdbc:sqlite::memory:", new java.util.Properties());
+                 java.sql.Statement statement = connection.createStatement()) {
+                statement.execute("select 1");
+            }
+            check("H6.9", "插件类加载器的真实 SQLite 可用（升级占用前置）",
+                    jdbc.getClassLoader() == pcl, "driver loader = " + jdbc.getClassLoader());
+        } catch (Throwable t) {
+            check("H6.9", "插件类加载器的真实 SQLite 可用（升级占用前置）", false, oneLine(t));
+        }
+
         // ------------------------------------------------------ H7 stop
         section("H7 生命周期 stop()");
         String stopErr = null;
@@ -465,6 +480,58 @@ public final class HarnessMain {
         check("H7.3", "整个生命周期无非 harness 线程未捕获异常", UNCAUGHT.isEmpty(),
                 UNCAUGHT.isEmpty() ? null : join(UNCAUGHT));
 
+        // The installed host can disable/enable an unchanged plugin without unloading its loader.
+        section("H7R 同一类加载器停用后重新启用");
+        try {
+            Class<?> streams = pcl.loadClass("com.example.netease.svc.NativeStreamServer");
+            Class<?> bridge = pcl.loadClass("com.example.netease.host.VoxzenBridge");
+            java.lang.reflect.Field net = bridge.getDeclaredField("NET"); net.setAccessible(true);
+            java.lang.reflect.Field sync = pcl.loadClass("com.example.netease.NeteasePlugin").getDeclaredField("SYNC"); sync.setAccessible(true);
+            java.lang.reflect.Field stoppedSync = sync.get(null).getClass().getDeclaredField("stopped"); stoppedSync.setAccessible(true);
+            for (int cycle = 1; cycle <= 2; cycle++) {
+                pm.disablePlugin(id); pm.enablePlugin(id);
+                startWithTimeout(pm, id, timeoutSec);
+                check("H7R." + cycle + ".1", "重新启用复用原类加载器", wrapper.getPluginClassLoader() == pcl, null);
+                check("H7R." + cycle + ".2", "重新启用后流服务可用", Boolean.TRUE.equals(streams.getMethod("running").invoke(null)), null);
+                check("H7R." + cycle + ".3", "重新启用后播放线程池可接收任务", !((java.util.concurrent.ExecutorService)net.get(null)).isShutdown(), null);
+                check("H7R." + cycle + ".4", "重新启用后同步器恢复受理", !stoppedSync.getBoolean(sync.get(null)), null);
+                var netReady = new java.util.concurrent.CountDownLatch(1);
+                ((java.util.concurrent.ExecutorService)net.get(null)).execute(netReady::countDown);
+                check("H7R." + cycle + ".5", "重新启用后播放线程实际执行任务", netReady.await(2, java.util.concurrent.TimeUnit.SECONDS), null);
+                var health = (java.net.HttpURLConnection)java.net.URI.create(streams.getMethod("baseUrl").invoke(null) + "/health").toURL().openConnection();
+                health.setConnectTimeout(2000); health.setReadTimeout(2000);
+                try (var body = health.getInputStream()) {
+                    check("H7R." + cycle + ".6", "重新启用后流服务实际响应", new String(body.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8).equals("ok"), null);
+                } finally { health.disconnect(); }
+                var sockets = new ArrayList<java.net.Socket>();
+                try {
+                    int streamPort = java.net.URI.create((String)streams.getMethod("baseUrl").invoke(null)).getPort();
+                    for (int i = 0; i < 6; i++) {
+                        var socket = new java.net.Socket("127.0.0.1", streamPort); socket.setSoTimeout(2000);
+                        socket.getOutputStream().write("GET /health HTTP/1.1\r\n".getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+                        sockets.add(socket);
+                    }
+                    var instance = streams.getDeclaredField("instance"); instance.setAccessible(true);
+                    var clients = streams.getDeclaredField("clients"); clients.setAccessible(true);
+                    var accepted = (java.util.Set<?>)clients.get(instance.get(null));
+                    long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(2);
+                    while (accepted.size() < 6 && System.nanoTime() < deadline) Thread.sleep(10);
+                    check("H7R." + cycle + ".7", "流服务覆盖活动和排队连接", accepted.size() == 6, null);
+                    stopWithTimeout(pm, id, timeoutSec);
+                    boolean closed = true;
+                    for (var socket : sockets) {
+                        try { closed &= socket.getInputStream().read() == -1; }
+                        catch (java.net.SocketException reset) { /* remote close may reset a partial request */ }
+                    }
+                    check("H7R." + cycle + ".8", "停用主动关闭全部活动及排队连接", closed, null);
+                } finally { for (var socket : sockets) socket.close(); }
+                stopWithTimeout(pm, id, timeoutSec);
+            }
+        } catch (Throwable t) {
+            check("H7R", "同一类加载器反复启停不抛异常", false, oneLine(t));
+            try { stopWithTimeout(pm, id, timeoutSec); } catch (Throwable ignored) { }
+        }
+
         // ------------------------------------------------------ H10 P3 生命周期与凭据
         // 全部放在 stop() 之后：线程残留、RETAG_POOL shutdown、凭据密文往返/篡改、明文扫描。
         P3Checks.phaseCredentials(rep, dataDir, pcl, threadsBefore);
@@ -476,6 +543,92 @@ public final class HarnessMain {
             check("H8.1", "unloadPlugins() 不抛异常", true, null);
         } catch (Throwable t) {
             check("H8.1", "unloadPlugins() 不抛异常", false, oneLine(t));
+        }
+
+        try {
+            Path sandbox = workDir.toAbsolutePath().normalize();
+            Path source = pluginDir.toAbsolutePath().normalize();
+            Path previous = sandbox.resolve("previous").resolve(source.getFileName()).normalize();
+            // 移动之前核实绝对路径，禁止作用于实际安装目录或沙箱本身。
+            if (!source.startsWith(sandbox) || source.equals(sandbox) || !previous.startsWith(sandbox)) {
+                throw new IllegalArgumentException("Upgrade move escaped harness sandbox");
+            }
+            java.nio.file.Files.createDirectories(previous.getParent());
+            java.nio.file.Files.move(source, previous);
+            check("H8.3", "真实 stop + PF4J 卸载后插件目录立即移动成功", true, previous.toString());
+        } catch (Throwable t) {
+            check("H8.3", "真实 stop + PF4J 卸载后插件目录立即移动成功", false, oneLine(t));
+        }
+
+        // 同一个 JVM 里再装载一份新类加载器，不能把「卸载能移动」当作热升级完成。
+        try {
+            Path sandbox = workDir.toAbsolutePath().normalize();
+            Path previous = sandbox.resolve("previous").resolve(pluginDir.getFileName()).normalize();
+            Path next = sandbox.resolve("next").resolve(pluginDir.getFileName()).normalize();
+            if (!previous.startsWith(sandbox) || !next.startsWith(sandbox)) {
+                throw new IllegalArgumentException("Hot reload escaped harness sandbox");
+            }
+            try (var entries = java.nio.file.Files.walk(previous)) {
+                for (Path entry : entries.toList()) {
+                    Path destination = next.resolve(previous.relativize(entry)).normalize();
+                    if (!destination.startsWith(next)) throw new IllegalArgumentException("Copy escaped next plugin");
+                    if (java.nio.file.Files.isDirectory(entry)) java.nio.file.Files.createDirectories(destination);
+                    else java.nio.file.Files.copy(entry, destination);
+                }
+            }
+            ((HarnessPluginManager) pm).setHarnessContext(HostStubs.context(expectId, expectVer, next, spwVersion));
+            String nextId = pm.loadPlugin(next);
+            PluginState nextState = pm.startPlugin(nextId);
+            ClassLoader fresh = pm.getPluginClassLoader(nextId);
+            if (!id.equals(nextId) || nextState != PluginState.STARTED || fresh == pcl) {
+                throw new IllegalStateException("New plugin did not start with a fresh class loader");
+            }
+            java.sql.Driver driver = (java.sql.Driver) Class.forName("org.sqlite.JDBC", true, fresh).getConstructor().newInstance();
+            try (var connection = driver.connect("jdbc:sqlite::memory:", new java.util.Properties());
+                 var statement = connection.createStatement(); var result = statement.executeQuery("select 42")) {
+                if (!result.next() || result.getInt(1) != 42) throw new IllegalStateException("New JDBC unusable");
+            }
+            stopWithTimeout(pm, nextId, timeoutSec);
+            if (!pm.unloadPlugin(nextId)) throw new IllegalStateException("New plugin did not unload");
+            Path nextPrevious = sandbox.resolve("previous-next").resolve(next.getFileName()).normalize();
+            if (!nextPrevious.startsWith(sandbox)) throw new IllegalArgumentException("Next move escaped sandbox");
+            java.nio.file.Files.createDirectories(nextPrevious.getParent());
+            java.nio.file.Files.move(next, nextPrevious);
+            check("H8.4", "同一 JVM 热装载新实例、使用 JDBC、再次停用并移动目录", true,
+                    "pid=" + ProcessHandle.current().pid() + ", new class loader=" + fresh);
+        } catch (Throwable t) {
+            check("H8.4", "同一 JVM 热装载新实例、使用 JDBC、再次停用并移动目录", false, oneLine(t));
+        } finally {
+            try { pm.unloadPlugins(); } catch (Throwable ignored) { }
+        }
+
+        // 真正走 deletePlugin，不能只用目录改名代替卸载验证。
+        try {
+            Path sandbox = workDir.toAbsolutePath().normalize();
+            Path disposable = sandbox.resolve("previous-next").resolve(pluginDir.getFileName()).normalize();
+            Path sandboxData = dataDir.toAbsolutePath().normalize();
+            Path appData = Paths.get(prop("harness.appData", "")).toAbsolutePath().normalize();
+            if (!disposable.startsWith(sandbox) || disposable.equals(sandbox)
+                    || !sandboxData.startsWith(appData) || sandboxData.equals(appData)) {
+                throw new IllegalArgumentException("Delete test escaped harness sandbox");
+            }
+            java.nio.file.Files.createDirectories(sandboxData);
+            Path retained = sandboxData.resolve("harness-delete-preserve.marker");
+            java.nio.file.Files.writeString(retained, "retain plugin account and data");
+            ((HarnessPluginManager) pm).setHarnessContext(HostStubs.context(expectId, expectVer, disposable, spwVersion));
+            String deleteId = pm.loadPlugin(disposable);
+            if (pm.startPlugin(deleteId) != PluginState.STARTED) throw new IllegalStateException("Delete fixture start failed");
+            var driver = (java.sql.Driver) Class.forName("org.sqlite.JDBC", true, pm.getPluginClassLoader(deleteId)).getConstructor().newInstance();
+            try (var connection = driver.connect("jdbc:sqlite::memory:", new java.util.Properties())) { }
+            boolean deleted = pm.deletePlugin(deleteId);
+            check("H8.5", "同一 JVM 实际卸载插件目录，保留数据目录", deleted
+                            && !java.nio.file.Files.exists(disposable)
+                            && java.nio.file.Files.readString(retained).equals("retain plugin account and data"),
+                    "pid=" + ProcessHandle.current().pid() + ", deleted=" + deleted);
+        } catch (Throwable t) {
+            check("H8.5", "同一 JVM 实际卸载插件目录，保留数据目录", false, oneLine(t));
+        } finally {
+            try { pm.unloadPlugins(); } catch (Throwable ignored) { }
         }
 
         int toastCount = stub.toasts.size();

@@ -70,6 +70,8 @@ public final class HostSqlBridge {
 
     /** 取 AppDatabase 实例的候选锚点：混淆名用 \\u 转义写死（源码编码无关）。 */
     private static final String[] DB_HOLDER_CANDIDATES = {
+            "com.xuncorp.voxzen.data.\u058f", // 1.19.2 application database Lazy
+            "com.xuncorp.voxzen.data.\u0781", // 1.19.1 application database Lazy
             "com.xuncorp.voxzen.data.\u0560", // 1.19.0 application database Lazy
             "androidx.compose.ui.\u0DAA",       // public static AppDatabase Ϳ()
             "com.xuncorp.voxzen.data.\u052F",   // public static AppDatabase Ϳ()

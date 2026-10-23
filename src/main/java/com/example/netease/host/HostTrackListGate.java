@@ -319,18 +319,12 @@ public final class HostTrackListGate {
      * Resolve and validate all replacement slots before changing either one.
      */
     private static boolean install119() {
-        Class<?> holder;
-        try {
-            holder = Class.forName("com.xuncorp.voxzen.data.\u0560", false, HostTrackListGate.class.getClassLoader());
-            Method getter = holder.getMethod("\u037f");
-            if (!java.lang.reflect.Modifier.isStatic(getter.getModifiers())
-                    || !getter.getReturnType().getName().equals("com.xuncorp.voxzen.data.AppDatabase")) {
-                return false; // A same-named class in an older host is not a 1.19 profile.
-            }
-        } catch (ReflectiveOperationException absent) { return false; }
+        Host119Profile.Profile profile = Host119Profile.resolve();
+        if (profile == null) { return false; }
+        Class<?> holder = profile.databaseHolder();
         if (installed) { return true; }
         try {
-            Class<?> dao = Class.forName("androidx.compose.ui.\u060b");
+            Class<?> dao = profile.trackDao();
             Class<?> lazy = Class.forName("kotlin.Lazy");
             Object db = holder.getMethod("\u037f").invoke(null);
             if (db == null || !dao.isInterface() || !prepareMap()) {
@@ -347,7 +341,7 @@ public final class HostTrackListGate {
                 original = f.get(db);
             }
             if (slot == null || original == null) { throw new IllegalStateException("TrackDao Lazy missing"); }
-            Field scan = Class.forName("androidx.compose.ui.\u021a").getDeclaredField(NAME_FIELD_DAO);
+            Field scan = profile.scanRepository().getDeclaredField(NAME_FIELD_DAO);
             scan.setAccessible(true);
             Object scanOriginal = scan.get(null);
             if (!dao.isInstance(scanOriginal)) { throw new IllegalStateException("Scan DAO shape mismatch"); }
@@ -502,8 +496,12 @@ public final class HostTrackListGate {
     private static void installRefreshHook() {
         try {
             Class<?> ctrl;
-            try { ctrl = Class.forName(CLS_REFRESH_CTRL); }
-            catch (ClassNotFoundException absent) { ctrl = Class.forName("androidx.compose.ui.\u01aa"); }
+            Host119Profile.Profile profile = Host119Profile.resolve();
+            if (profile != null) { ctrl = profile.refreshController(); }
+            else {
+                try { ctrl = Class.forName(CLS_REFRESH_CTRL); }
+                catch (ClassNotFoundException absent) { ctrl = Class.forName("androidx.compose.ui.\u01aa"); }
+            }
             Field field = ctrl.getDeclaredField(NAME_FIELD_SCAN_STATE);
             field.setAccessible(true);
             Object current = field.get(null);
@@ -865,7 +863,8 @@ public final class HostTrackListGate {
 
     /** 纯判定（离线探针可测）：这个类名是不是扫库用的「不可读标记」数据类。 */
     public static boolean isReadableMarkClass(String className) {
-        return CLS_TRACK_READABLE_MARK.equals(className) || "androidx.compose.ui.\u1016".equals(className);
+        return CLS_TRACK_READABLE_MARK.equals(className) || "androidx.compose.ui.\u1016".equals(className)
+                || "androidx.compose.ui.\u0b71".equals(className);
     }
 
     /** 纯判定（离线探针可测）：这个 id 是不是插件写入的行（决定是否把它从「不可读」批次里剔除）。 */

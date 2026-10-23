@@ -1507,6 +1507,53 @@ public final class AccountService {
         }
     }
 
+    /** Serialize writes with login/logout so cookies cannot switch accounts mid-request. */
+    public static java.util.concurrent.CompletableFuture<java.util.List<Dto.PlaylistBrief>> menuPlaylists(long epoch, long uid) {
+        var result = new java.util.concurrent.CompletableFuture<java.util.List<Dto.PlaylistBrief>>();
+        if (!submit(() -> {
+            var current = status();
+            if (sessionEpoch() != epoch || current.uid() != uid || current.state() != State.LOGGED_IN) {
+                result.completeExceptionally(new IllegalStateException("账号已变化")); return;
+            }
+            try { result.complete(NeteaseApi.userPlaylists(uid, 1000)); }
+            catch (Throwable error) { result.completeExceptionally(error); }
+        })) result.completeExceptionally(new IllegalStateException("账号服务不可用"));
+        return result;
+    }
+
+    /** Serialize writes with login/logout so cookies cannot switch accounts mid-request. */
+    public static void addSongToPlaylist(long epoch, long uid, long songId, long playlistId,
+                                         boolean like, Consumer<String> done) {
+        editSongInPlaylist(epoch,uid,songId,playlistId,like,false,done);
+    }
+
+    public static java.util.concurrent.CompletableFuture<Long> likedPlaylist(long epoch,long uid) {
+        var result=new java.util.concurrent.CompletableFuture<Long>();
+        if(!submit(() -> {
+            if(sessionEpoch()!=epoch || status().uid()!=uid || status().state()!=State.LOGGED_IN) {
+                result.completeExceptionally(new IllegalStateException("账号已变化")); return;
+            }
+            long id=NeteaseApi.specialLikedPlaylistId(uid);
+            if(id>0) result.complete(id); else result.completeExceptionally(new IllegalStateException("无法确认我喜欢的音乐歌单"));
+        })) result.completeExceptionally(new IllegalStateException("账号服务不可用"));
+        return result;
+    }
+    public static void editSongInPlaylist(long epoch, long uid, long songId, long playlistId,
+                                         boolean like, boolean remove, Consumer<String> done) {
+        editSongInPlaylist(epoch,uid,songId,playlistId,like,remove,() -> true,done);
+    }
+    public static void editSongInPlaylist(long epoch, long uid, long songId, long playlistId,
+                                         boolean like, boolean remove, java.util.function.BooleanSupplier valid, Consumer<String> done) {
+        if (!submit(() -> {
+            var current = status();
+            if (!valid.getAsBoolean() || sessionEpoch() != epoch || current.uid() != uid || current.state() != State.LOGGED_IN) {
+                done.accept("账号已变化，请重新打开菜单"); return;
+            }
+            try { NeteaseApi.editSongInPlaylist(songId, playlistId, like, remove); done.accept(""); }
+            catch (Throwable error) { done.accept(describe(error)); }
+        })) done.accept("账号服务不可用，请重新启用插件");
+    }
+
     private static boolean submit(Runnable task) {
         if (task == null) {
             return false;

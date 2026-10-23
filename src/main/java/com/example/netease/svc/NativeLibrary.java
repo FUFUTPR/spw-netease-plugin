@@ -239,6 +239,61 @@ public final class NativeLibrary {
         int execUpdate(String sql, Object... args) throws Exception;
     }
 
+    /** Incremental cloud edit on the host Room connection; never rebuild other memberships. */
+    public static boolean editMembershipOn(Sql raw, long playlist, String title, Dto.Song song,
+                                           boolean remove, String prefix) throws Exception {
+        if (!(raw instanceof SqlSchema sql) || playlist<=0 || song==null || song.id()<=0)
+            throw new IllegalArgumentException("无效的云端歌单编辑");
+        var layout=new PlaylistLinks(sql);
+        String pid=PLAYLIST_PREFIX+playlist, tid=ID_PREFIX+song.id();
+        layout.checkPlaylist(pid);
+        String trackColumn=layout.modern ? "syncTrackId" : "trackId";
+        if (remove) {
+            sql.execUpdate("DELETE FROM PlaylistTrack WHERE playlistId=? AND "+trackColumn+"=?",pid,tid);
+            return true;
+        }
+        long now=System.currentTimeMillis();
+        if(sql.rows("SELECT 1 FROM Playlist WHERE id=?",pid).isEmpty()) {
+            var orders=sql.rows("SELECT COALESCE(MAX(`order`),0)+1 FROM Playlist");
+            insertPlaylist(sql,layout,pid,title,"网易云音乐 · 由「网易云音乐接入」插件同步",now,
+                ((Number)orders.getFirst()[0]).intValue(),0);
+        }
+        // Existing tracks retain sort, favorites, playback counters and their stable artwork key.
+        if(sql.rows("SELECT 1 FROM Track WHERE id=?",tid).isEmpty()) upsertTrack(sql,tid,song,prefix,0,now);
+        var member=sql.rows("SELECT 1 FROM PlaylistTrack WHERE playlistId=? AND "+trackColumn+"=?"+
+            (layout.modern ? " AND isRemoved=0" : ""),pid,tid);
+        if(member.isEmpty()) {
+            int order=((Number)sql.rows("SELECT COALESCE(MAX(`order`),-1)+1 FROM PlaylistTrack WHERE playlistId=?",pid).getFirst()[0]).intValue();
+            insertLink(sql,layout,pid,tid,order,now);
+        }
+        return true;
+    }
+
+    public static List<Long> membershipsOn(Sql raw, long song) throws Exception {
+        return membershipsForSongsOn(raw,List.of(song)).getOrDefault(song,List.of());
+    }
+    public static Map<Long,List<Long>> membershipsForSongsOn(Sql raw,List<Long> songs) throws Exception {
+        if (!(raw instanceof SqlSchema sql)) throw new IllegalStateException("宿主查询不可用");
+        var layout=new PlaylistLinks(sql);
+        String column=layout.modern ? "syncTrackId" : "trackId";
+        var result=new LinkedHashMap<Long,List<Long>>();
+        var ids=songs.stream().filter(id -> id!=null && id>0).distinct().toList();
+        for(int start=0;start<ids.size();start+=250) {
+            var batch=ids.subList(start,Math.min(ids.size(),start+250));
+            var placeholders=String.join(",",java.util.Collections.nCopies(batch.size(),"?"));
+            for(var row:sql.rows("SELECT "+column+",playlistId FROM PlaylistTrack WHERE "+column+" IN ("+placeholders+")"+
+                    (layout.modern ? " AND isRemoved=0 AND scopeId='local'" : ""),batch.stream().map(id -> ID_PREFIX+id).toArray())) {
+                String track=String.valueOf(row[0]), id=String.valueOf(row[1]);
+                if(track.startsWith(ID_PREFIX) && id.startsWith(PLAYLIST_PREFIX)) try {
+                    result.computeIfAbsent(Long.parseLong(track.substring(ID_PREFIX.length())),k -> new ArrayList<>())
+                        .add(Long.parseLong(id.substring(PLAYLIST_PREFIX.length())));
+                } catch(NumberFormatException ignored) {}
+            }
+        }
+        result.replaceAll((k,v) -> List.copyOf(v));
+        return Map.copyOf(result);
+    }
+
     /**
      * 把若干歌单整体同步进宿主曲库：先删掉这些歌单在插件前缀下的旧行，再写入新行（单事务）。
      *
@@ -353,6 +408,8 @@ public final class NativeLibrary {
             throws Exception {
         // P0：整轮写入依赖「能探 schema、能拿影响行数」的通道；拿不到就直接抛，不许将就。
         SqlSchema schema = requireSchema(sql, "整轮写入");
+        PlaylistLinks layout = new PlaylistLinks(schema);
+        for (Entry entry : entries) layout.checkPlaylist(PLAYLIST_PREFIX + entry.playlistId());
         int pls = 0;
         int pairs = 0;                                  // 歌单×曲目 对数（== links）
         Set<String> trackIds = new LinkedHashSet<>();    // 唯一曲目 id：曲目数必须按它算（见下方自检注释）
@@ -363,14 +420,14 @@ public final class NativeLibrary {
             String plId = PLAYLIST_PREFIX + e.playlistId();
             resetPlaylistForSync(schema, plId);
             long coverTime = playlistCoverTimes == null ? 0L : playlistCoverTimes.getOrDefault(plId, 0L);
-            insertPlaylist(schema, plId, e.name(), "网易云音乐 · 由「网易云音乐接入」插件同步", now, pls, coverTime);
+            insertPlaylist(schema, layout, plId, e.name(), "网易云音乐 · 由「网易云音乐接入」插件同步", now, pls, coverTime);
             pls++;
             playlistIds.add(plId);
             int order = 0;
             for (Dto.Song s : e.songs()) {
                 String trId = ID_PREFIX + s.id();
                 upsertTrack(schema, trId, s, urlPrefix, order, now);
-                insertLink(schema, plId, trId, order, now);
+                insertLink(schema, layout, plId, trId, order, now);
                 trackIds.add(trId);
                 pairs++;
                 links++;
@@ -402,14 +459,14 @@ public final class NativeLibrary {
         // 0.11.6 的病灶就是「5935 条关联行全部指向不存在的曲目」而没人报警。
         // 断言只对本轮写过的歌单下（那些行刚由本事务重建）；范围外的 netease- 歌单若还有遗留孤儿，
         // 只 ERROR 提示、不中止本轮的成果（清它们是一次性修复入口 deleteOrphanLinks() 的职责）。
-        long orphanInRound = countOrphans(schema, playlistIds);
+        long orphanInRound = countOrphans(schema, layout, playlistIds);
         if (orphanInRound > 0) {
             String msg = "写入自检未通过：本轮写入的歌单里有 " + orphanInRound
                     + " 条孤儿关联行（trackId 在 Track 里不存在，宿主 join 不到曲目）⇒ 中止本轮、不提交";
             PluginLog.e(TAG, msg);
             throw new IllegalStateException(msg);
         }
-        long orphanAll = countOrphans(schema, null);
+        long orphanAll = countOrphans(schema, layout, null);
         if (orphanAll > 0) {
             PluginLog.e(TAG, "注意：库内还有 " + orphanAll + " 条 netease- 孤儿关联行（**不在本轮写入范围内**，"
                     + "多半是 0.11.6 遗留或已下架歌单）——本轮写入本身是完整的；"
@@ -425,10 +482,10 @@ public final class NativeLibrary {
      *
      * @param playlistIds 只数这些歌单；传 {@code null} 数全部 {@code netease-} 歌单
      */
-    private static long countOrphans(SqlSchema c, Set<String> playlistIds) throws Exception {
+    private static long countOrphans(SqlSchema c, PlaylistLinks layout, Set<String> playlistIds) throws Exception {
         StringBuilder sql = new StringBuilder(
                 "SELECT COUNT(*) FROM PlaylistTrack pt WHERE pt.playlistId LIKE ?"
-                        + " AND NOT EXISTS (SELECT 1 FROM Track t WHERE t.id = pt.trackId)");
+                        + " AND " + layout.missingTrack());
         List<Object> args = new ArrayList<>();
         args.add(ID_PREFIX + "%");
         if (playlistIds != null) {
@@ -1138,11 +1195,14 @@ public final class NativeLibrary {
         String backup = backupOnce("purge");
         try (Connection c = open()) {
             c.setAutoCommit(false);
+            PlaylistLinks layout = new PlaylistLinks(new JdbcSql(c));
             int links = 0;
             int tracks;
             int pls;
             try (PreparedStatement ps = c.prepareStatement(
-                    "DELETE FROM PlaylistTrack WHERE playlistId LIKE ? OR trackId LIKE ?")) {
+                    layout.modern
+                        ? "DELETE FROM PlaylistTrack WHERE scopeId='local' AND (playlistId LIKE ? OR syncTrackId LIKE ?)"
+                        : "DELETE FROM PlaylistTrack WHERE playlistId LIKE ? OR trackId LIKE ?")) {
                 ps.setString(1, ID_PREFIX + "%");
                 ps.setString(2, ID_PREFIX + "%");
                 links = ps.executeUpdate();
@@ -1180,9 +1240,11 @@ public final class NativeLibrary {
         try (Connection c = open()) {
             c.setAutoCommit(false);
             try {
+                PlaylistLinks layout = new PlaylistLinks(new JdbcSql(c));
                 int n;
-                try (PreparedStatement ps = c.prepareStatement("DELETE FROM PlaylistTrack"
-                        + " WHERE playlistId LIKE ? AND trackId NOT IN (SELECT id FROM Track)")) {
+                try (PreparedStatement ps = c.prepareStatement("DELETE FROM PlaylistTrack AS pt"
+                        + " WHERE pt.playlistId LIKE ? AND " + layout.missingTrack()
+                        + (layout.modern ? " AND length(pt.mergeStateData)=0" : ""))) {
                     ps.setString(1, ID_PREFIX + "%");
                     n = ps.executeUpdate();
                 }
@@ -1431,7 +1493,7 @@ public final class NativeLibrary {
         c.exec("DELETE FROM PlaylistTrack WHERE playlistId = ?", plId);
     }
 
-    private static void insertPlaylist(SqlSchema c, String id, String title, String desc, long now, int order,
+    private static void insertPlaylist(SqlSchema c, PlaylistLinks layout, String id, String title, String desc, long now, int order,
                                        long coverModifiedTime) throws Exception {
         String t = title == null || title.isBlank() ? "网易云歌单" : title;
         // ⚠️ 绝不能用 INSERT OR REPLACE（0.10.0 真机踩坑）：SQLite 的 REPLACE = «DELETE + INSERT»，
@@ -1450,6 +1512,7 @@ public final class NativeLibrary {
         v.put("order", (long) order);
         v.put("trackSort", 0L);
         v.put("trackSortDescending", 0L);
+        layout.playlistValues(id, v);
         upsertBySchema(c, "Playlist", "id", v, cols("title", "coverModifiedTime", "description", "order"));
     }
 
@@ -1498,7 +1561,7 @@ public final class NativeLibrary {
                 "path", "readable", "size", "modifiedTime", "duration"));
     }
 
-    private static void insertLink(SqlSchema c, String plId, String trId, int order, long now) throws Exception {
+    private static void insertLink(SqlSchema c, PlaylistLinks layout, String plId, String trId, int order, long now) throws Exception {
         // 关联行没有下游外键（没有表引用 PlaylistTrack）⇒ REPLACE 的「先删后插」是安全的，
         // 而且正是我们想要的语义（同一 (歌单, 曲目) 只保留一条、order 以本轮为准）。
         // ⚠️ 但 PlaylistTrack.trackId → Track(id) 是**上游**外键，且宿主库 foreign_keys=ON：
@@ -1512,6 +1575,7 @@ public final class NativeLibrary {
             PluginLog.e(TAG, msg);
             throw new IllegalStateException(msg);
         }
+        if (layout.modern) { layout.insert(plId, trId, order, now); return; }
         c.exec("INSERT OR REPLACE INTO PlaylistTrack (playlistId, trackId, addedTime, `order`) VALUES (?,?,?,?)",
                 plId, trId, now, order);
     }

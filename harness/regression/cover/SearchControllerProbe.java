@@ -50,6 +50,7 @@ public final class SearchControllerProbe {
         failures();
         lateResultsDropped();
         playbackFlow();
+        actualPlaybackStarts();
         playbackTimeout();
         retries();
         accountChanged();
@@ -219,7 +220,7 @@ public final class SearchControllerProbe {
         check(f.playback.playedSongIds.size() == 1 && f.playback.playedSongIds.get(0) == 50L,
                 "播放投递的是选中歌曲");
         check("lossless".equals(f.playback.levels.get(0)), "音质来自注入的 audioLevel");
-        check("播放请求：正在准备「可播」".equals(s.message()) && s.message().equals(s.playbackText()),
+        check("正在解析：可播".equals(s.message()) && s.message().equals(s.playbackText()),
                 "播放后文案是已投递请求而不是已出声");
         check(!s.message().contains("出声") && !s.playbackText().contains("已实际"),
                 "不得把已投递显示成已实际出声");
@@ -230,7 +231,7 @@ public final class SearchControllerProbe {
         f.controller.tick();
         SearchController.State first = f.state();
         check(first.playing() && first.pendingPlayRequest() == 901, "首条 report 不提前结束窗口");
-        check("播放请求：正在解析音源…".equals(first.playbackText())
+        check("正在解析：可播".equals(first.playbackText())
                 && first.playbackText().equals(first.message()), "首条 report 只回显到文案");
         int marks = f.states.size();
         f.controller.tick();
@@ -239,21 +240,34 @@ public final class SearchControllerProbe {
         f.playback.reply(901, "已提交给宿主播放器：可播 - 歌手50");
         f.controller.tick();
         SearchController.State latest = f.state();
-        check("播放请求：已提交给宿主播放器：可播 - 歌手50".equals(latest.playbackText()),
-                "窗口内随后续 report 持续更新文案");
+        check("正在解析：可播".equals(latest.playbackText()),
+                "提交提示不再展示，也不冒充正在播放");
         check(latest.playing() && latest.pendingPlayRequest() == 901, "30 秒内继续轮询，不因 report 非空结束");
 
         f.advance(SearchController.PLAYBACK_TIMEOUT_MS);
         f.controller.tick();
         SearchController.State timedOut = f.state();
         check(!timedOut.playing(), "到 30 秒后离开反馈窗口");
-        check("播放请求：已提交给宿主播放器：可播 - 歌手50".equals(timedOut.playbackText()),
-                "窗口结束保留最后一条 report，不覆盖成超时文案");
+        check(timedOut.playbackText().startsWith("播放失败："),
+                "仅提交没有实际播放证据时明确超时");
         check(timedOut.pendingPlayRequest() == 901, "窗口结束后仍保留请求编号供 UI 显示");
         check(timedOut.playRetryable(), "有播放记录即可重试");
         int afterWindow = f.states.size();
         f.controller.tick();
         check(f.states.size() == afterWindow, "窗口结束后不再轮询该请求");
+    }
+
+    private static void actualPlaybackStarts() {
+        Fixture f = new Fixture();
+        f.controller.search("actual");f.async.succeed(f.lastCall(),List.of(song(55,"真实播放",true)));
+        f.controller.selectRow(0);f.controller.playSelected();f.controller.playSelected();
+        check(f.playback.playedSongIds.size()==1,"rapid same-song gestures submit playback once");
+        f.playback.reply(901,"已提交给宿主播放器：真实播放");f.controller.tick();
+        check(f.state().playbackText().equals("正在解析：真实播放"),"submitted request is not treated as playing");
+        f.playback.started.add(901);f.controller.tick();
+        check(f.state().playbackText().equals("正在播放：真实播放")&&!f.state().playing(),"actual playing observation changes status and ends polling");
+        f.advance(SearchController.PLAYBACK_TIMEOUT_MS);f.controller.tick();
+        check(f.state().playbackText().equals("正在播放：真实播放"),"confirmed playback never becomes a later timeout");
     }
 
     private static void playbackTimeout() {
@@ -275,7 +289,7 @@ public final class SearchControllerProbe {
         f.advance(1);
         f.controller.tick();
         SearchController.State s = f.state();
-        check("播放请求：等待宿主反馈超时（30 秒），可重试".equals(s.playbackText()), "从未有 report 时超时文案");
+        check("播放失败：等待宿主开始播放超时，请重试".equals(s.playbackText()), "从未有 report 时超时文案");
         check(s.message().equals(s.playbackText()) && !s.playing(), "超时后离开反馈窗口");
         check(s.pendingPlayRequest() == requestId, "超时后仍保留请求编号");
         check(s.playRetryable(), "超时后允许重试播放");
@@ -309,19 +323,19 @@ public final class SearchControllerProbe {
                 "播放重试把选中切回该歌");
         check(f.state().playing() && f.state().pendingPlayRequest() == 902,
                 "播放重试生成新的请求编号");
-        check("播放请求：正在准备「甲」".equals(f.state().message()), "播放重试文案同首次投递");
+        check("正在解析：甲".equals(f.state().message()), "播放重试文案同首次投递");
 
         f.playback.reply(902, "取直链失败：版权受限");
         f.controller.tick();
-        check("播放请求：取直链失败：版权受限".equals(f.state().playbackText()), "重试后的反馈正常回显");
+        check("播放失败：取直链失败：版权受限".equals(f.state().playbackText()), "重试后的反馈正常回显");
         f.controller.retryPlayback();
         check(f.playback.playedSongIds.size() == 3 && f.state().pendingPlayRequest() == 903,
                 "窗口内允许再次重试并生成新编号");
-        check("播放请求：正在准备「甲」".equals(f.state().message()) && f.state().playing(),
+        check("正在解析：甲".equals(f.state().message()) && f.state().playing(),
                 "重试重置窗口文案与 lastPlaybackReport");
         int marks = f.states.size();
         f.controller.tick();
-        check(f.states.size() == marks && "播放请求：正在准备「甲」".equals(f.state().playbackText()),
+        check(f.states.size() == marks && "正在解析：甲".equals(f.state().playbackText()),
                 "新窗口不复用上个请求的旧 report");
 
         f.controller.search("第二次");
@@ -524,6 +538,8 @@ public final class SearchControllerProbe {
         final List<Long> playedSongIds = new ArrayList<>();
         final List<String> levels = new ArrayList<>();
         final Map<Integer, String> reports = new HashMap<>();
+        final java.util.Set<Integer> started = new java.util.HashSet<>();
+        @Override public boolean started(int id) { return started.contains(id); }
         int nextId = 900;
 
         @Override

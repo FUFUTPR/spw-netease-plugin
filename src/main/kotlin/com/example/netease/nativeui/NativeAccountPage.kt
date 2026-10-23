@@ -1,16 +1,12 @@
 package com.example.netease.nativeui
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.Button
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -32,67 +28,47 @@ import com.example.netease.ui.AccountReport
 internal fun NativeAccountPage() {
     val st = NativeUiState.account
     if (st == null) {
-        Text("正在读取账号状态…", style = MaterialTheme.typography.bodyMedium)
+        SaltText("正在读取账号状态…", style = HostStyle.typography.bodyMedium)
         return
     }
     var confirmLogout by remember { mutableStateOf(false) }
     val rows = remember(st) { AccountReport.render(st).split("\n") }
-    Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text(
-            text = "账号信息来自 AccountService.status() 的同一份快照（状态 " + st.state().name +
-                "，会话代 " + AccountService.sessionEpoch() + "），不另存登录态。",
-            style = MaterialTheme.typography.bodyMedium,
-        )
-        Surface(
-            modifier = Modifier.fillMaxWidth(),
-            tonalElevation = 2.dp,
-            color = MaterialTheme.colorScheme.surfaceVariant,
-        ) {
-            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 rows.forEach { line ->
-                    Text(
+                    SaltText(
                         text = line,
-                        style = if (line.startsWith("账号名字")) MaterialTheme.typography.titleMedium
-                        else MaterialTheme.typography.bodyMedium,
+                        style = if (line.startsWith("账号名字")) HostStyle.typography.titleMedium
+                        else HostStyle.typography.bodyMedium,
                         fontWeight = if (line.startsWith("账号名字")) FontWeight.SemiBold else FontWeight.Normal,
                     )
                 }
-            }
         }
-        if (st.message().isNotBlank()) {
-            Text("状态说明：" + st.message(), style = MaterialTheme.typography.labelMedium)
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
-            Button(
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            SaltButton(
                 onClick = {
                     NativeUiSession.refreshAccount()
-                    NativeUiState.page = NativePage.LOGIN
-                    NativeUiSession.openLogin()
+                    NativeUiPresentation.openPage(NativePage.LOGIN)
                 },
             ) {
-                Text(if (st.state() == AccountService.State.LOGGED_IN) "切换账号" else "登录")
+                SaltText(if (st.state() == AccountService.State.LOGGED_IN) "切换账号" else "登录")
             }
-            OutlinedButton(onClick = { NativeUiSession.refreshAccount() }) { Text("刷新账号快照") }
+            SaltSecondaryButton(onClick = { NativeUiSession.refreshAccount() }) { SaltText("刷新") }
             if (!confirmLogout) {
-                OutlinedButton(onClick = { confirmLogout = true }) { Text("退出登录") }
+                SaltSecondaryButton(onClick = { confirmLogout = true }) { SaltText("退出登录") }
             } else {
-                Button(onClick = {
+                SaltButton(onClick = {
                     confirmLogout = false
                     NativeUiSession.logout()
                 }) {
-                    Text("确认退出登录")
+                    SaltText("确认退出登录")
                 }
-                OutlinedButton(onClick = { confirmLogout = false }) { Text("取消") }
+                SaltSecondaryButton(onClick = { confirmLogout = false }) { SaltText("取消") }
             }
             if (NativeUiState.accountNote.isNotBlank()) {
-                Text(NativeUiState.accountNote, style = MaterialTheme.typography.labelMedium)
+                SaltText(NativeUiState.accountNote, style = HostStyle.typography.labelMedium)
             }
         }
-        Text(
-            text = "说明：退出登录会清除本机保存的登录凭据并让账号会话失效；" +
-                "关闭登录页或取消登录不会退出账号。账号变化会让旧的搜索/歌单结果与验证回调失效" +
-                "（由控制器与 AccountService 的会话代共同保证）。",
-            style = MaterialTheme.typography.labelSmall,
-        )
+        SaltText("退出登录会清除本机保存的登录凭据。", style = HostStyle.typography.labelSmall)
     }
 }

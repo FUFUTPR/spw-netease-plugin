@@ -11,7 +11,8 @@
 param(
     [switch] $SkipApi,
     [switch] $ForceApi,
-    [string] $HostJar
+    [string] $HostJar,
+    [string] $DistDir
 )
 
 $ErrorActionPreference = 'Stop'
@@ -51,6 +52,8 @@ $gradlew = Join-Path $root 'gradlew.bat'
 if (-not (Test-Path -LiteralPath $gradlew)) { throw "缺少 Gradle Wrapper：$gradlew" }
 # 只清本次 Gradle 输出；build\baseline、build\evidence 等证据目录必须保留。
 $pluginClasses = Join-Path $root 'build\plugin-classes'
+$pluginClasses = [IO.Path]::GetFullPath($pluginClasses)
+if ($pluginClasses -ne [IO.Path]::GetFullPath((Join-Path $root 'build\plugin-classes'))) { throw 'Unsafe classes directory' }
 if (Test-Path -LiteralPath $pluginClasses) { Remove-Item -LiteralPath $pluginClasses -Recurse -Force }
 & $gradlew --no-daemon --console=plain -q compilePluginClasses
 if ($LASTEXITCODE -ne 0) { throw "Gradle compilePluginClasses 失败（exit $LASTEXITCODE）" }
@@ -66,6 +69,7 @@ foreach ($cand in @('python', 'python3', 'py')) {
 if (-not $python) { throw '找不到 python（需要 Python 3.8+）。' }
 
 $buildArgs = @((Join-Path $root 'tools\build.py'), '--package-only', '--classes-dir', (Join-Path $root 'build\plugin-classes'))
+if ($DistDir) { $buildArgs += @('--dist-dir', $DistDir) }
 if ($pyVer -eq 'py') { $buildArgs = @('-3') + $buildArgs }
 
 & $python @buildArgs

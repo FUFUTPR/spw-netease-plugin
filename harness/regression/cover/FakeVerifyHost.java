@@ -24,6 +24,7 @@ public final class FakeVerifyHost {
 
     private static PrintWriter out;
     private static BufferedWriter log;
+    private static Path adoptionGate;
 
     private static String session = "00000000";
     private static String pid = "0";
@@ -46,6 +47,7 @@ public final class FakeVerifyHost {
         }
         try {
             openLog(logPath);
+            if (logPath != null) adoptionGate = Path.of(logPath + ".adopt");
             parseRealArgs(args);
             out = new PrintWriter(new OutputStreamWriter(System.out, StandardCharsets.UTF_8), true);
             switch (scenario) {
@@ -138,10 +140,12 @@ public final class FakeVerifyHost {
         say("cookies MUSIC_U=PROBE_COOKIE_SECRET");
     }
 
-    /** 拖 500ms 才 adopted：给探针时间在 adopted 之前 setBounds/setVisible。 */
+    /** Explicit gate keeps pre-adoption checks independent of machine load. */
     private static void delayedAdopt() {
         prelude();
-        sleep(500);
+        long deadline=System.nanoTime()+10_000_000_000L;
+        while(adoptionGate!=null && !Files.exists(adoptionGate) && System.nanoTime()<deadline) sleep(10);
+        if(adoptionGate!=null && !Files.exists(adoptionGate)) { say("fail fixture-adoption-not-released"); return; }
         say("adopted rect=0,0," + expectW + "," + expectH);
         say("client w=" + expectW + " h=" + expectH);
         say("webview2 153.0.0.0");

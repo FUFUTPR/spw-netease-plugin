@@ -140,6 +140,11 @@ final class Http {
             throws IOException {
         return request("POST", url, encodeForm(form), headers, MAX_TEXT_BYTES, Http::readText);
     }
+    /** Cloud mutations must not be replayed after an uncertain transport failure. */
+    static String postFormOnce(String url, Map<String, String> form) throws IOException {
+        throttle();
+        return exchange("POST", url, encodeForm(form), null, MAX_TEXT_BYTES, Http::readText);
+    }
 
     /** GET 字节（限长，自动解 gzip）。 */
     static byte[] getBytes(String url, Map<String, String> headers, long maxBytes) throws IOException {

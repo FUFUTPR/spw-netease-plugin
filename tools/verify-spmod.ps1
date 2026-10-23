@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     SPW 网易云插件 · .spmod 产物结构校验器（纯 PowerShell，零外部依赖）。
 
@@ -1154,7 +1154,7 @@ try {
         Add-Result 'P10.5c' '账号组恰好 3 行且形态正确：「当前账号」是 button（title 恰好「当前账号」、on_click=…currentAccount，点开才展示账号名字/id/会员）+ 登录按钮 + 退出登录（0.11.46 起「启动时自动登录」搬进开发者档维护组）；页面上不常驻任何账号信息（无 {{ 占位、无「当前账号：」）；「扫码登录」行不许回潮（0.11.30 起扫码在对话框内）；无「获取验证码/验证码/确定登录/手机号」、无任何开发者行' $smsOk $smsDetail `
             $(if ($smsOk) { '' } else { '账号组形态不符：缺「当前账号」按钮（或它不是 button/currentAccount ⇒ 点不出账号信息）、或账号信息仍常驻在标题里（用户 m00001 要求点击后才显示）、或「扫码登录」行回潮（0.11.30 起它在对话框里）、或开发者行混进用户档、或四件套/手机号行回潮、或行数不是 3' })
 
-        # ---------- P10.21 开发者档资源（0.11.30 需求③）：存在、合法、4 组、行数 = 用户档 + 14、
+        # ---------- P10.21 开发者档资源（0.11.30 需求③）：存在、合法、4 组、行数 = 用户档 + 15、
         #  11 个开发者入口接线齐全 + 「日志级别」list 行与「启用插件」switch 行在
         #  （= 14 行开发者行：在线播放组 4 + 状态与缓存组 3 + 维护组 6（含 0.11.46 搬进来的
         #  「启动时自动登录」）+ 「启用插件」；
@@ -1185,6 +1185,7 @@ try {
                 if (-not [string]::IsNullOrWhiteSpace($c)) { $devAll += $c }
             }
         }
+        $DEV_TARGETS += 'com.example.netease.NeteasePlugin.openPlaylist'
         $devMissing = @($DEV_TARGETS | Where-Object { $devAll -notcontains $_ })
         $devLogLv   = $null
         foreach ($g in $p3dGroups) { $hit = Get-P3Pref $g '日志级别'; if ($null -ne $hit) { $devLogLv = $hit } }
@@ -1196,18 +1197,18 @@ try {
         $devEnabledOk = ($null -ne $devEnabled) -and ($devEnTy -ceq 'switch') -and ($devEnKey -ceq 'enabled') -and ($devEnDef -eq $true)
         $devRows    = 0
         foreach ($g in $p3dGroups) { $devRows += @((Get-P3Prop $g 'preferences')).Count }
-        # 行数用**相对判据**（开发者档 = 用户档 + 14 行）而不是写死数字：需求④ 以后要再精简用户档文案 /
+        # 行数用**相对判据**（开发者档 = 用户档 + 15 行）而不是写死数字：需求④ 以后要再精简用户档文案 /
         # 增删用户可见行时，这里不该跟着改；写死 25 会在那种改动里变成假 FAIL（本轮就栽在写死 23 上）。
         # 0.11.35：账号状态删除 ⇒ 13 → 12；0.11.45：「启用插件」只留开发者档 ⇒ 12 → 13；
         # 0.11.46：「启动时自动登录」搬进开发者档维护组 ⇒ 13 → 14。
         $userRows   = 0
         foreach ($g in $p3Groups) { $userRows += @((Get-P3Prop $g 'preferences')).Count }
-        $devOk = ($null -ne $p3d) -and ($p3dGroups.Count -eq ($ExpectedConfigs.Count + 1)) -and ($devRows -eq ($userRows + 14)) `
+        $devOk = ($null -ne $p3d) -and ($p3dGroups.Count -eq ($ExpectedConfigs.Count + 2)) -and ($devRows -eq ($userRows + 15)) `
             -and ($devMissing.Count -eq 0) -and ($null -ne $devLogLv) -and $devEnabledOk
-        $devHead = if ($null -ne $p3d) { "组数=$($p3dGroups.Count) 行数=$devRows（用户档 $userRows + 14）" } else { $p3dErr }
+        $devHead = if ($null -ne $p3d) { "组数=$($p3dGroups.Count) 行数=$devRows（用户档 $userRows + 15）" } else { $p3dErr }
         $devDetail = "开发者档：$devHead；11 个开发者入口缺=$(if ($devMissing.Count) { ($devMissing -join '、') } else { '无' })；日志级别行=$(if ($null -ne $devLogLv) { '在' } else { '缺' })；启用插件行=$(if ($null -ne $devEnabled) { "type=$devEnTy key=$devEnKey default_value=$(Format-P3Val $devEnDef)" } else { '缺' })"
-        Add-Result 'P10.21' '开发者档 classes/preference_config.dev.json 存在且齐全：用户组 + 开发者播放组、行数 = 用户档行数 + 14、11 个开发者入口接线齐全 + 「日志级别」list 行与「启用插件」switch 行在' $devOk $devDetail `
-            $(if ($devOk) { '' } else { '开发者档缺失或不齐：开关打开后用户看不到开发者行（需求③ 直接判 FAIL）；行数不符 = 开发者档不是「用户档 + 14 行」；缺「启用插件」= 用户档摘掉它后没有别处能关插件' })
+        Add-Result 'P10.21' '开发者档 classes/preference_config.dev.json 存在且齐全：用户组 + 开发者播放组、行数 = 用户档行数 + 15、11 个开发者入口接线齐全 + 「日志级别」list 行与「启用插件」switch 行在' $devOk $devDetail `
+            $(if ($devOk) { '' } else { '开发者档缺失或不齐：开关打开后用户看不到开发者行（需求③ 直接判 FAIL）；行数不符 = 开发者档不是「用户档 + 15 行」；缺「启用插件」= 用户档摘掉它后没有别处能关插件' })
 
         # ---------- P10.22 反向：开发者行不许留在用户档里（需求③「正常状态为关闭，普通用户不受干扰」；
         #  0.11.45 起「启用插件」也只留开发者档 —— 用户档里出现它即判漏）
@@ -1255,7 +1256,7 @@ try {
             foreach ($t in $userTitles) { if ($devTitlesAll -notcontains $t) { $subOk = $false } }
         }
         $textOk = ($longText.Count -eq 0) -and $subOk
-        Add-Result 'P10.23' '文案精简：用户档与开发者档每一行 summary ≤ 21 字（「合并歌单」按用户原话豁免 31 字），且用户档的每一行在开发者档里都有同名的行（开发者档 = 用户档 + 14 行）' $textOk `
+        Add-Result 'P10.23' '文案精简：用户档与开发者档每一行 summary ≤ 21 字（「合并歌单」按用户原话豁免 31 字），且用户档的每一行在开发者档里都有同名的行（开发者档 = 用户档 + 15 行）' $textOk `
             "最长 summary=$maxLen 字；超限=$(if ($longText.Count) { $longText -join '、' } else { '无' })；豁免=$(if ($SUMMARY_ALLOW.Count) { ($SUMMARY_ALLOW.Keys -join '、') } else { '无' })；开发者档包含用户档全部行=$(if ($subOk) { '是' } else { '否' })" `
             $(if ($textOk) { '' } else { '有 summary 超过上限（需求④ 判 FAIL，白名单除外），或开发者档漏了用户可见行（开开关会让普通功能消失）' })
 
