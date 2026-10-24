@@ -68,7 +68,7 @@ public final class CoverPrimer {
     private static final long PATROL_MS = 30000L;
 
     /** 一轮丢进下载池的图片并发度（任务书 §13：取暖并发常量，别自己再抄一份）。 */
-    private static final int WARM_CONCURRENCY = Math.max(1, com.example.netease.core.RiskControl.WARM_CONCURRENCY);
+    private static final int WARM_CONCURRENCY = Math.max(1, Math.min(2, Runtime.getRuntime().availableProcessors() / 2));
 
     private static volatile Thread worker;
     private static volatile boolean stop;
@@ -626,12 +626,15 @@ public final class CoverPrimer {
      * ③ 连接超时压到 2 s，避免宿主 compaction 时插件线程长等。</p>
      */
     private static java.sql.Connection openReadOnly(Path db) throws Exception {
+        if (com.example.netease.core.DataPaths.nativeLinux()) return com.example.netease.host.HostReadDatabase.open(db);
         try {
             Class.forName("org.sqlite.JDBC");
         } catch (Throwable ignore) {
             // 驱动已由宿主类加载器注册时 classForName 会失败，继续走 DriverManager 即可
         }
-        java.sql.Connection c = java.sql.DriverManager.getConnection("jdbc:sqlite:" + db);
+        java.util.Properties properties = new java.util.Properties();
+        properties.setProperty("open_mode", "1");
+        java.sql.Connection c = java.sql.DriverManager.getConnection("jdbc:sqlite:" + db, properties);
         try (java.sql.Statement s = c.createStatement()) {
             s.execute("PRAGMA query_only=ON");
         }

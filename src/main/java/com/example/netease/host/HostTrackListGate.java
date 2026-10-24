@@ -864,7 +864,8 @@ public final class HostTrackListGate {
     /** 纯判定（离线探针可测）：这个类名是不是扫库用的「不可读标记」数据类。 */
     public static boolean isReadableMarkClass(String className) {
         return CLS_TRACK_READABLE_MARK.equals(className) || "androidx.compose.ui.\u1016".equals(className)
-                || "androidx.compose.ui.\u0b71".equals(className);
+                || "androidx.compose.ui.\u0b71".equals(className)
+                || "androidx.compose.ui.\u0e81".equals(className); // Native Linux 1.19.2 TrackReadableUpdate
     }
 
     /** 纯判定（离线探针可测）：这个 id 是不是插件写入的行（决定是否把它从「不可读」批次里剔除）。 */

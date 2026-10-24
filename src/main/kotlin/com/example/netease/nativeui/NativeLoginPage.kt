@@ -32,6 +32,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.example.netease.net.Dto
 import com.example.netease.ui.controller.LoginController
+import com.example.netease.ui.controller.VerifyEmbedController
 import javax.imageio.ImageIO
 import java.io.ByteArrayInputStream
 
@@ -75,7 +76,9 @@ internal fun NativeLoginPage() {
                 style = HostStyle.typography.labelSmall,
             )
         }
-        val message = if (st.phase() == LoginController.Phase.QR_READY) phaseHint(st)
+        val message = if (st.mode() == LoginController.Mode.RISK && !VerifyEmbedController.nativeSupported())
+            "此次登录需要行为验证，请选择其他登录方式"
+            else if (st.phase() == LoginController.Phase.QR_READY) phaseHint(st)
             else st.message().ifBlank { phaseHint(st) }
         if (message.isNotBlank()) SaltText(
             text = message,
@@ -88,6 +91,8 @@ internal fun NativeLoginPage() {
             LoginController.Mode.RISK -> RiskPane(controller, st)
         }
         if (st.loggedIn()) {
+            val progress = syncProgressMessage(NativeUiState.sync)
+            if (progress.isNotBlank()) SaltText(progress, style = HostStyle.typography.bodyMedium)
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
                 SaltText(
                     text = "已登录" + (if (st.loginVia().isBlank()) "" else "（" + st.loginVia() + "）"),
@@ -190,6 +195,18 @@ private fun SmsPane(controller: LoginController, st: LoginController.State) {
 
 @Composable
 private fun RiskPane(controller: LoginController, st: LoginController.State) {
+    if (!VerifyEmbedController.nativeSupported()) {
+        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            SaltText("当前系统暂不支持内嵌行为验证", style = HostStyle.typography.bodyMedium)
+            SaltText("网易云要求完成行为验证后才能继续此次登录。可以返回选择其他登录方式；若仍要求行为验证，该流程暂不可用。",
+                style = HostStyle.typography.bodySmall)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                SaltSecondaryButton(onClick = { controller.switchTo(LoginController.Mode.QR) }) { SaltText("返回扫码") }
+                SaltSecondaryButton(onClick = { controller.switchTo(LoginController.Mode.SMS) }) { SaltText("验证码登录") }
+            }
+        }
+        return
+    }
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         SaltText(
             text = "网易云要求先完成一次行为验证才能继续登录。验证网页在下方区域内渲染（宿主主窗口内的 WebView2），" +

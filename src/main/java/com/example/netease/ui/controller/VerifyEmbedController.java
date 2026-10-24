@@ -250,6 +250,11 @@ public final class VerifyEmbedController {
         this(listener, DEFAULT_LAUNCHER, DEFAULT_HOST);
     }
 
+    /** The bundled WebView2 child-window helper requires a Windows runtime. */
+    public static boolean nativeSupported() {
+        return System.getProperty("os.name", "").toLowerCase(Locale.ROOT).startsWith("windows");
+    }
+
     /**
      * 探针构造器（package-private，供 harness/regression/cover 使用）：
      * launcher 决定怎么起助手进程，host 提供 cookie/epoch/日志。
@@ -436,6 +441,13 @@ public final class VerifyEmbedController {
     /** 新会话：发布 STARTING → 等 cookie（≤1500ms）→ 起进程。 */
     private void startSession(String url, String source, String parentTitle,
                               int contentWidth, int contentHeight, double scale) {
+        if (launcher == DEFAULT_LAUNCHER && !nativeSupported()) {
+            synchronized (lock) {
+                this.url = url;
+                publish(Phase.FAILED, "当前系统暂不支持内嵌行为验证；若登录必须完成行为验证，该流程暂不可用。", false);
+            }
+            return;
+        }
         final long gen;
         synchronized (lock) {
             gen = ++generation;

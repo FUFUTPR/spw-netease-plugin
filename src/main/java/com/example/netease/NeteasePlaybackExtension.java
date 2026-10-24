@@ -57,6 +57,7 @@ public final class NeteasePlaybackExtension implements PlaybackExtensionPoint {
     public void onStateChanged(State state) {
         try {
             String name = state == null ? "" : state.name();
+            com.example.netease.svc.LocalPlaybackCompatibility.onState(name);
             EventBus.get().offer(new EventBus.PlaybackState(name, playing));
             PlaybarCover.trace("播放态 " + name);     // 时序黑匣子（宿主回调线程上一次入队，零 IO）
             PlaybarCover.onHostState(name);            // 只存名字：Idle/Ended = 显示态可立即出图
@@ -74,6 +75,7 @@ public final class NeteasePlaybackExtension implements PlaybackExtensionPoint {
     public void onIsPlayingChanged(boolean isPlaying) {
         try {
             playing = isPlaying;
+            com.example.netease.svc.LocalPlaybackCompatibility.onPlaying(isPlaying);
             // ⚠️ 严禁在此回调里同步调用 playback().changeExclusive(...)
             EventBus.get().offer(new EventBus.PlaybackState("", isPlaying));
             PlaybarCover.trace("isPlaying=" + isPlaying);   // 时序黑匣子（一次入队，零 IO）

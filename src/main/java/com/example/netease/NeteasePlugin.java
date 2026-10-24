@@ -2,6 +2,7 @@ package com.example.netease;
 
 import com.example.netease.cfg.PluginConfig;
 import com.example.netease.core.DataPaths;
+import com.example.netease.core.DirectoryOpener;
 import com.example.netease.core.DevMode;
 import com.example.netease.core.EventBus;
 import com.example.netease.core.HostBridgeWorker;
@@ -28,7 +29,6 @@ import com.xuncorp.spw.workshop.api.PluginContext;
 import com.xuncorp.spw.workshop.api.SpwPlugin;
 
 import javax.swing.SwingUtilities;
-import java.awt.Desktop;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
@@ -363,14 +363,16 @@ public final class NeteasePlugin extends SpwPlugin {
                 // 读上下文失败不致命
             }
             // ① 纯文件/零宿主依赖的初始化
-            DataPaths.init(id);
+            DataPaths.init(id, pluginPath);
             PluginLog.init(DataPaths.logs());
+            if (!DataPaths.storageNote().isBlank()) PluginLog.i("paths", DataPaths.storageNote());
             PluginLog.i(TAG, "开始启动：id=" + id
                     + " 宿主版本=" + spwVersion + "(" + channel + ")"
                     + " 插件版本(上下文)=" + pluginVersion
                     + " 插件版本(MANIFEST)=" + PluginVersions.read());
             RuntimeCapabilities.setRuntime(spwVersion, channel);
             SYNC.beginLifecycle();
+            AccountService.setAfterLoginHook(NeteasePlugin::onAccountReady);
             VoxzenBridge.beginLifecycle();
             NativeStreamServer.beginLifecycle();
 
@@ -395,6 +397,7 @@ public final class NeteasePlugin extends SpwPlugin {
             // 自动同步才启动，否则插件启动后的第一首会连接被拒绝。配置稍后加载完成时会异步
             // 应用真实容量，服务在此先按安全默认值就绪。
             NativeStreamServer.start();
+            com.example.netease.svc.LocalPlaybackCompatibility.start();
 
             // ③ 纯文件的服务初始化（0.5.0 瘦身版：只剩账号/客户端登录态这一条线）
             AccountService.init(DataPaths.data());    // 账号：加密凭据 + 唯一 netease-account 守护线程
@@ -739,13 +742,7 @@ public final class NeteasePlugin extends SpwPlugin {
             // hook 契约（Lead 冻结）：实现必须<b>立即返回</b>、禁止网络/磁盘/锁等待 —— 本方法只起线程，符合；
             // 日志里手机号只写「已填/未填」，绝不写号码本身。
             try {
-                AccountService.setAfterLoginHook(() -> {
-                    spawnNativeSync(java.util.List.of(), "force:登录后");
-                    // 0.11.22：扫码窗 / 配置页验证码 / 启动时用凭据自动恢复 —— 三条登录通路都汇到这个回调，
-                    // 配置页「登录」那一行的回填（当前账号）放在这一处，避免每个入口各写一遍（写盘动作丢给 HostBridgeWorker，
-                    // 本回调仍然立即返回）。
-                    HostBridgeWorker.get().submit(com.example.netease.svc.SmsLogin::refreshAccountRow);
-                });
+                AccountService.setAfterLoginHook(NeteasePlugin::onAccountReady);
             } catch (Throwable t) {
                 PluginLog.e(TAG, "注册「登录成功后自动同步」回调失败：登录后本轮不会自动映射，"
                         + "需手动点配置页「立即重新同步」", t);
@@ -871,6 +868,15 @@ public final class NeteasePlugin extends SpwPlugin {
         SYNC.request(list, why);
     }
 
+    private static void onAccountReady() {
+        var result = SYNC.requestAfterLogin();
+        if (result == com.example.netease.svc.SyncCoordinator.RequestResult.STARTED)
+            Notifier.success("登录成功，正在获取歌单，请稍等片刻");
+        else if (result == com.example.netease.svc.SyncCoordinator.RequestResult.DISABLED)
+            Notifier.warn("已登录；开启「合并歌单」后会获取歌单与歌曲");
+        HostBridgeWorker.get().submit(com.example.netease.svc.SmsLogin::refreshAccountRow);
+    }
+
     /**
      * 30 分钟增量同步（0.11.7 / R4）：登录态的常规自动同步，走 {@link NativeLibrary#autoSyncBegin} 的
      * 普通闸（在飞 + 30 分钟间隔）——同一时刻只有一轮，且不会与「启动自动」抢跑。
@@ -941,212 +947,114 @@ public final class NeteasePlugin extends SpwPlugin {
     private static void runNativeSync(java.util.List<String[]> list) {
         var coordinator = SYNC;
         var ticket = coordinator.ticket();
+        int fetched = 0, total = 0;
         try {
             coordinator.check(ticket);
-            int port = NativeStreamServer.start();
-            if (port <= 0) {
-                throw new IllegalStateException("本地流服务未启动，无法同步");
-            }
+            if (NativeStreamServer.start() <= 0) throw new IllegalStateException("本地流服务未启动");
             String prefix = NativeStreamServer.baseUrl() + "/netease/";
-            // ① 本轮要同步的清单：手动清单（native-sync.txt）∪ 登录后的「我的全部歌单」（0.10.0）。
-            java.util.LinkedHashMap<Long, String> want = new java.util.LinkedHashMap<>();
+            var want = new java.util.LinkedHashMap<Long, String>();
             for (String[] row : list) {
-                if (row == null || row.length == 0) {
-                    continue;
-                }
-                try {
-                    want.putIfAbsent(Long.parseLong(row[0]), row.length > 1 ? row[1] : "");
-                } catch (Throwable t) {
-                    PluginLog.d(TAG, "跳过非法歌单 id：" + row[0]);
-                }
+                if (row == null || row.length == 0) continue;
+                try { want.putIfAbsent(Long.parseLong(row[0]), row.length > 1 ? row[1] : ""); }
+                catch (NumberFormatException ignored) { }
             }
-            int manual = want.size();
-            long uid = currentUid();
-            if (uid > 0) {
-                try {
-                    for (Dto.PlaylistBrief b : NeteaseApi.userPlaylists(uid, NATIVE_SYNC_PLAYLIST_MAX)) {
-                        if (b != null && b.id() > 0) {
-                            want.putIfAbsent(b.id(), b.name());
-                        }
-                    }
-                } catch (Throwable t) {
-                    PluginLog.w(TAG, "取「我的歌单」清单失败（本轮只同步手动清单）：" + t.getMessage());
+            if (ticket.uid() > 0) {
+                for (Dto.PlaylistBrief item : NeteaseApi.userPlaylists(ticket.uid(), NATIVE_SYNC_PLAYLIST_MAX)) {
+                    if (item != null && item.id() > 0) want.putIfAbsent(item.id(), item.name());
                 }
-            } else {
-                PluginLog.i(TAG, "未登录：本轮只同步手动清单 " + want.size() + " 个歌单");
-            }
-            if (want.isEmpty()) {
-                PluginLog.w(TAG, "原生同步中止：没有要同步的歌单（未登录且 " + NATIVE_SYNC_LIST + " 为空）");
-                throw new IllegalStateException("没有可同步的歌单，未写入曲库");
-            }
-            PluginLog.i(TAG, "原生同步清单：手动 " + manual + " 个 + 我的歌单 → 合计 " + want.size()
-                    + " 个（逐个拉详情）");
-            // ② 逐个拉详情：曲目 + 歌单封面 URL。
-            java.util.List<NativeLibrary.Entry> entries = new java.util.ArrayList<>();
-            int fetched = 0;
-            for (java.util.Map.Entry<Long, String> kv : want.entrySet()) {
-                coordinator.check(ticket);
-                coordinator.progress(ticket, com.example.netease.svc.SyncCoordinator.Phase.FETCHING, "获取歌单详情", fetched, want.size());
-                try {
-                    Dto.Playlist pl = NeteaseApi.playlist(kv.getKey());
-                    NativeLibrary.Entry entry =
-                            new NativeLibrary.Entry(kv.getKey(), pl.name(), pl.tracks(), pl.coverUrl());
-                    coordinator.check(ticket);
-                    entries.add(entry);
-                    fetched++;
-                    PluginLog.i(TAG, "原生同步取到歌单「" + pl.name() + "」（" + pl.tracks().size() + " 首）");
-                    // 0.11.8（A11）**增量登记 + 立刻开工**：不再等 4 个歌单串行拉完才起下载池。
-                    // 0.11.7 把 plan/startFill 全放在循环之后 ⇒ 实测（plugin-20261001.log 冷轮）
-                    // 池 13:28:27 就绪、13:29:44 才有第一条清单，77 s 纯空转、2092 张封面全部挤在
-                    // 同步结束后的 30 s 里爆发。CoverStore.plan 本身是幂等增量的（已登记专辑按
-                    // refStub 跳过、REFS 全程 synchronized(REFS) 守锁）⇒ 逐歌单调用安全。
-                    if (!isLyricOnly()) {
-                        com.example.netease.svc.CoverStore.plan(java.util.Collections.singletonList(entry));
-                        com.example.netease.svc.CoverStore.startFill(NeteasePlugin::onCoverBatch);
-                    }
-                } catch (Throwable t) {
-                    PluginLog.w(TAG, "原生同步取歌单 " + kv.getKey() + " 失败：" + t.getMessage());
-                }
-            }
-            if (entries.size() != want.size()) {
-                throw new IllegalStateException("部分歌单未取全，本轮未写入曲库，请重试");
             }
             coordinator.check(ticket);
-            // 封面（0.11.1）：这一轮**不等下载**。只把「已经有桩」的专辑随库写进去（纯离线、瞬间），
-            // 曲库行先落地（用户打开就能看到列表）；缺图的专辑由下载池并行补、补好一张写一张
-            // （见 CoverStore.startFill + onCoverBatch 的「封面实时写库」）。
-            java.util.List<com.example.netease.svc.CoverArt.Cover> covers =
-                    com.example.netease.svc.CoverArt.collectReady(entries);
-            mergeReassert(covers);
-            // 工作清单：把「专辑 → 歌手 / 图 URL」登记下来；下载池接着把没桩的专辑一次全投出去。
-            if (!isLyricOnly()) {
-                com.example.netease.svc.CoverStore.plan(entries);
-                com.example.netease.svc.CoverStore.startFill(NeteasePlugin::onCoverBatch);
-                // 用 cover 标签（而非 plugin）打这行：A9/A13 的判据词形是 `[cover] 封面缓存：…`，
-                // 审计脚本 tools\smoke\cover-audit.py 按该词形抓「运行时权威完成度」。
-                PluginLog.i("cover", com.example.netease.svc.CoverStore.stats());
-            } else {
-                PluginLog.i(TAG, "lyric-only.flag 生效：同步后不登记封面工作清单、不起下载池（归因隔离）");
-            }
-            // 0.10.0：歌单封面 —— 宿主的歌单封面是 <宿主数据>\data\playlist_cover\<歌单行 id> 文件
-            // （Playlist 表没有 cover 列；字节码实证见 svc/PlaylistCover）。写库时把文件 mtime 一起
-            // 写进 Playlist.coverModifiedTime —— 宿主的图片缓存键随之变化，UI 会立刻重新取图。
-            java.util.Map<String, Long> plCovers = com.example.netease.svc.PlaylistCover.prepare(entries);
-            // 0.7.0 主线：把行交给**宿主自己的 Room 连接**写。只有同连接写入才会点着 Room 的
-            // TEMP 触发器失效表，宿主 UI 的 Flow 才会立刻 re-emit；外部 JDBC 是另一条连接，
-            // 触发器不响 ⇒ 必须重启宿主才看得见（真机实证 + 字节码逆向，见 host/HostSqlBridge）。
-            coordinator.check(ticket);
+            total = want.size();
+            if (want.isEmpty()) throw new IllegalStateException("没有可同步的歌单");
             String backup = NativeLibrary.backupOnce("sync");
-            // 0.11.46（合并歌单写库门闩）：写库段与开关落定互斥（见 {@link #MERGE_WRITE_LOCK}）——
-            // 用户在这个拉取耗时里把开关关掉时：同步还在网络阶段 ⇒ 这里看到 false 直接不写；
-            // 同步已经在写 ⇒ 写完为止（本版关闭不撤库，即使写完也只是「关掉后不显示」）。
-            NativeLibrary.Result r;
-            boolean viaHost;
-            synchronized (MERGE_WRITE_LOCK) {
+            var headers = want.entrySet().stream().map(e ->
+                    new NativeLibrary.Entry(e.getKey(), e.getValue(), java.util.List.<Dto.Song>of())).toList();
+            writeSyncTask(ticket, sql -> NativeLibrary.publishPlaylistHeadersOn(sql, headers));
+            coordinator.progress(ticket, com.example.netease.svc.SyncCoordinator.Phase.FETCHING,
+                    "歌单已显示，正在获取歌曲，请稍等片刻", 0, total);
+            var entries = new java.util.ArrayList<NativeLibrary.Entry>();
+            var songs = new java.util.HashSet<Long>();
+            int links = 0;
+            for (var item : want.entrySet()) {
                 coordinator.check(ticket);
-                coordinator.progress(ticket, com.example.netease.svc.SyncCoordinator.Phase.WRITING, "提交曲库事务", fetched, want.size());
-                if (!PluginConfig.mergePlaylists()) {
-                    PluginLog.i(TAG, "原生同步（本轮到写库前）发现合并歌单已关闭：本轮不写库"
-                            + "（歌曲里只显示本地歌单）");
-                    syncNote = "本轮未写库：合并歌单已关闭（歌曲里只显示本地歌单）";
-                    syncFailure = null;
-                    return;
-                }
-                NativeLibrary.Result hostResult = HostSqlBridge.onHostConnection(
-                        NativeLibrary.dbPath().toString(),
-                        HostSqlBridge.guarded(() -> coordinator.isValid(ticket),
-                                sql -> NativeLibrary.writeOn(sql, entries, prefix, backup, covers, plCovers)));
-                viaHost = hostResult != null;
-                if (viaHost) {
-                    r = hostResult;
-                } else {
-                    PluginLog.w(TAG, "宿主同连接写库不可用，回退外部 JDBC（回退路线写完需重启宿主才会在原生 UI 出现）"
-                            + com.example.netease.host.HostSqlBridge.routeNote());
-                    r = NativeLibrary.sync(entries, prefix, covers, plCovers, () -> coordinator.isValid(ticket));
-                }
+                coordinator.progress(ticket, com.example.netease.svc.SyncCoordinator.Phase.FETCHING,
+                        "正在获取歌曲：" + item.getValue(), fetched, total);
+                Dto.Playlist playlist = NeteaseApi.playlist(item.getKey());
+                coordinator.check(ticket);
+                var entry = new NativeLibrary.Entry(item.getKey(), playlist.name(), playlist.tracks(), playlist.coverUrl());
+                final int order = fetched;
+                coordinator.progress(ticket, com.example.netease.svc.SyncCoordinator.Phase.WRITING,
+                        "正在导入歌曲：" + playlist.name(), fetched, total);
+                NativeLibrary.Result result = writeSyncTask(ticket,
+                        sql -> NativeLibrary.writeSyncEntryOn(sql, entry, prefix, backup, order));
+                if (result.error() != null) throw new IllegalStateException(result.error());
+                entries.add(entry);
+                for (Dto.Song song : entry.songs()) songs.add(song.id());
+                links += result.links();
+                fetched++;
+                PluginLog.i(TAG, "歌单已实时写入：" + fetched + "/" + total + "，曲目 " + entry.songs().size() + " 首（宿主同连接）");
+                coordinator.progress(ticket, com.example.netease.svc.SyncCoordinator.Phase.FETCHING,
+                        "已显示 " + fetched + " 个歌单，继续获取歌曲", fetched, total);
+                if (fetched == 1) VoxzenBridge.refreshHostLibrary();
             }
             coordinator.check(ticket);
-            if (r.error() != null) { throw new IllegalStateException(r.error()); }
-            // 0.11.7（P0 铁律 6）：结果摘要必须写明**这一轮到底走了哪条通路**。0.11.6 的
-            // 5935 条孤儿行就是「摘要说『宿主同连接』、实际走的是自带连接」瞒下来的。
-            PluginLog.i(TAG, "原生同步结果（" + (viaHost ? "宿主同连接" : "外部 JDBC 回退")
-                    + com.example.netease.host.HostSqlBridge.routeNote() + "）：" + r);
-            syncNote = "歌单 " + r.playlists() + " / 曲目 " + r.tracks() + " / 关联 " + r.links()
-                    + "（" + (viaHost ? "宿主同连接" : "外部 JDBC 回退") + "）";
+            syncNote = "歌单 " + fetched + " / 曲目 " + songs.size() + " / 关联 " + links + "（宿主同连接，已实时显示）";
             syncFailure = null;
-            // 0.11.7：把「本轮曲目是主路径取回的、还是兜底来的」写进摘要 —— 真机实证 track/all
-            // 从来没通、生产一直走 trackIds 兜底，这件事必须能从摘要一行看出来（W2 第二段交付）。
-            String src = NeteaseApi.lastTrackNote();
-            if (src != null && !src.isBlank()) {
-                syncNote = syncNote + "；" + oneLine(src);
-            }
-            if (!covers.isEmpty()) {
-                PluginLog.i(TAG, "封面核对（只读）：" + NativeLibrary.verifyCovers(covers));
-            }
-            PluginLog.i(TAG, "原生同步后 " + NativeLibrary.stats() + "；曲目 path 前缀 " + prefix);
-            // 0.11.5：① 同步会重写每条 Track 的 path/size ⇒ 缩略图缓存键变化 → 铺一轮新键；
-            // ② 同步会把「播过的歌」的本地带图 path 推回流地址 → 重新钉回去
-            //    （否则播放条/播放页永远等不到本地文件，0.11.5 接线时漏过这一步）。
-            if (!isLyricOnly()) {
-                com.example.netease.svc.CoverPrimer.primeAll("同步后");
-                int refixed = com.example.netease.svc.RowCover.reapplyAll();
-                if (refixed > 0) {
-                    PluginLog.i(TAG, "播放条封面：同步后重钉 " + refixed + " 首本地带图文件");
-                }
-            } else {
-                PluginLog.i(TAG, "lyric-only.flag 生效：同步后跳过封面重铺与重钉（归因隔离）");
-            }
-            // 歌词预取（原生路线）：0.11.0 起 <b>不再</b>在同步期批量预取（Native 上限 = 0，原因见
-            // 常量注释）——改用「播放时按需抓」：StreamPrefetcher 开工时抓这一首的歌词，
-            // 与音频共用同一套缓存（内存表 + <数据目录>\lyric\<songId>.lrc）。
-            if (NATIVE_LYRIC_PREFETCH_MAX > 0) {
-                java.util.Map<Long, String> urlById = new java.util.LinkedHashMap<>();
-                java.util.List<Dto.Song> songs = new java.util.ArrayList<>();
-                for (NativeLibrary.Entry e : entries) {
-                    for (Dto.Song s : e.songs()) {
-                        if (songs.size() >= NATIVE_LYRIC_PREFETCH_MAX) {
-                            break;
-                        }
-                        songs.add(s);
-                        urlById.put(s.id(), NativeStreamServer.urlFor(s.id()));
-                    }
-                    if (songs.size() >= NATIVE_LYRIC_PREFETCH_MAX) {
-                        break;
-                    }
-                }
-                if (!songs.isEmpty()) {
-                    PluginLog.i(TAG, "原生歌词预取：投递 " + songs.size()
-                            + " 首（合计上限 " + NATIVE_LYRIC_PREFETCH_MAX + "，串行抓取）");
-                    LyricService.prefetch(songs, urlById);
-                }
-            }
-            // 免重启：写库发生在宿主读库之后 ⇒ 请宿主在自己的运行期重建一次曲库快照。
-            // 曲目表通常立刻可见；侧栏「歌单」列表要不要重启，看宿主自己的实现（另有记录）。
-            coordinator.check(ticket);
             VoxzenBridge.refreshHostLibrary();
-            // 宿主重建曲库快照时会按 Track 的 path 重新派生 Album/Artist 的 cover ⇒ 上面那一遍封面
-            // 会被抹掉（真机实证：只读核对 32/32 命中，重建后全变回 http URL、revision 归 0）。
-            // 所以等它重建完，再补挂两波（集合含本轮的离线收集 + 窗口内下载池新造的增量）。
-            scheduleCoverReassert();
-            // 旧版在这里预下载整首并把 Track.path 改成本地文件；这会让播放等下载、
-            // 还会让旧低音质文件锁死后续音质切换。现在一律由 NativeStreamServer 边播边写。
-            int legacy = com.example.netease.svc.AudioCache.purge();
-            if (legacy > 0) {
-                PluginLog.i(TAG, "已清理旧版预下载音频 " + legacy + " 个（曲库路径已恢复为流地址）");
-            }
-        } catch (Throwable t) {
-            if (!coordinator.isValid(ticket) || t instanceof java.util.concurrent.CancellationException) {
-                throw new java.util.concurrent.CancellationException("同步已中止：任务失效或已停用");
-            }
-            coordinator.progress(ticket, com.example.netease.svc.SyncCoordinator.Phase.FAILED, "同步失败，请重试；详情见日志", 0, 0);
-            // 0.11.7（P0 铁律 6 · 禁止静默失败）：同步失败必须 ERROR + 中止本轮 + 界面可见。
-            // 0.11.6 这里是 WARN，且日志里「曲目 5935 首」与「曲目 0」并存也没人报警。
-            String why = t.getClass().getSimpleName() + (t.getMessage() == null ? "" : ": " + t.getMessage());
-            syncFailure = why;
-            syncNote = "同步中止（见错误日志）";
-            PluginLog.e(TAG, "原生同步失败：本轮已中止，未写完的数据不会继续写（曲库可能不完整）", t);
-            Notifier.error("网易云同步失败：本轮已中止。详见插件日志，可先点「立即重新同步」重试。");
+            Notifier.success("歌单与歌曲已同步：" + fetched + " 个歌单，" + songs.size() + " 首歌曲；封面在后台补齐");
+            scheduleSyncArtwork(java.util.List.copyOf(entries), ticket);
+        } catch (Throwable error) {
+            if (!coordinator.isValid(ticket) || error instanceof java.util.concurrent.CancellationException)
+                throw new java.util.concurrent.CancellationException("同步已中止：账号、开关或生命周期变化");
+            syncFailure = error.getClass().getSimpleName() + ": " + error.getMessage();
+            syncNote = "同步未完成；已显示 " + fetched + "/" + total + " 个歌单的歌曲";
+            coordinator.progress(ticket, com.example.netease.svc.SyncCoordinator.Phase.FAILED, syncNote + "，可点重新同步重试", fetched, total);
+            PluginLog.e(TAG, "原生同步失败：已完成的歌单保留，本轮不再继续写入", error);
+            Notifier.error(syncNote + "；请点「重新同步」重试");
         }
+    }
+
+    private static <T> T writeSyncTask(com.example.netease.svc.SyncCoordinator.Ticket ticket,
+                                      HostSqlBridge.HostTask<T> task) {
+        synchronized (MERGE_WRITE_LOCK) {
+            SYNC.check(ticket);
+            Path db = NativeLibrary.dbPath();
+            T result = HostSqlBridge.onHostConnection(db == null ? null : db.toString(),
+                    HostSqlBridge.guarded(() -> SYNC.isValid(ticket), task));
+            if (result == null) throw new IllegalStateException("宿主曲库连接尚未就绪；未使用无法实时刷新的外部写库路径");
+            SYNC.check(ticket);
+            return result;
+        }
+    }
+
+    /** Artwork never delays publishing playlists or songs, and never revives a departed account. */
+    private static void scheduleSyncArtwork(java.util.List<NativeLibrary.Entry> entries,
+                                           com.example.netease.svc.SyncCoordinator.Ticket ticket) {
+        Thread background = new Thread(() -> {
+            try {
+                if (!SYNC.isValid(ticket) || SYNC.status().requestId() != ticket.id()) return;
+                if (!isLyricOnly()) {
+                    CoverStore.plan(entries);
+                    CoverStore.startFill(NeteasePlugin::onCoverBatch);
+                    var ready = com.example.netease.svc.CoverArt.collectReady(entries);
+                    mergeReassert(ready);
+                    if (!ready.isEmpty()) onCoverBatch(ready);
+                }
+                var times = com.example.netease.svc.PlaylistCover.prepare(entries);
+                if (!times.isEmpty() && SYNC.isValid(ticket) && SYNC.status().requestId() == ticket.id())
+                    writeSyncTask(ticket, sql -> NativeLibrary.writePlaylistCoverTimesOn(sql, times));
+                if (!SYNC.isValid(ticket)) return;
+                if (!isLyricOnly()) {
+                    CoverPrimer.primeAll("同步后");
+                    com.example.netease.svc.RowCover.reapplyAll();
+                    scheduleCoverReassert();
+                }
+                com.example.netease.svc.AudioCache.purge();
+            } catch (Throwable error) { PluginLog.w(TAG, "后台封面补齐失败，歌单与歌曲已保留：" + error.getClass().getSimpleName()); }
+        }, "netease-sync-artwork");
+        background.setDaemon(true);
+        background.setPriority(Thread.MIN_PRIORITY);
+        background.start();
     }
 
     /**
@@ -1249,6 +1157,7 @@ public final class NeteasePlugin extends SpwPlugin {
     public void stop() {
         try {
             SYNC.stop();
+            com.example.netease.svc.LocalPlaybackCompatibility.stop();
             VoxzenBridge.stop();
             // ① 摘原生 UI Hook：宿主页面不再渲染，250ms tick 与各控制器由 Kotlin 侧 stop() 统一收尾。
             // 0.12.0 起不再有插件自建 Swing 窗口，也不需要窗口注册表。
@@ -1265,7 +1174,10 @@ public final class NeteasePlugin extends SpwPlugin {
             // ③ 最后停线程（顺序与 start() 相反）
             EventBus.get().stop();
             Timers.stop();
-            HostBridgeWorker.get().stopWithCleanup(HostTrackListGate::uninstallOnWorker);
+            HostBridgeWorker.get().stopWithCleanup(() -> {
+                VoxzenBridge.restoreLocalQueueOnWorker(true);
+                HostTrackListGate.uninstallOnWorker();
+            });
             PluginLog.i(TAG, "已停止（数据目录保留：" + DataPaths.display() + "）");
         } catch (Throwable t) {
             safeLogError("停止过程异常（已忽略）", t);
@@ -1515,18 +1427,19 @@ public final class NeteasePlugin extends SpwPlugin {
                 return;
             }
             Path dir = DataPaths.data();
-            try {
-                DataPaths.ensure(dir);
-            } catch (Throwable ignored) {
-                // 忽略
-            }
-            SwingUtilities.invokeLater(() -> {
+            Thread opener = new Thread(() -> {
                 try {
-                    Desktop.getDesktop().open(dir.toFile());
-                } catch (Throwable t) {
-                    Notifier.warn("无法打开目录：" + dir);
+                    Files.createDirectories(dir);
+                    String route = DirectoryOpener.open(dir);
+                    PluginLog.i(TAG, "打开数据目录：已交给 " + route + "：" + dir);
+                } catch (Exception t) {
+                    if (t instanceof InterruptedException) Thread.currentThread().interrupt();
+                    PluginLog.w(TAG, "打开数据目录失败：" + dir + " :: " + t);
+                    Notifier.warn("无法打开目录：" + dir + "（请检查系统文件管理器；详见日志）");
                 }
-            });
+            }, "netease-open-directory");
+            opener.setDaemon(true);
+            opener.start();
         });
     }
 

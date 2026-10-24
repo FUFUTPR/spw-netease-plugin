@@ -3,6 +3,8 @@
 package com.example.netease.nativeui
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.runtime.*
@@ -111,9 +113,12 @@ internal object HostGlobalSearch {
                     }
                 }) {
                 draw(root, listOf(call.arguments.getOrNull(0) ?: false), currentComposer)
-                if (enabled && mainTitle && titleBounds.width > 0f && !NativeUiPresentation.anyDialogOpen()) {
+                if (mainTitle && titleBounds.width > 0f && !NativeUiPresentation.anyDialogOpen()) {
                     HostSaltTheme.read()?.let { snapshot ->
-                        CompositionLocalProvider(LocalSaltSnapshot provides snapshot) { Overlay() }
+                        CompositionLocalProvider(LocalSaltSnapshot provides snapshot) {
+                            if (enabled) Overlay()
+                            SyncNotice()
+                        }
                     }
                 }
                 if (HostCloudSongMenu.removal != null || HostCloudSongMenu.message.isNotBlank()) {
@@ -154,6 +159,18 @@ internal object HostGlobalSearch {
             true
         } catch (error: Throwable) { PluginLog.w("native-ui", "打开搜索结果失败：$error"); false }
     }
+
+    @Composable private fun BoxScope.SyncNotice() {
+        val message = syncProgressMessage(NativeUiState.sync)
+        if (message.isBlank()) return
+        val width = with(LocalDensity.current) { titleBounds.width.toDp() }
+        Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth()
+            .padding(start = if (width >= 640.dp) 244.dp else 16.dp, end = 16.dp, bottom = 104.dp)) {
+            SaltText(message, modifier = Modifier.fillMaxWidth()
+                .background(HostStyle.colors.subBackground, RoundedCornerShape(10.dp)).padding(12.dp),
+                style = HostStyle.typography.bodyMedium)
+        }
+    }
     @Composable private fun BoxScope.Overlay() {
         val density = LocalDensity.current
         val focus = LocalFocusManager.current
@@ -161,11 +178,20 @@ internal object HostGlobalSearch {
         val y = with(density) { (titleBounds.top - rootBounds.top).toDp() }
         val w = with(density) { titleBounds.width.toDp() }
         val h = with(density) { titleBounds.height.toDp() }
-        Box(Modifier.offset(x, y).width(w).height(h).padding(start = minOf(220.dp, w * .2f), end = minOf(330.dp, w * .28f)), contentAlignment = Alignment.Center) {
+        // The host's sidebar toggle and account/window buttons do not shrink with the window.
+        // Percentage padding let the focused field expand across those controls at small widths.
+        if (w < 420.dp) return
+        val contentLeft = 244.dp // Native sidebar is 220 dp; keep a visible 24 dp gutter.
+        val left = if (w >= 640.dp) contentLeft else 56.dp
+        val right = if (w >= 640.dp) w - 330.dp else minOf(180.dp, w - 330.dp)
+        val fieldWidth = (right - left).coerceAtLeast(0.dp)
+        val suggestionWidth = minOf(w - contentLeft - 16.dp, maxOf(320.dp, minOf(740.dp, fieldWidth)))
+        val suggestionLeft = (left + (fieldWidth - suggestionWidth) / 2)
+            .coerceIn(contentLeft, (w - 16.dp - suggestionWidth).coerceAtLeast(contentLeft))
+        Box(Modifier.offset(x + left, y).width(fieldWidth).height(h), contentAlignment = Alignment.Center) {
             NativeTopSearchField(::navigate, Modifier.widthIn(max = 740.dp).fillMaxWidth().height(minOf(34.dp, h)))
         }
-        Box(Modifier.offset(x, y + h).width(w)
-            .padding(start = minOf(220.dp, w * .2f), end = minOf(330.dp, w * .28f)), contentAlignment = Alignment.TopCenter) {
+        Box(Modifier.offset(x + suggestionLeft, y + h).width(suggestionWidth), contentAlignment = Alignment.TopCenter) {
             AnimatedVisibility(NativeTopSearch.expanded,
                 enter = fadeIn(tween(140)) + expandVertically(tween(180), expandFrom = Alignment.Top),
                 exit = fadeOut(tween(100)) + shrinkVertically(tween(140), shrinkTowards = Alignment.Top)) {

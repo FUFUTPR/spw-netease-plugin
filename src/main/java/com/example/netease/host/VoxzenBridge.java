@@ -12,6 +12,7 @@ import com.example.netease.svc.LyricService;
 import com.example.netease.svc.NativeStreamServer;
 
 import java.io.File;
+import java.nio.file.Path;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationHandler;
@@ -153,6 +154,7 @@ public final class VoxzenBridge {
         SEQ.incrementAndGet();
         NET = newNetworkWorker();
         stopped = false;
+        lastQueueCurrentItem=null; lastLeaseReferences=null; awaitingQueueRestore=false;
     }
     public static synchronized void stop() { stopped = true; SEQ.incrementAndGet(); NET.shutdownNow(); }
 
@@ -175,13 +177,108 @@ public final class VoxzenBridge {
 
     private static volatile long onlineSong, onlineAt;
     private static volatile int onlineSeq, submittedOnlineSeq, startedSeq;
+    private static volatile String submittedOnlineLocation = "";
+    private static Object lastQueueCurrentItem;
+    private static Set<String> lastLeaseReferences;
+    private static boolean awaitingQueueRestore;
     public static boolean playbackStarted(int requestId) { return requestId > 0 && requestId == startedSeq; }
     /** Called on the host worker after a real isPlaying/position callback. */
     public static void observePlaying(long actualSongId) {
         int seq = onlineSeq;
         String report = PLAY_REPORTS.get(seq);
         if (!stopped && seq == SEQ.get() && submittedOnlineSeq == seq && actualSongId > 0 && actualSongId == onlineSong
-                && report != null && !report.contains("失败") && !report.contains("为空")) startedSeq = seq;
+                && report != null && !report.contains("失败") && !report.contains("为空")) {
+            if(submittedOnlineLocation.startsWith("http://127.0.0.1:")
+                    && NativeStreamServer.lastPlaybackRequest(actualSongId)==0) return;
+            startedSeq = seq;
+        }
+    }
+
+    /** Called only by the owned host worker; callbacks themselves never read host objects. */
+    public static com.example.netease.svc.PlaybackTransport.Selection transportSelectionOnWorker() throws Exception {
+        if(stopped || !HostBridgeWorker.get().isOnWorkerThread()) return null;
+        Object ctrl=staticInstance(CLS_CONTROLLER);
+        if(ctrl==null) return null;
+        Object service=staticField(ctrl.getClass(),"PlaybackService","service");
+        Object player=findPlayer(service==null ? ctrl : service);
+        Object item=player==null ? null : currentMediaItem(player);
+        if(item==null) return null;
+        String[] data=LocalPlaybackBridge.fields(item);
+        if(!data[0].matches("netease-[0-9]+")) return null;
+        long song=Long.parseLong(data[0].substring(8));
+        java.net.URI uri;
+        try { uri=java.net.URI.create(data[5]); } catch(IllegalArgumentException malformed) { return null; }
+        if(!"http".equals(uri.getScheme()) || !"127.0.0.1".equals(uri.getHost())
+                || !uri.getPath().equals("/netease/"+song)) return null;
+        String level=PluginConfig.audioLevel();
+        if(uri.getRawQuery()!=null) for(String part:uri.getRawQuery().split("&"))
+            if(part.startsWith("level=")) level=java.net.URLDecoder.decode(part.substring(6),java.nio.charset.StandardCharsets.UTF_8);
+        level=com.example.netease.core.Levels.canonical(level);
+        if(level==null) level=PluginConfig.audioLevel();
+        return new com.example.netease.svc.PlaybackTransport.Selection(song,data[5],level,
+            AccountService.sessionEpoch(),SEQ.get(),com.example.netease.svc.LocalPlaybackCompatibility.loadSerial());
+    }
+    public static boolean replayLocalOnWorker(com.example.netease.svc.PlaybackTransport.Selection selected,Path path) {
+        try {
+            if(!HostBridgeWorker.get().isOnWorkerThread() || !java.nio.file.Files.isRegularFile(path)) return false;
+            if("http".equals(PluginConfig.playbackTransport())) return false;
+            var current=transportSelectionOnWorker();
+            if(!selected.equals(current) || !com.example.netease.svc.LocalPlaybackCompatibility.isPlaying()) return false;
+            Object ctrl=staticInstance(CLS_CONTROLLER);
+            Object service=staticField(ctrl.getClass(),"PlaybackService","service");
+            Object player=findPlayer(service==null ? ctrl : service);
+            Object item=currentMediaItem(player);
+            String local=com.example.netease.svc.LocalAudioFiles.playbackLocation(path);
+            boolean applied=LocalPlaybackBridge.replay(ctrl,item,currentMediaItem(player),local,
+                () -> !stopped && selected.epoch()==AccountService.sessionEpoch() && selected.request()==SEQ.get()
+                    && selected.load()==com.example.netease.svc.LocalPlaybackCompatibility.loadSerial()
+                    && com.example.netease.svc.LocalPlaybackCompatibility.isPlaying());
+            if(applied) {
+                submittedOnlineLocation=local;
+                transportReport(selected,"已提交本地兼容音频，等待宿主实际播放");
+                PluginLog.i("playback-transport","本地兼容音频已交给宿主 #"+selected.songId()+"；队列通过 updateMediaItems 保留");
+            }
+            return applied;
+        } catch(Throwable error) { PluginLog.w("playback-transport","提交本地音频失败："+brief(error)); return false; }
+    }
+    public static void transportReport(com.example.netease.svc.PlaybackTransport.Selection selected,String message) {
+        if(selected.request()==onlineSeq && selected.songId()==onlineSong) set(onlineSeq,message);
+    }
+    /** Restore departed items through the host queue API before their temporary files can be reclaimed.
+     * Return actual remaining references, not a timer-based assumption that the command has run. */
+    public static Set<String> restoreLocalQueueOnWorker(boolean all) {
+        try {
+            if(!HostBridgeWorker.get().isOnWorkerThread()) return null;
+            Object ctrl=staticInstance(CLS_CONTROLLER);
+            if(ctrl==null) return null;
+            Object service=staticField(ctrl.getClass(),"PlaybackService","service");
+            Object player=findPlayer(service==null ? ctrl : service);
+            Object current=player==null ? null : currentMediaItem(player);
+            if(current==null && !all) return null;
+            if(current!=null) {
+                String[] data=LocalPlaybackBridge.fields(current);
+                if(data[0].matches("netease-[0-9]+") && com.example.netease.svc.LocalAudioFiles.owns(data[5]))
+                    com.example.netease.svc.LocalPlaybackCompatibility.noteLocalFile(Long.parseLong(data[0].substring(8)),
+                        AccountService.sessionEpoch(),SEQ.get(),com.example.netease.svc.LocalPlaybackCompatibility.loadSerial());
+            }
+            if(!all && current==lastQueueCurrentItem && lastLeaseReferences!=null && !awaitingQueueRestore)
+                return lastLeaseReferences;
+            Object state=flowValue(ctrl.getClass().getMethod("getPlaybackQueueState").invoke(ctrl));
+            if(state==null) return null;
+            Class<?> itemType=Class.forName(CLS_ITEM);
+            var queued=new ArrayList<Object>();
+            for(var slot:listSlots(state)) for(Object entry:slot.raw()) {
+                Object media=itemType.isInstance(entry) ? entry : entry.getClass().getMethod("\u0528").invoke(entry);
+                if(!itemType.isInstance(media)) return null;
+                queued.add(media);
+            }
+            Set<String> keep=LocalPlaybackBridge.restore(ctrl,current,queued,all);
+            String activePath=current==null ? "" : LocalPlaybackBridge.fields(current)[5];
+            awaitingQueueRestore=keep.stream().anyMatch(path -> !path.equals(activePath));
+            lastQueueCurrentItem=all ? null : current;
+            lastLeaseReferences=all ? null : keep;
+            return keep;
+        } catch(Throwable error) { return null; } // Unknown queue shape means retain files, never guess/deallocate.
     }
     private static volatile String lastResult = "在线播放：未开始";
     private static volatile long lastPlayAtMs;
@@ -892,7 +989,10 @@ public final class VoxzenBridge {
 
             driveOnWorker(seq, item, probeItem, "在线播放", title, artist, trackId, url);
             String report = PLAY_REPORTS.get(seq);
-            if (report != null && report.startsWith("已提交给宿主播放器")) submittedOnlineSeq = seq;
+            if (report != null && report.startsWith("已提交给宿主播放器")) {
+                submittedOnlineLocation=url;
+                submittedOnlineSeq = seq;
+            }
         } catch (Throwable t) {
             // 兜底：退到 addToPlay（有些队列状态不允许整体替换）
             try {

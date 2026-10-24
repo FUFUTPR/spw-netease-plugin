@@ -87,9 +87,10 @@ internal fun NativeTopSearchField(navigate: () -> Boolean, modifier: Modifier = 
         if (NativeTopSearch.expanded && keyword.isNotBlank()) { delay(250); NativeTopSearch.suggest(keyword.trim()) }
     }
     BoxWithConstraints(modifier, contentAlignment = Alignment.Center) {
+    val availableWidth = maxWidth
     val width by animateDpAsState(if (NativeTopSearch.focused) maxWidth else minOf(220.dp, maxWidth),
         tween(220, easing = FastOutSlowInEasing), label = "search-width")
-    Row(Modifier.width(width).height(34.dp)
+    Row(Modifier.width(minOf(width, maxWidth)).height(34.dp)
         .onGloballyPositioned { NativeTopSearch.fieldBounds = it.boundsInRoot() }
         .border(1.dp, if (NativeTopSearch.focused) HostStyle.colors.highlight else HostStyle.colors.stroke, shape)
         .background(HostStyle.colors.subBackground, shape).clip(shape),
@@ -108,7 +109,7 @@ internal fun NativeTopSearchField(navigate: () -> Boolean, modifier: Modifier = 
                         Key.DirectionUp -> { NativeTopSearch.highlighted = SearchKeyNav.move(NativeTopSearch.highlighted, NativeTopSearch.rows().size, -1); true }
                         else -> false
                     }
-                }, hint = "搜索歌曲、歌手或专辑", compact = true)
+                }, hint = if (availableWidth < 200.dp) "搜索" else "搜索歌曲、歌手或专辑", compact = true)
         if (NativeTopSearch.focused) SaltPlainButton(onClick = { NativeTopSearch.submit(navigate); focus.clearFocus() },
             modifier = Modifier.focusProperties { canFocus = false }) { SaltText("搜索") }
     }

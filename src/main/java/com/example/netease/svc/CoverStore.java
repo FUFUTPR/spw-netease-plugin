@@ -99,11 +99,11 @@ public final class CoverStore {
      * （403/412/429 ⇒ 10min 起步）才是防线；真机若出现成片 403，日志里会以
      * {@code 封面失败[风控，n/5]} 暴露，而不是静默变慢。</p>
      */
-    private static final int NET_THREADS = 32;
+    private static final int NET_THREADS = Math.max(2, Math.min(6, Runtime.getRuntime().availableProcessors() / 2));
     private static final long FLUSH_MS = 5000L;
     private static final long STOP_JOIN_MS = 1500L;
     /** 投递线程的轮询上限：就绪队列一有图就投递，最坏拖这么久。 */
-    private static final long POLL_MS = 200L;
+    private static final long POLL_MS = 1000L;
     /** 工作清单扫描节流：清单里两千多个专辑，每个都要 `isRegularFile`，不必每 200 ms 扫一遍。 */
     private static final long SUBMIT_SCAN_MS = 500L;
 
@@ -1741,6 +1741,14 @@ public final class CoverStore {
             CoverArt.Cover first = READY.poll(waitMs, java.util.concurrent.TimeUnit.MILLISECONDS);
             if (first != null) {
                 out.add(first);
+                long until = System.nanoTime() + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(Math.min(waitMs, 750L));
+                while (!Thread.currentThread().isInterrupted()) {
+                    long remaining = until - System.nanoTime();
+                    if (remaining <= 0) break;
+                    CoverArt.Cover next = READY.poll(remaining, java.util.concurrent.TimeUnit.NANOSECONDS);
+                    if (next == null) break;
+                    out.add(next);
+                }
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();

@@ -192,6 +192,10 @@ final class StreamingAudioCache {
         try {
             if (Files.isRegularFile(p)) {
                 long size = Files.size(p);
+                if (size <= 0L) {
+                    COMPLETE.remove(key);
+                    return -1L; // A damaged empty file must allow a new download to replace it.
+                }
                 if (size == done.longValue()) {
                     return size;
                 }

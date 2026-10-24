@@ -20,7 +20,19 @@ final class PlaylistLinks {
         modern = columns.stream().anyMatch(r -> "syncTrackId".equals(r[1]));
         if (!modern && columns.stream().noneMatch(r -> "trackId".equals(r[1])))
             throw new IllegalStateException("不支持的歌单关联表结构，未开始写入");
-        if (modern && sql.rows("SELECT 1 FROM SyncScope WHERE id='local' AND provider='None' AND status='LocalOnly'").isEmpty())
+        if (modern && !sql.rows("SELECT 1 FROM SyncScope WHERE id='local'").isEmpty()
+                && sql.rows("SELECT 1 FROM SyncScope WHERE id='local' AND provider='None' AND status='LocalOnly'").isEmpty())
+            throw new IllegalStateException("宿主本地歌单作用域不可用，未开始写入");
+    }
+
+    /** A fresh v35 database has no local scope until the host first creates a playlist. */
+    void ensureLocalScope() throws Exception {
+        if (!modern) return;
+        // Values verified against the host's v34 -> v35 migration. Never replace an
+        // existing scope or touch remote provider/account/merge metadata.
+        sql.exec("INSERT INTO SyncScope (id,provider,status,containerIdentifier,environment,userRecordName,datasetId,recordZoneName,sessionId,engineStateData,lastSequenceNumber,initialSyncPhase,initialSyncCursor,blockingReason) "
+                + "VALUES ('local','None','LocalOnly','','NotConfigured','','','','',X'',0,'NotStarted','','None') ON CONFLICT(id) DO NOTHING");
+        if (sql.rows("SELECT 1 FROM SyncScope WHERE id='local' AND provider='None' AND status='LocalOnly'").isEmpty())
             throw new IllegalStateException("宿主本地歌单作用域不可用，未开始写入");
     }
 

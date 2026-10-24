@@ -306,6 +306,7 @@ public final class AudioCache {
         c.setRequestProperty("User-Agent", PluginVersions.userAgent());
         c.setRequestProperty("Referer", "https://music.163.com");
         c.setRequestProperty("Accept-Encoding", "identity");
+        c.setRequestProperty("X-Netease-Internal", "true");
         return c;
     }
 

@@ -669,6 +669,11 @@ public final class LyricService {
         if (path == null) {
             return -1L;
         }
+        if(LocalAudioFiles.owns(path)) {
+            String file=path.substring(Math.max(path.lastIndexOf('/'),path.lastIndexOf('\\'))+1);
+            try { long id=Long.parseLong(file.substring(0,file.indexOf('-'))); return id>0 ? id : -1L; }
+            catch(NumberFormatException invalid) { return -1L; }
+        }
         int i = path.indexOf("/netease/");
         if (i < 0) {
             return -1L;

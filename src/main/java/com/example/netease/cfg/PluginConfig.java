@@ -56,7 +56,9 @@ public final class PluginConfig {
     public static final String F_LEGACY_CLIENT = "client_cfg.json";
 
     public static final String F_MUSIC = "music_cfg.json";
-    private static final String[] ALL_FILES = {F_MAIN, F_ACCOUNT, F_LEGACY_CLIENT, F_MUSIC};
+    public static final String F_ONLINE = "online.json";
+    public static final String F_CACHE = "cache_cfg.json";
+    private static final String[] ALL_FILES = {F_MAIN, F_ACCOUNT, F_LEGACY_CLIENT, F_MUSIC, F_ONLINE, F_CACHE};
 
     /**
      * 账号组键（0.11.23）：**界面上唯一的那一行输入框**（{@code edittext}，标题「登录」）。
@@ -98,7 +100,7 @@ public final class PluginConfig {
             boolean audioCache,
             long audioCacheBytes,
             boolean devMode,
-            boolean mergePlaylists, boolean searchBoxEnabled) {
+            boolean mergePlaylists, boolean searchBoxEnabled, String playbackTransport) {
 
         String summary() {
             // ⚠️ 手机号是 PII：只报「配没配」，绝不把号码写进日志。
@@ -111,12 +113,12 @@ public final class PluginConfig {
                     + " audio_cache_gb=" + (audioCacheBytes / (1024L * 1024L * 1024L))
                     + " dev_mode=" + devMode
                     + " merge_playlists=" + mergePlaylists
-                    + " search_box_enabled=" + searchBoxEnabled;
+                    + " search_box_enabled=" + searchBoxEnabled + " playback_transport=" + playbackTransport;
         }
     }
 
     private static final Snapshot DEFAULTS = new Snapshot(
-            true, "info", "lossless", true, "", true, 10L * 1024 * 1024 * 1024, false, true, true);
+            true, "info", "lossless", true, "", true, 10L * 1024 * 1024 * 1024, false, true, true, "auto");
 
     private static final Map<String, ConfigHelper> HELPERS = new ConcurrentHashMap<>();
 
@@ -145,6 +147,8 @@ public final class PluginConfig {
     private static volatile java.util.function.Consumer<Boolean> mergePlaylistsHook;
     private static volatile java.util.function.Consumer<Boolean> searchBoxHook;
     public static boolean searchBoxEnabled() { return snap.searchBoxEnabled(); }
+    public static String playbackTransport() { return snap.playbackTransport(); }
+    private static String transport(String value) { return java.util.Set.of("auto","local","http").contains(value) ? value : "auto"; }
     public static void setSearchBoxHook(java.util.function.Consumer<Boolean> hook) { searchBoxHook = hook; }
 
     private PluginConfig() {
@@ -195,6 +199,7 @@ public final class PluginConfig {
         // 0.11.45 补丁（用户需求：开发者模式默认关闭）：先把上次会话残留的 dev_mode=true 复位，
         // 再 refresh —— 顺序不能反，否则 refresh 会先把装机档位改成开发者档、页面又冒开发者行。
         resetDevModeOnStartup();
+        migratePreferenceGroups();
         refresh();
         PluginLog.i("cfg", "配置已加载 " + snap.summary());
     }
@@ -238,7 +243,7 @@ public final class PluginConfig {
         }
         Snapshot before = snap;
         // 用哨兵默认值区分「没配过」（0.9.0 只有布尔开关 native_audio_cache 时，读不到数值键）
-        String configuredCacheGb = rawString(F_MAIN, "audio_cache_gb", ABSENT);
+        String configuredCacheGb = rawString(F_CACHE, "audio_cache_gb", rawString(F_MAIN, "audio_cache_gb", ABSENT));
         if (ABSENT.equals(configuredCacheGb)) {
             configuredCacheGb = null;
         }
@@ -264,7 +269,8 @@ public final class PluginConfig {
                 bool(F_MAIN, "dev_mode", false),
                 // 0.11.46（合并歌单，用户需求）：默认开 —— 网易云与本地音乐合并显示在「歌曲」里；
                 // 关 ⇒ 同步链路整体停写 + 撤销已写入的 netease-* 行（落地动作走 mergePlaylistsHook）。
-                bool(F_MAIN, "merge_playlists", true), bool(F_MUSIC, "search_box_enabled", true));
+                bool(F_MUSIC, "merge_playlists", bool(F_MAIN, "merge_playlists", true)), bool(F_MUSIC, "search_box_enabled", true),
+                transport(str(F_ONLINE,"playback_transport",str(F_MUSIC,"playback_transport","auto"))));
         snap = s;
         if (before.searchBoxEnabled() != s.searchBoxEnabled()) {
             var hook = searchBoxHook;
@@ -574,14 +580,39 @@ public final class PluginConfig {
         return canonical == null ? Levels.DEFAULT : canonical;
     }
 
+    /** Copy only missing destination keys, keeping explicit user choices and old files intact. */
+    private static void migratePreferenceGroups() {
+        migrateKey(F_MUSIC, "audio_level", false, F_MAIN, F_LEGACY_CLIENT);
+        migrateKey(F_MUSIC, "merge_playlists", true, F_MAIN);
+        migrateKey(F_ONLINE, "playback_transport", false, F_MUSIC);
+        migrateKey(F_CACHE, "audio_cache_gb", false, F_MAIN);
+    }
+
+    private static void migrateKey(String destination, String key, boolean booleanValue, String... sources) {
+        String existing = rawString(destination, key, ABSENT);
+        if (existing != null && !ABSENT.equals(existing)) return;
+        ConfigHelper target = helper(destination);
+        if (target == null) return;
+        for (String source : sources) {
+            String value = rawString(source, key, ABSENT);
+            if (value == null || ABSENT.equals(value) || value.isBlank()) continue;
+            try {
+                target.set(key, booleanValue ? Boolean.valueOf(value) : value);
+                target.save();
+                PluginLog.i("cfg", "配置分组迁移：" + source + " → " + destination + " / " + key);
+            } catch (Throwable error) { PluginLog.w("cfg", "配置分组迁移失败，继续读取旧值：" + key, error); }
+            return;
+        }
+    }
+
     /**
-     * 音质档位的一次性迁移（0.11.7）：新键在 {@code config.json}，老键在 {@code client_cfg.json}。
+     * 音质档位：音乐分组优先，回退读取旧维护分组与早期 client_cfg.json。
      *
      * <p>新键有效值优先；新键缺失时回退读老键。两者都没有 ⇒ 返回值会让上层落到 {@link Levels#DEFAULT}。
      * 读到老键时会打一行 INFO，便于在真机上确认「用户的选择没被升级吞掉」。</p>
      */
     private static String migratedAudioLevel() {
-        String fresh = rawString(F_MAIN, "audio_level", ABSENT);
+        String fresh = rawString(F_MUSIC, "audio_level", rawString(F_MAIN, "audio_level", ABSENT));
         if (fresh != null && !ABSENT.equals(fresh) && !fresh.isBlank()) {
             return fresh;
         }

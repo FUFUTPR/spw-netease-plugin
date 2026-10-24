@@ -9,6 +9,7 @@ final class Host119Profile {
     record Profile(Class<?> databaseHolder, Class<?> trackDao, Class<?> scanRepository, Class<?> refreshController) { }
 
     private static final String[][] NAMES = {
+            {"com.xuncorp.voxzen.data.\u058f", "androidx.compose.ui.\u0e01", "androidx.compose.ui.\u10c2", "androidx.compose.ui.\u056b"}, // Steam Linux 1.19.2
             {"com.xuncorp.voxzen.data.\u058f", "androidx.compose.ui.\u0573", "androidx.compose.ui.\u04ee", "androidx.compose.ui.\u0baf"},
             {"com.xuncorp.voxzen.data.\u0781", "androidx.compose.ui.\u0573", "androidx.compose.ui.\u04ee", "androidx.compose.ui.\u0baf"},
             {"com.xuncorp.voxzen.data.\u0560", "androidx.compose.ui.\u060b", "androidx.compose.ui.\u021a", "androidx.compose.ui.\u01aa"},

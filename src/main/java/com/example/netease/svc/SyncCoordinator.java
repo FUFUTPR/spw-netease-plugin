@@ -32,6 +32,8 @@ public final class SyncCoordinator {
     private final long timeoutNanos;
     private final ThreadLocal<Ticket> current = new ThreadLocal<>();
     private volatile Thread worker;
+    private record Pending(List<String[]> list, String reason, long uid, long session, long lifecycle) { }
+    private Pending pending;
     private volatile boolean stopped;
     private volatile long lifecycle;
     private long sequence;
@@ -54,6 +56,7 @@ public final class SyncCoordinator {
     /** Only an explicit plugin start may reopen admission; old tickets remain invalid. */
     public synchronized void beginLifecycle() {
         lifecycle++;
+        pending = null;
         stopped = false;
         status = new Status(worker == null ? Phase.IDLE : Phase.WAITING, sequence,
                 worker == null ? "" : "等待上一轮同步退出", 0, 0);
@@ -104,6 +107,19 @@ public final class SyncCoordinator {
             return RequestResult.FAILED;
         }
     }
+
+    /** Login is a hand-off: retain the latest account request while cancelled I/O drains. */
+    public synchronized RequestResult requestAfterLogin() {
+        if (stopped) return RequestResult.STOPPED;
+        if (!enabled.getAsBoolean()) return RequestResult.DISABLED;
+        long owner = uid.getAsLong();
+        if (owner <= 0) return RequestResult.UNAUTHENTICATED;
+        if (worker == null) return request(List.of(), "force:登录后");
+        invalidate("账号登录已更新");
+        pending = new Pending(List.of(), "force:登录后", owner, session.getAsLong(), lifecycle);
+        status = new Status(Phase.WAITING, sequence, "正在获取歌单，请稍等片刻（等待上一轮任务退出）", 0, 0);
+        return RequestResult.STARTED;
+    }
     private void run(List<String[]> list, Ticket ticket) {
         current.set(ticket);
         try {
@@ -130,12 +146,18 @@ public final class SyncCoordinator {
                     if (!stopped && lifecycle != ticket.lifecycle() && status.phase() == Phase.WAITING)
                         status = new Status(Phase.IDLE, sequence, "", 0, 0);
                     notifyAll();
+                    Pending next = pending;
+                    pending = null;
+                    if (next != null && !stopped && next.lifecycle() == lifecycle && enabled.getAsBoolean()
+                            && next.uid() == uid.getAsLong() && next.session() == session.getAsLong())
+                        request(next.list(), next.reason());
                 }
             }
         }
     }
     public synchronized void invalidate(String reason) {
         lifecycle++;
+        pending = null;
         if (worker != null) {
             worker.interrupt();
             status = new Status(Phase.ABORTED, sequence, reason, 0, 0);

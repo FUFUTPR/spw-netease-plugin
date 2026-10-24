@@ -34,6 +34,8 @@ internal fun NativeAccountPage() {
     var confirmLogout by remember { mutableStateOf(false) }
     val rows = remember(st) { AccountReport.render(st).split("\n") }
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        val progress = syncProgressMessage(NativeUiState.sync)
+        if (progress.isNotBlank()) SaltText(progress, style = HostStyle.typography.bodyMedium)
         Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 rows.forEach { line ->
                     SaltText(

@@ -258,6 +258,14 @@ public final class StreamPrefetcher {
         }
     }
 
+    /** Failure signal for consumers waiting on complete local audio. */
+    static String failureOf(long songId, String level) {
+        Job j=recent;
+        if(j==null || j.songId!=songId || !j.level.equals(level)) return null;
+        if(j.failed || j.stopped || j.cancelled) return j.failWhy==null ? "音频预取已停止或失败" : j.failWhy;
+        return null;
+    }
+
     /** 一行摘要（配置页/日志用）。 */
     public static String stats() {
         Job j = recent;

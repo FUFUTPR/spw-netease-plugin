@@ -32,11 +32,54 @@
       "config": "music_cfg.json",
       "preferences": [
         {
+          "type": "list",
+          "key": "audio_level",
+          "title": "在线播放音质",
+          "summary": "实际档位以账号权限为准",
+          "entries": [
+            "标准 128k",
+            "较高 192k",
+            "极高 320k",
+            "无损 FLAC",
+            "Hi-Res",
+            "高清臻音",
+            "超清母带",
+            "沉浸声",
+            "杜比全景声"
+          ],
+          "entry_values": [
+            "standard",
+            "higher",
+            "exhigh",
+            "lossless",
+            "hires",
+            "sky",
+            "jymaster",
+            "jyeffect",
+            "dolby"
+          ],
+          "default_value": "lossless"
+        },
+        {
+          "type": "switch",
+          "key": "merge_playlists",
+          "title": "合并歌单",
+          "summary": "将网易云和本地音乐合并显示在歌曲里，关闭后歌曲里只显示本地歌单",
+          "default_value": true
+        },
+        {
           "type": "switch",
           "key": "search_box_enabled",
           "title": "搜索框",
           "summary": "在顶栏显示网易云歌曲搜索框",
           "default_value": true
+        },
+        {
+          "type": "button",
+          "title": "重新同步",
+          "summary": "立刻重跑歌单同步",
+          "arrow_type": "arrow",
+          "on_click": "com.example.netease.NeteasePlugin.syncNow"
         }
       ]
     },
@@ -96,49 +139,6 @@
       "title": "维护",
       "config": "config.json",
       "preferences": [
-        {
-          "type": "list",
-          "key": "audio_level",
-          "title": "在线播放音质",
-          "summary": "实际档位以账号权限为准",
-          "entries": [
-            "标准 128k",
-            "较高 192k",
-            "极高 320k",
-            "无损 FLAC",
-            "Hi-Res",
-            "高清臻音",
-            "超清母带",
-            "沉浸声",
-            "杜比全景声"
-          ],
-          "entry_values": [
-            "standard",
-            "higher",
-            "exhigh",
-            "lossless",
-            "hires",
-            "sky",
-            "jymaster",
-            "jyeffect",
-            "dolby"
-          ],
-          "default_value": "lossless"
-        },
-        {
-          "type": "button",
-          "title": "立即重新同步",
-          "summary": "立刻重跑歌单同步",
-          "arrow_type": "arrow",
-          "on_click": "com.example.netease.NeteasePlugin.syncNow"
-        },
-        {
-          "type": "switch",
-          "key": "merge_playlists",
-          "title": "合并歌单",
-          "summary": "将网易云和本地音乐合并显示在歌曲里，关闭后歌曲里只显示本地歌单",
-          "default_value": true
-        },
         {
           "type": "switch",
           "key": "dev_mode",

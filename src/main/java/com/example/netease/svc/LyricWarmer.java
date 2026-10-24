@@ -210,7 +210,9 @@ public final class LyricWarmer {
             }
             Properties p = new Properties();
             p.setProperty("busy_timeout", "5000");
-            c = drv().connect("jdbc:sqlite:" + db, p);
+            p.setProperty("open_mode", "1");
+            c = DataPaths.nativeLinux() ? com.example.netease.host.HostReadDatabase.open(db)
+                    : drv().connect("jdbc:sqlite:" + db, p);
             try (Statement s = c.createStatement()) {
                 s.execute("PRAGMA query_only=ON");
                 try (ResultSet r = s.executeQuery("SELECT id, path, title, artist, album FROM Track")) {

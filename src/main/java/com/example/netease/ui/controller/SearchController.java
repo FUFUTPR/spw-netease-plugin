@@ -420,6 +420,7 @@ public final class SearchController {
                 lastPlaybackReport = report;
                 boolean failed = report.contains("失败") || report.contains("为空");
                 String text = failed ? "播放失败：" + report : playbackText;
+                if(!failed && report.contains("正在准备本地兼容音频")) text="正在准备本地兼容音频…";
                 if (playback.started(pendingPlayRequest)) {
                     int row = lastPlaySongId == null ? -1 : indexOf(rows, lastPlaySongId);
                     String name = row >= 0 ? safeName(rows.get(row)) : playbackText.replace("正在解析：", "");
@@ -432,9 +433,10 @@ public final class SearchController {
                     changed = true;
                 }
             }
-            if (clock.getAsLong() - playbackStart >= PLAYBACK_TIMEOUT_MS) {
+            long timeout=lastPlaybackReport!=null && lastPlaybackReport.contains("本地兼容音频") ? 180_000L : PLAYBACK_TIMEOUT_MS;
+            if (clock.getAsLong() - playbackStart >= timeout) {
                 playing = false;
-                if (playbackText.startsWith("正在解析：")) {
+                if (playbackText.startsWith("正在解析：") || playbackText.startsWith("正在准备本地兼容音频")) {
                     playbackText = TEXT_PLAYBACK_TIMEOUT;
                     message = TEXT_PLAYBACK_TIMEOUT;
                 }

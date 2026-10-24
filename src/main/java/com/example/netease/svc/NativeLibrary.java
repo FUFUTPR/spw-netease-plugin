@@ -90,17 +90,13 @@ public final class NativeLibrary {
 
     /** 宿主数据目录：{@code %APPDATA%\Salt Player for Windows}。 */
     public static Path hostDataDir() {
-        String appData = System.getenv("APPDATA");
-        if (appData == null || appData.isBlank()) {
-            return null;
-        }
-        return Paths.get(appData, HOST_DIR_NAME);
+        return DataPaths.hostDataDirectory();
     }
 
     /** 宿主曲库文件。 */
     public static Path dbPath() {
         Path dir = hostDataDir();
-        return dir == null ? null : dir.resolve("spw.db");
+        return dir == null ? null : dir.resolve(DataPaths.nativeLinux() ? "sp.db" : "spw.db");
     }
 
     /** 宿主曲库是否可写（存在且非只读）。 */
@@ -145,7 +141,10 @@ public final class NativeLibrary {
             String name = LocalDateTime.now().format(STAMP) + "-" + why;
             Path dir = Files.createDirectories(root.resolve(name));
             int n = 0;
-            for (String suffix : new String[]{"", "-wal", "-shm"}) {
+            if (DataPaths.nativeLinux()) {
+                com.example.netease.host.HostReadDatabase.backup(db, dir.resolve(db.getFileName()));
+                n = 1;
+            } else for (String suffix : new String[]{"", "-wal", "-shm"}) {
                 Path src = db.resolveSibling(db.getFileName() + suffix);
                 if (Files.isRegularFile(src)) {
                     Files.copy(src, dir.resolve(src.getFileName().toString()), StandardCopyOption.REPLACE_EXISTING);
@@ -252,18 +251,19 @@ public final class NativeLibrary {
             sql.execUpdate("DELETE FROM PlaylistTrack WHERE playlistId=? AND "+trackColumn+"=?",pid,tid);
             return true;
         }
+        layout.ensureLocalScope();
         long now=System.currentTimeMillis();
         if(sql.rows("SELECT 1 FROM Playlist WHERE id=?",pid).isEmpty()) {
             var orders=sql.rows("SELECT COALESCE(MAX(`order`),0)+1 FROM Playlist");
             insertPlaylist(sql,layout,pid,title,"网易云音乐 · 由「网易云音乐接入」插件同步",now,
-                ((Number)orders.getFirst()[0]).intValue(),0);
+                Math.toIntExact(asLong(orders.getFirst()[0])),0);
         }
         // Existing tracks retain sort, favorites, playback counters and their stable artwork key.
         if(sql.rows("SELECT 1 FROM Track WHERE id=?",tid).isEmpty()) upsertTrack(sql,tid,song,prefix,0,now);
         var member=sql.rows("SELECT 1 FROM PlaylistTrack WHERE playlistId=? AND "+trackColumn+"=?"+
             (layout.modern ? " AND isRemoved=0" : ""),pid,tid);
         if(member.isEmpty()) {
-            int order=((Number)sql.rows("SELECT COALESCE(MAX(`order`),-1)+1 FROM PlaylistTrack WHERE playlistId=?",pid).getFirst()[0]).intValue();
+            int order=Math.toIntExact(asLong(sql.rows("SELECT COALESCE(MAX(`order`),-1)+1 FROM PlaylistTrack WHERE playlistId=?",pid).getFirst()[0]));
             insertLink(sql,layout,pid,tid,order,now);
         }
         return true;
@@ -406,9 +406,49 @@ public final class NativeLibrary {
     public static Result writeOn(Sql sql, List<Entry> entries, String urlPrefix, String backup,
                                  List<CoverArt.Cover> covers, Map<String, Long> playlistCoverTimes)
             throws Exception {
+        return writeOn(sql, entries, urlPrefix, backup, covers, playlistCoverTimes, 0);
+    }
+
+    public static Result writeSyncEntryOn(Sql sql, Entry entry, String urlPrefix, String backup, int order)
+            throws Exception {
+        return writeOn(sql, List.of(entry), urlPrefix, backup, null, null, order);
+    }
+
+    /** Publish names first without deleting any existing playlist membership. */
+    public static int publishPlaylistHeadersOn(Sql raw, List<Entry> entries) throws Exception {
+        SqlSchema sql = requireSchema(raw, "歌单清单");
+        PlaylistLinks layout = new PlaylistLinks(sql);
+        layout.ensureLocalScope();
+        int order = 0;
+        for (Entry entry : entries) {
+            String id = PLAYLIST_PREFIX + entry.playlistId();
+            layout.checkPlaylist(id);
+            var old = sql.rows("SELECT coverModifiedTime FROM Playlist WHERE id=?", id);
+            long coverTime = old.isEmpty() ? 0 : asLong(old.getFirst()[0]);
+            insertPlaylist(sql, layout, id, entry.name(), "网易云音乐 · 由「网易云音乐接入」插件同步",
+                    System.currentTimeMillis(), order++, coverTime);
+        }
+        return order;
+    }
+
+    public static int writePlaylistCoverTimesOn(Sql sql, Map<String, Long> times) throws Exception {
+        int changed = 0;
+        for (var entry : times.entrySet()) {
+            if (!entry.getKey().startsWith(PLAYLIST_PREFIX)) throw new IllegalArgumentException("不是插件歌单");
+            sql.exec("UPDATE Playlist SET coverModifiedTime=? WHERE id=? AND isUserEditedCover=0",
+                    entry.getValue(), entry.getKey());
+            changed++;
+        }
+        return changed;
+    }
+
+    private static Result writeOn(Sql sql, List<Entry> entries, String urlPrefix, String backup,
+                                 List<CoverArt.Cover> covers, Map<String, Long> playlistCoverTimes, int startOrder)
+            throws Exception {
         // P0：整轮写入依赖「能探 schema、能拿影响行数」的通道；拿不到就直接抛，不许将就。
         SqlSchema schema = requireSchema(sql, "整轮写入");
         PlaylistLinks layout = new PlaylistLinks(schema);
+        layout.ensureLocalScope();
         for (Entry entry : entries) layout.checkPlaylist(PLAYLIST_PREFIX + entry.playlistId());
         int pls = 0;
         int pairs = 0;                                  // 歌单×曲目 对数（== links）
@@ -420,7 +460,11 @@ public final class NativeLibrary {
             String plId = PLAYLIST_PREFIX + e.playlistId();
             resetPlaylistForSync(schema, plId);
             long coverTime = playlistCoverTimes == null ? 0L : playlistCoverTimes.getOrDefault(plId, 0L);
-            insertPlaylist(schema, layout, plId, e.name(), "网易云音乐 · 由「网易云音乐接入」插件同步", now, pls, coverTime);
+            if (playlistCoverTimes == null) {
+                var old = schema.rows("SELECT coverModifiedTime FROM Playlist WHERE id=?", plId);
+                if (!old.isEmpty()) coverTime = asLong(old.getFirst()[0]);
+            }
+            insertPlaylist(schema, layout, plId, e.name(), "网易云音乐 · 由「网易云音乐接入」插件同步", now, startOrder + pls, coverTime);
             pls++;
             playlistIds.add(plId);
             int order = 0;
@@ -1237,6 +1281,12 @@ public final class NativeLibrary {
      */
     public static int deleteOrphanLinks() throws Exception {
         String backup = backupOnce("repair");
+        if (DataPaths.nativeLinux()) {
+            Integer removed = com.example.netease.host.HostSqlBridge.onHostConnection(NativeLibrary::deleteOrphanLinksOn);
+            if (removed == null) throw new IllegalStateException("宿主曲库连接不可用，请稍后重试");
+            PluginLog.i(TAG, "清孤儿关联行：删掉 " + removed + " 行（宿主同连接；备份 " + backup + "）");
+            return removed;
+        }
         try (Connection c = open()) {
             c.setAutoCommit(false);
             try {
@@ -1263,6 +1313,13 @@ public final class NativeLibrary {
             PluginLog.e(TAG, "清孤儿关联行失败（已回滚）：" + t.getMessage(), t);
             throw t;
         }
+    }
+
+    public static int deleteOrphanLinksOn(Sql raw) throws Exception {
+        SqlSchema sql = requireSchema(raw, "清孤儿关联行");
+        PlaylistLinks layout = new PlaylistLinks(sql);
+        return sql.execUpdate("DELETE FROM PlaylistTrack AS pt WHERE pt.playlistId LIKE ? AND "
+                + layout.missingTrack() + (layout.modern ? " AND length(pt.mergeStateData)=0" : ""), ID_PREFIX + "%");
     }
 
     /**
@@ -1449,6 +1506,7 @@ public final class NativeLibrary {
     // ------------------------------------------------------------------ SQL
 
     private static Connection open() throws Exception {
+        if (DataPaths.nativeLinux()) return com.example.netease.host.HostReadDatabase.open(dbPath());
         Driver d = (Driver) Class.forName("org.sqlite.JDBC").getDeclaredConstructor().newInstance();
         Properties p = new Properties();
         p.setProperty("busy_timeout", "5000");

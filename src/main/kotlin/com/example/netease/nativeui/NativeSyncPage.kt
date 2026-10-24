@@ -14,6 +14,17 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.netease.svc.SyncCoordinator
 
+internal fun syncProgressMessage(status: SyncCoordinator.Status?): String {
+    status ?: return ""
+    val text = when (status.phase()) {
+        SyncCoordinator.Phase.WAITING -> "正在获取歌单，请稍等片刻"
+        SyncCoordinator.Phase.FETCHING -> "正在获取歌单与歌曲，请稍等片刻"
+        SyncCoordinator.Phase.WRITING -> "正在显示歌单与歌曲，请稍等片刻"
+        else -> return ""
+    }
+    return text + if (status.total() > 0) "（${status.completed()} / ${status.total()} 个歌单）" else ""
+}
+
 /**
  * 只读同步状态块（docs/PLAN.md §7.4）：直接映射 SyncCoordinator 既有 Status，
  * 不新写同步流程、不按动画时间伪造进度或百分比；「立即同步」仍走 SYNC.request。

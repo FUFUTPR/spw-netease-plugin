@@ -291,9 +291,11 @@ public final class NextTrack {
      * 那条路径的区别是「没有事务、没有 INSERT/UPDATE/DELETE」）。</p>
      */
     private static Connection openReadOnly() throws Exception {
+        if (com.example.netease.core.DataPaths.nativeLinux()) return com.example.netease.host.HostReadDatabase.open(NativeLibrary.dbPath());
         Driver d = (Driver) Class.forName("org.sqlite.JDBC").getDeclaredConstructor().newInstance();
         Properties p = new Properties();
         p.setProperty("busy_timeout", "3000");
+        p.setProperty("open_mode", "1");
         return d.connect("jdbc:sqlite:" + NativeLibrary.dbPath(), p);
     }
 

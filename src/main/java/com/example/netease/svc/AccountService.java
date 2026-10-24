@@ -1339,6 +1339,7 @@ public final class AccountService {
                     acc.vipName(), 0L));
             PluginLog.i(TAG, "init：恢复登录态成功，昵称=" + acc.nickname() + "，uid=" + acc.userId()
                     + "，VIP=" + acc.vip() + "（" + (acc.vipName().isEmpty() ? "档位未知" : acc.vipName()) + "）");
+            fireAfterLogin();
         } catch (Throwable t) {
             String m = String.valueOf(t.getMessage());
             if (m.contains("301")) {

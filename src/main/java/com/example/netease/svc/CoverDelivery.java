@@ -301,12 +301,15 @@ public final class CoverDelivery {
     }
 
     private static java.sql.Connection openReadOnly(Path db) throws Exception {
+        if (com.example.netease.core.DataPaths.nativeLinux()) return com.example.netease.host.HostReadDatabase.open(db);
         try {
             Class.forName("org.sqlite.JDBC");           // 插件类加载器看不见 jar 里的驱动注册（真机踩过）
         } catch (Throwable ignored) {
             // 已注册时忽略
         }
-        java.sql.Connection c = java.sql.DriverManager.getConnection("jdbc:sqlite:" + db);
+        java.util.Properties properties = new java.util.Properties();
+        properties.setProperty("open_mode", "1");
+        java.sql.Connection c = java.sql.DriverManager.getConnection("jdbc:sqlite:" + db, properties);
         try (java.sql.Statement s = c.createStatement()) {
             s.execute("PRAGMA query_only=ON");
         }

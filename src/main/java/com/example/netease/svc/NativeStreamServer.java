@@ -73,6 +73,13 @@ public final class NativeStreamServer {
     private final Map<String, Cached> cache = new LinkedHashMap<>();
     private final AtomicLong served = new AtomicLong();
     private final java.util.Set<Socket> clients = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private final Map<Long,Long> requested = new LinkedHashMap<>();
+    /** Audio GET evidence, independent of the host's Ready/position callbacks. */
+    public static long lastPlaybackRequest(long songId) {
+        var self=instance;
+        if(self==null) return 0;
+        synchronized(self.requested) { return self.requested.getOrDefault(songId,0L); }
+    }
     /** 0.11.19 首字节打点的节流表（songId → 上次打点毫秒）：同一首一秒内只报一次，防宿主重试刷屏。 */
     private final Map<Long, Long> firstByteAt = new LinkedHashMap<>();
 
@@ -375,6 +382,14 @@ public final class NativeStreamServer {
 
     private void proxy(long songId, String method, Map<String, String> headers, OutputStream out,
                        String requestedLevel) throws IOException {
+        String agent=headers.getOrDefault("user-agent","").toLowerCase(Locale.ROOT);
+        if("GET".equals(method) && !"true".equals(headers.get("x-netease-internal"))
+                && !agent.startsWith("curl/") && !agent.startsWith("wget/")) {
+            synchronized(requested) {
+                requested.put(songId,System.currentTimeMillis());
+                while(requested.size()>256) requested.remove(requested.keySet().iterator().next());
+            }
+        }
         long t0 = System.currentTimeMillis();
         String range = headers.get("range");
         String ua = String.valueOf(headers.get("user-agent"));
