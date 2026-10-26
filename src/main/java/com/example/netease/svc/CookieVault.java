@@ -1,6 +1,7 @@
 package com.example.netease.svc;
 
 import com.example.netease.core.PluginLog;
+import com.example.netease.core.PrivateFiles;
 
 import javax.crypto.Cipher;
 import javax.crypto.spec.GCMParameterSpec;
@@ -104,16 +105,21 @@ public final class CookieVault {
 
     /** 保存明文 cookie 串：每次全新随机 IV；{@code null}/空白 = {@link #clear()}。 */
     public static void save(String plaintextCookie) {
+        saveVerified(plaintextCookie);
+    }
+
+    /** True only when these exact credentials were stored and decrypted successfully. */
+    public static boolean saveVerified(String plaintextCookie) {
         if (plaintextCookie == null || plaintextCookie.isBlank()) {
             clear();
-            return;
+            return !exists();
         }
         synchronized (LOCK) {
             Path f = vaultFile;
             byte[] k = key;
             if (f == null || k == null) {
                 PluginLog.w("account", "CookieVault 未 init，凭据未保存");
-                return;
+                return false;
             }
             try {
                 byte[] iv = new byte[IV_BYTES];
@@ -131,11 +137,14 @@ public final class CookieVault {
                 Files.createDirectories(f.getParent());
                 backupHostConfigIfAny(f);
                 writeAtomically(f, text);
+                if (!plaintextCookie.equals(load())) throw new java.io.IOException("凭据回读与本次写入不一致");
                 PluginLog.i("account", "凭据已加密保存：" + f.getFileName() + "（密文 " + text.length()
                         + " 字符 / 明文长度 " + plaintextCookie.length() + "，内容不落日志）");
+                return true;
             } catch (Throwable t) {
                 // 加密/写盘失败绝不能向上抛：UI 线程或账号线程都要活着
                 PluginLog.e("account", "凭据保存失败（明文不入日志）", t);
+                return false;
             }
         }
     }
@@ -214,21 +223,20 @@ public final class CookieVault {
             if (kf != null && Files.isRegularFile(kf)) {
                 byte[] raw = Files.readAllBytes(kf);
                 if (raw.length == KEY_BYTES) {
+                    PrivateFiles.restrict(kf, false);
+                    if (Files.isRegularFile(vaultFile)) PrivateFiles.restrict(vaultFile, false);
                     return raw;
                 }
                 Path bak = kf.resolveSibling(KEY_BACKUP_NAME);
-                try {
-                    Files.move(kf, bak, StandardCopyOption.REPLACE_EXISTING);
-                } catch (Throwable ignored) {
-                    // 备份失败也要继续重建，否则永远无法保存
-                }
+                Files.copy(kf, bak);
+                PrivateFiles.restrict(bak, false);
                 PluginLog.w("account", "密钥文件长度异常（" + raw.length + "B ≠ " + KEY_BYTES
                         + "B），已备份为 " + KEY_BACKUP_NAME + " 并重建（旧凭据将无法解密）");
             }
             byte[] fresh = new byte[KEY_BYTES];
             RANDOM.nextBytes(fresh);
             if (kf != null) {
-                Files.write(kf, fresh);
+                PrivateFiles.atomicWrite(kf, fresh);
             }
             PluginLog.i("account", "已生成新的凭据密钥：" + KEY_NAME + "（" + KEY_BYTES + "B CSPRNG）");
             return fresh;
@@ -239,7 +247,7 @@ public final class CookieVault {
     }
 
     /** 若目标文件已存在且不是 {@code v1:} 格式，先备份（避免吞掉宿主写的 account.json 配置）。 */
-    private static void backupHostConfigIfAny(Path f) {
+    private static void backupHostConfigIfAny(Path f) throws Exception {
         try {
             if (!Files.isRegularFile(f)) {
                 return;
@@ -250,20 +258,15 @@ public final class CookieVault {
             }
             Path bak = f.resolveSibling(BACKUP_NAME);
             Files.copy(f, bak, StandardCopyOption.REPLACE_EXISTING);
+            PrivateFiles.restrict(bak, false);
             PluginLog.w("account", "account.json 内含非保险柜内容（疑似宿主配置），已备份为 " + BACKUP_NAME + " 后再写入凭据");
-        } catch (Throwable ignored) {
-            // 备份失败不阻断保存
+        } catch (Exception error) {
+            throw new java.io.IOException("备份原凭据配置失败，原文件已保留", error);
         }
     }
 
     /** 临时文件 + 原子替换写盘（避免半截文件被 load 读到）。 */
     private static void writeAtomically(Path f, String text) throws Exception {
-        Path tmp = f.resolveSibling(f.getFileName() + ".tmp");
-        Files.writeString(tmp, text, StandardCharsets.UTF_8);
-        try {
-            Files.move(tmp, f, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-        } catch (Throwable t) {
-            Files.move(tmp, f, StandardCopyOption.REPLACE_EXISTING);
-        }
+        PrivateFiles.atomicWrite(f, text.getBytes(StandardCharsets.UTF_8));
     }
 }

@@ -219,7 +219,7 @@ public final class Device {
         if (added == 0) {
             return;
         }
-        Http.setCookies(merged.toString());
+        Http.updateCookies(merged.toString());
         PluginLog.i(TAG, "设备身份已补进 cookie jar：" + added + " 项，deviceId=" + maskedOf(deviceId())
                 + "（已有项一律保留）");
     }

@@ -535,24 +535,7 @@ public final class PlaybarCover {
             if (pendingCycle != cycle) pending.set(-1L);
         }
         if (hostPlaying && auth > 0L) VoxzenBridge.observePlaying(auth);
-        if (auth == sid && sid > 0 && (sid == musicDeliveredId || sid == lastOk)
-                && lastOwnerInjected != null && "lost:null".equals(currentSourceOf(lastOwnerInjected))) {
-            // Reloading the same track from a playlist can clear artwork without an Ended event.
-            // Reuse the decoded owner, only with positive evidence that the current source was cleared.
-            if (System.currentTimeMillis() - sameTrackRepairAt > 2000L) {
-                sameTrackRepairAt=System.currentTimeMillis();
-                if (ownerReusable(lastOwnerInjected)) {
-                    redeliverOnly(lastOwnerInjected);
-                    armLanding(sid,lastOwnerInjected);
-                } else {
-                    // The host may have released the previous owner during reload.
-                    // Decode already cached bytes instead of re-emitting a closed bitmap or downloading.
-                    String key=CoverStore.refKeyOf(sid);
-                    byte[] bytes=key==null ? null : cached(key);
-                    if(bytes!=null && inject(bytes,SIDE,sid)==null) armLanding(sid,lastOwnerInjected);
-                }
-            }
-        }
+        restoreRetainedCover(auth);
         if (sid <= 0L || sid == musicDeliveredId || sid == lastOk || pending.get() == sid) {
             return;             // 没认到曲 / 这一首已经进场（或正在投）：绝不第二次进场
         }
@@ -724,6 +707,14 @@ public final class PlaybarCover {
             clearLanding();                          // 换曲即失效 / 观察窗口到点
             return;
         }
+        if (!ownerReusable(owner)) {
+            // A released owner must not be re-emitted by the short landing watch.
+            // Leave the empty source intact for restoreRetainedCover to rebuild
+            // from local bytes, rather than disguising a closed bitmap as held.
+            clearLanding();
+            return;
+        }
+        if (playing <= 0L) return; // unknown/local selection is not evidence to restore old artwork
         String verdict = currentSourceOf(owner);
         boolean auto = autoContinued(at);
         int repairs;
@@ -853,7 +844,8 @@ public final class PlaybarCover {
     }
 
     /**
-     * 兜底轮询（1.5 s）的观测：<b>宿主封面档位补键</b> —— 0.11.18 起<b>只补缓存键、不投递</b>。
+     * 兜底轮询（1.5 s）：宿主封面档位补键与已显示封面的按需保留。
+     * 0.12.19 起，当前曲已投递的图被明确清空时允许恢复；健康图不重发，未起播曲不首次出图。
      *
      * <p>{@code com.xuncorp.voxzen.image.CoverSizePolicy.INSTANCE.getCurrentTier()} 是宿主决定
      * 「读多大内嵌图 / 用哪个缓存键」的尺寸档位（缓存键形如
@@ -873,8 +865,13 @@ public final class PlaybarCover {
      */
     public static void onPoll() {
         try {
-            playingNow();                // 0.11.49：每拍刷新权威当前曲（onMusicStarted / onStreamServe 只读它）
+            long authoritativeId = playingNow();
             landCheck();                 // 0.11.21：先复核上一首投出去的封面还在不在（自动接续那一轮会补投）
+            // A paused track produces no new Ready/isPlaying callback. The initial
+            // 4-8s landing watch cannot repair an image cleared hours later.
+            // Only restore an already delivered, authoritative current track when
+            // the host actually cleared its source; healthy images are untouched.
+            restoreRetainedCover(authoritativeId);
             int tier = hostTier();
             if (tier > 0 && tier != lastTier) {
                 int prevTier = lastTier;
@@ -1175,6 +1172,52 @@ public final class PlaybarCover {
     }
 
     private static volatile long sameTrackRepairAt;
+    private static void restoreRetainedCover(long authoritativeId) {
+        long sid = currentSongId;
+        Object owner = lastOwnerInjected;
+        if (authoritativeId <= 0L || authoritativeId != sid || sid != lastOk
+                || owner == null || "Buffering".equals(hostState) || "Ended".equals(hostState)
+                || !retainedSourceCleared(owner)) return;
+        long now = System.currentTimeMillis();
+        if (now - sameTrackRepairAt <= 2000L) return;
+        sameTrackRepairAt = now;
+        if (ownerReusable(owner)) {
+            redeliverOnly(owner);
+            armLanding(sid, owner);
+        } else {
+            String key = CoverStore.refKeyOf(sid);
+            byte[] bytes = key == null ? null : cached(key);
+            // Retaining a paused image must never fetch audio or remote artwork.
+            // A memory eviction is recoverable from the existing local original.
+            if (bytes == null && key != null) bytes = CoverStore.originalImage(key);
+            if (bytes == null || inject(bytes, SIDE, sid) != null) return;
+            armLanding(sid, lastOwnerInjected);
+        }
+        PluginLog.i(TAG, "恢复当前曲已清空的封面：netease-" + sid + "（本地原图/同实例，不触发播放）");
+    }
+
+    /** The monitor may emit null without also clearing the scaled-image cache. */
+    private static boolean retainedSourceCleared(Object owner) {
+        String source = currentSourceOf(owner);
+        if (!"same".equals(source) && !"lost:null".equals(source)) return false;
+        Object monitor = staticObj(cls("com.xuncorp.voxzen.service.PlaybackMonitor"), "INSTANCE");
+        Object flow = callStaticArgs(cls("com.xuncorp.voxzen.service.PlaybackMonitorKt"), "getImageBitmap", monitor);
+        Object replay = callArgs(flow, "getReplayCache");
+        if (replay instanceof List<?> values && !values.isEmpty()) {
+            Object displayed = values.get(values.size() - 1);
+            if (displayed == null) return true;
+            if (displayed != owner) return false; // never overwrite another non-empty image
+        }
+        if ("lost:null".equals(source)) return true;
+        // A host idle cleanup can close the bitmap but leave both references in
+        // place. A positive closed flag is loss too; closeRequested alone is not.
+        try {
+            var closed = owner.getClass().getDeclaredField("closed");
+            closed.setAccessible(true);
+            synchronized (owner) { return closed.getBoolean(owner); }
+        } catch (Throwable unreadable) { return false; }
+    }
+
     private static boolean ownerReusable(Object owner) {
         try { synchronized(owner) {
             var closing=owner.getClass().getDeclaredField("closeRequested");closing.setAccessible(true);

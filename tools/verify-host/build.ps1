@@ -39,6 +39,10 @@ if ($code -ne 0) {
 }
 
 Write-Host "▶ 替换资源目录 $out"
+$linuxResources = Join-Path $out 'linux-x86_64'
+if (Test-Path -LiteralPath $linuxResources) {
+    Copy-Item -LiteralPath $linuxResources -Destination (Join-Path $tmp 'linux-x86_64') -Recurse
+}
 if (Test-Path -LiteralPath $out) { Remove-Item -LiteralPath $out -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $out | Out-Null
 Copy-Item -Path (Join-Path $tmp '*') -Destination $out -Recurse -Force

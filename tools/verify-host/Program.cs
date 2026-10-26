@@ -49,6 +49,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Windows.Forms;
+using System.Text.Json;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
 
@@ -220,6 +221,17 @@ namespace VerifyHost
         {
             try { Console.OutputEncoding = Encoding.UTF8; } catch { /* 无控制台 */ }
             var opt = Parse(args);
+            if (Array.IndexOf(args, "--init-stdin") >= 0)
+            {
+                try {
+                    string first = Console.ReadLine();
+                    if (first == null || !first.StartsWith("init ") || first.Length > 131072) return 2;
+                    using var init = JsonDocument.Parse(Convert.FromBase64String(first.Substring(5)));
+                    if (init.RootElement.GetProperty("session").GetString() != opt.Session) return 2;
+                    opt.Url = init.RootElement.GetProperty("url").GetString() ?? "";
+                    opt.Cookie = init.RootElement.GetProperty("cookies").GetString() ?? "";
+                } catch { Say("fail invalid-init"); return 2; }
+            }
             Opt = opt;
             _wantVisible = !opt.Strict;      // 严格模式默认隐藏，等 Java 在布局就绪后发 show
             Say("start pid=" + Environment.ProcessId + (string.IsNullOrEmpty(opt.Session) ? "" : " session=" + opt.Session));
@@ -378,13 +390,19 @@ namespace VerifyHost
                         : opt.DataDir;
                     Directory.CreateDirectory(dataDir);
                     var env = await CoreWebView2Environment.CreateAsync(null, dataDir);
-                    await web.EnsureCoreWebView2Async(env);
+                    var options = env.CreateCoreWebView2ControllerOptions();
+                    options.IsInPrivateModeEnabled = true;
+                    await web.EnsureCoreWebView2Async(env, options);
 
                     var core = web.CoreWebView2;
                     Say("webview2 " + (core?.Environment?.BrowserVersionString ?? "?"));
                     core.Settings.AreDefaultContextMenusEnabled = true;
                     core.Settings.IsStatusBarEnabled = false;
                     core.Settings.AreDevToolsEnabled = false;
+                    await core.AddScriptToExecuteOnDocumentCreatedAsync("document.addEventListener('keydown',e=>{if(e.isTrusted&&e.key==='Escape'){chrome.webview.postMessage('spw-verify-escape');e.preventDefault();}},true);");
+                    core.WebMessageReceived += (_, ev) => {
+                        try { if (ev.TryGetWebMessageAsString() == "spw-verify-escape") Say("escape-requested"); } catch { }
+                    };
                     core.WindowCloseRequested += (_, __) => Say("window-close-requested");
                     core.NewWindowRequested += (_, ev) =>
                     {
@@ -452,7 +470,7 @@ namespace VerifyHost
             {
                 try
                 {
-                    var stdin = new StreamReader(Console.OpenStandardInput(), new UTF8Encoding(false));
+                    var stdin = Console.In;
                     string line;
                     while ((line = stdin.ReadLine()) != null)
                     {
@@ -607,7 +625,7 @@ namespace VerifyHost
         private static int SeedCookies(CoreWebView2 core, Options opt)
         {
             if (core == null || string.IsNullOrWhiteSpace(opt.Cookie)) return 0;
-            string host = HostOf(opt.Url);
+            string host = ".music.163.com";
             if (string.IsNullOrEmpty(host)) return 0;
             int n = 0;
             foreach (string raw in opt.Cookie.Split(';'))
@@ -620,7 +638,7 @@ namespace VerifyHost
                     string name = item.Substring(0, eq).Trim();
                     string value = item.Substring(eq + 1);
                     var c = core.CookieManager.CreateCookie(name, value, host, "/");
-                    c.IsHttpOnly = false;                    // 插件 jar 里的 HttpOnly 只影响 JS 可见性，这里放开
+                    c.IsHttpOnly = name == "MUSIC_U" || name == "MUSIC_A";
                     c.IsSecure = true;                       // 验证页是 https
                     c.Expires = DateTime.Now.AddDays(30);    // 设了 Expires 就不再是会话 cookie（IsSession 只读，设完自动变 false）
                     core.CookieManager.AddOrUpdateCookie(c);
@@ -640,7 +658,7 @@ namespace VerifyHost
             try
             {
                 if (core == null) return;
-                string host = HostOf(opt.Url);
+                string host = "https://music.163.com";
                 if (string.IsNullOrEmpty(host)) return;
                 var list = await core.CookieManager.GetCookiesAsync(host);
                 var sb = new System.Text.StringBuilder();
@@ -649,7 +667,7 @@ namespace VerifyHost
                     if (sb.Length > 0) sb.Append("; ");
                     sb.Append(c.Name).Append('=').Append(c.Value);
                 }
-                Say("cookies " + sb);
+                Say("cookies-session " + opt.Session + " " + sb);
             }
             catch (Exception ex)
             {

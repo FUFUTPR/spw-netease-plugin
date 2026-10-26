@@ -15,8 +15,11 @@ import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.input.pointer.*
 import androidx.compose.animation.*
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.awt.LocalAwtWindow
@@ -46,7 +49,7 @@ internal object HostGlobalSearch {
     private var navigator = WeakReference<Any>(null)
     // MainWindowContent supplies these *inside* root(), so its sibling overlays
     // cannot inherit them. Capture the actual host states at the title call site.
-    private data class PopupMaterial(val wallpaper: Any, val popup: Any)
+    private data class PopupMaterial(val wallpaper: Any, val popup: Any, val window: Any?)
     private var popupMaterial by mutableStateOf<PopupMaterial?>(null)
     private val hazeLocals by lazy {
         val type = Class.forName("com.xuncorp.voxzen.ui.component.\u052c")
@@ -102,6 +105,17 @@ internal object HostGlobalSearch {
         @Composable override fun Content(call: UiHookCall) {
             NativeModalEscapeGate(LocalAwtWindow.current)
             val focus = LocalFocusManager.current
+            val window = LocalAwtWindow.current
+            // 材质只属于主标题所在窗口/展示代次：窗口变了立即丢弃，绝不给新窗口复用旧 PopupHazeState。
+            val material = popupMaterial?.takeIf { it.window == null || it.window === window }
+            LaunchedEffect(material == null, HostCloudSongMenu.dialogOpen()) {
+                if (material == null && HostCloudSongMenu.dialogOpen()) HostCloudSongMenu.stop()
+            }
+            LaunchedEffect(mainTitle, HostCloudSongMenu.dialogOpen(), material) {
+                // 标题退场后，等云歌单菜单的退场动画结束再释放材质（否则 PopupHazeState 会缺席）。
+                if (!mainTitle && !HostCloudSongMenu.dialogOpen()) popupMaterial = null
+            }
+            DisposableEffect(Unit) { onDispose { popupMaterial = null } }
             Box(Modifier.fillMaxSize().onGloballyPositioned { rootBounds = it.boundsInRoot() }
                 .onPointerEvent(PointerEventType.Press, PointerEventPass.Initial) { event ->
                     val position = event.changes.firstOrNull()?.position?.plus(rootBounds.topLeft)
@@ -113,21 +127,22 @@ internal object HostGlobalSearch {
                     }
                 }) {
                 draw(root, listOf(call.arguments.getOrNull(0) ?: false), currentComposer)
-                if (mainTitle && titleBounds.width > 0f && !NativeUiPresentation.anyDialogOpen()) {
+                if (mainTitle && titleBounds.width > 0f) {
+                    // 对话框打开时不卸载搜索层：它是真实的焦点归还目标（按窗口登记），
+                    // 卸载会让关闭对话框后无目标可还。这里只做不可交互 + 淡出。
+                    val interactive = !NativeUiPresentation.anyDialogOpen()
                     HostSaltTheme.read()?.let { snapshot ->
                         CompositionLocalProvider(LocalSaltSnapshot provides snapshot) {
-                            if (enabled) Overlay()
-                            SyncNotice()
+                            if (enabled) Overlay(interactive)
+                            if (interactive) SyncNotice()
                         }
                     }
                 }
-                if (HostCloudSongMenu.removal != null || HostCloudSongMenu.message.isNotBlank()) {
-                    popupMaterial?.let { material ->
-                        HostSaltTheme.read()?.let { snapshot ->
-                            CompositionLocalProvider(LocalSaltSnapshot provides snapshot,
-                                hazeLocals[0] provides material.wallpaper, hazeLocals[1] provides material.popup) {
-                                HostCloudSongMenu.Dialogs()
-                            }
+                if (HostCloudSongMenu.dialogOpen() && material != null) {
+                    HostSaltTheme.read()?.let { snapshot ->
+                        CompositionLocalProvider(LocalSaltSnapshot provides snapshot,
+                            hazeLocals[0] provides material.wallpaper, hazeLocals[1] provides material.popup) {
+                            HostCloudSongMenu.Dialogs()
                         }
                     }
                 }
@@ -138,7 +153,8 @@ internal object HostGlobalSearch {
         @Composable override fun Content(call: UiHookCall) {
             val main = (call.arguments.getOrNull(0) as? Enum<*>)?.name == "Main"
             val nav = currentComposer.consume(navigatorLocal)
-            val material = if(main) PopupMaterial(currentComposer.consume(hazeLocals[0]), currentComposer.consume(hazeLocals[1])) else null
+            val material = if(main) PopupMaterial(currentComposer.consume(hazeLocals[0]),
+                currentComposer.consume(hazeLocals[1]), LocalAwtWindow.current) else null
             SideEffect {
                 mainTitle = main
                 if (main) { popupMaterial = material; if (nav != null) navigator = WeakReference(nav) }
@@ -146,7 +162,8 @@ internal object HostGlobalSearch {
             Box(Modifier.fillMaxWidth().onGloballyPositioned { titleBounds = it.boundsInRoot() }) {
                 draw(title, call.arguments.take(4), currentComposer)
             }
-            DisposableEffect(Unit) { onDispose { mainTitle = false; navigator.clear(); popupMaterial = null } }
+            // 只标记标题已退场；材质由 RootHook 在「无对话框且无退场动画」后统一释放，避免撤得太早。
+            DisposableEffect(Unit) { onDispose { mainTitle = false; navigator.clear() } }
         }
     }
     private fun navigate(): Boolean {
@@ -162,18 +179,29 @@ internal object HostGlobalSearch {
 
     @Composable private fun BoxScope.SyncNotice() {
         val message = syncProgressMessage(NativeUiState.sync)
-        if (message.isBlank()) return
+        // 退场期间仍显示最后一条同步提示，避免文字先消失、卡片再淡出。
+        val shown = rememberRetained(message.takeIf { it.isNotBlank() })
         val width = with(LocalDensity.current) { titleBounds.width.toDp() }
-        Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth()
-            .padding(start = if (width >= 640.dp) 244.dp else 16.dp, end = 16.dp, bottom = 104.dp)) {
-            SaltText(message, modifier = Modifier.fillMaxWidth()
+        AnimatedVisibility(
+            visible = message.isNotBlank(),
+            modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth()
+                .padding(start = if (width >= 640.dp) 244.dp else 16.dp, end = 16.dp, bottom = 104.dp),
+            enter = fadeIn(Motion.state()) + expandVertically(Motion.state(), expandFrom = Alignment.Top),
+            exit = fadeOut(Motion.state()) + shrinkVertically(Motion.state(), shrinkTowards = Alignment.Top),
+        ) {
+            SaltText(shown.orEmpty(), modifier = Modifier.fillMaxWidth()
                 .background(HostStyle.colors.subBackground, RoundedCornerShape(10.dp)).padding(12.dp),
                 style = HostStyle.typography.bodyMedium)
         }
     }
-    @Composable private fun BoxScope.Overlay() {
+    @Composable private fun BoxScope.Overlay(interactive: Boolean) {
         val density = LocalDensity.current
         val focus = LocalFocusManager.current
+        val overlayAlpha by animateFloatAsState(
+            targetValue = if (interactive) 1f else 0f,
+            animationSpec = Motion.state(),
+            label = "search-overlay-alpha",
+        )
         val x = with(density) { (titleBounds.left - rootBounds.left).toDp() }
         val y = with(density) { (titleBounds.top - rootBounds.top).toDp() }
         val w = with(density) { titleBounds.width.toDp() }
@@ -188,8 +216,11 @@ internal object HostGlobalSearch {
         val suggestionWidth = minOf(w - contentLeft - 16.dp, maxOf(320.dp, minOf(740.dp, fieldWidth)))
         val suggestionLeft = (left + (fieldWidth - suggestionWidth) / 2)
             .coerceIn(contentLeft, (w - 16.dp - suggestionWidth).coerceAtLeast(contentLeft))
-        Box(Modifier.offset(x + left, y).width(fieldWidth).height(h), contentAlignment = Alignment.Center) {
-            NativeTopSearchField(::navigate, Modifier.widthIn(max = 740.dp).fillMaxWidth().height(minOf(34.dp, h)))
+        Box(Modifier.offset(x + left, y).width(fieldWidth).height(h).alpha(overlayAlpha)
+            .then(if (interactive) Modifier else Modifier.blockAllPointerEvents().clearAndSetSemantics {}),
+            contentAlignment = Alignment.Center) {
+            NativeTopSearchField(::navigate, Modifier.widthIn(max = 740.dp).fillMaxWidth().height(minOf(34.dp, h)),
+                interactive = interactive)
         }
         Box(Modifier.offset(x + suggestionLeft, y + h).width(suggestionWidth), contentAlignment = Alignment.TopCenter) {
             AnimatedVisibility(NativeTopSearch.expanded,

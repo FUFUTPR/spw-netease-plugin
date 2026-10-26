@@ -111,6 +111,7 @@ public final class VerifyEmbedController {
     /** 状态监听器（回调在控制器锁内同步执行；实现里不要调用控制器方法）。 */
     public interface Listener {
         void onStateChanged(State state);
+        default void onDismissRequested() { }
     }
 
     /** 探针注入点：怎么起助手进程（生产实现用 ProcessBuilder；探针换成 FakeVerifyHost）。 */
@@ -131,6 +132,10 @@ public final class VerifyEmbedController {
 
         /** 验证页回传的 cookie 头（按名合并回插件 jar）。 */
         void mergeCookies(String header);
+        default void mergeCookies(String header, long expectedEpoch) { mergeCookies(header); }
+        default void mergeCookies(String header, long expectedEpoch, java.util.function.BooleanSupplier valid) {
+            if (valid.getAsBoolean()) mergeCookies(header, expectedEpoch);
+        }
 
         /** 账号纪元：变化即表示登录态换代，旧输出一律丢弃。 */
         long accountEpoch();
@@ -171,7 +176,7 @@ public final class VerifyEmbedController {
         @Override
         public void mergeCookies(String header) {
             try {
-                AccountService.mergeCookies(header);
+                AccountService.mergeCookies(header, AccountService.sessionEpoch());
             } catch (Throwable t) {
                 PluginLog.w(TAG, "回灌验证页 cookie 失败：" + t.getClass().getSimpleName());
             }
@@ -184,6 +189,13 @@ public final class VerifyEmbedController {
             } catch (Throwable t) {
                 return 0L;
             }
+        }
+
+        @Override public void mergeCookies(String header, long expectedEpoch) {
+            AccountService.mergeCookies(header, expectedEpoch);
+        }
+        @Override public void mergeCookies(String header, long expectedEpoch, java.util.function.BooleanSupplier valid) {
+            AccountService.mergeCookies(header, expectedEpoch, valid);
         }
 
         @Override
@@ -208,7 +220,7 @@ public final class VerifyEmbedController {
     private State state = new State(Phase.IDLE, "", "", false, false, 0, 0);
 
     /** 会话代次：每次关闭 / 每次 open 递增；旧进程的输出按它丢弃。 */
-    private long generation;
+    private volatile long generation;
     /** 当前（或最近一次）会话 id。 */
     private String sessionId = "";
     /** 当前验证地址 / 来源 / 父窗口标题 / 内容区逻辑尺寸 / 缩放（retry 复用）。 */
@@ -225,6 +237,7 @@ public final class VerifyEmbedController {
     private long epoch;
 
     private Process process;
+    private volatile long parentXid;
     private BufferedWriter stdin;
     private boolean embedded;
 
@@ -252,7 +265,9 @@ public final class VerifyEmbedController {
 
     /** The bundled WebView2 child-window helper requires a Windows runtime. */
     public static boolean nativeSupported() {
-        return System.getProperty("os.name", "").toLowerCase(Locale.ROOT).startsWith("windows");
+        if (System.getProperty("os.name", "").toLowerCase(Locale.ROOT).startsWith("windows")) return true;
+            try { return com.example.netease.ui.LinuxVerifySurface.supported(); }
+        catch (Throwable unsupported) { return false; }
     }
 
     /**
@@ -374,6 +389,10 @@ public final class VerifyEmbedController {
         }
     }
 
+    public void focus() {
+        synchronized (lock) { if (state.phase() == Phase.READY) sendLocked("focus"); }
+    }
+
     /** 关闭后用同一 url/尺寸重开（新 session id）；未打开时等价于 open 的参数校验。 */
     public void retry() {
         String u;
@@ -444,7 +463,7 @@ public final class VerifyEmbedController {
         if (launcher == DEFAULT_LAUNCHER && !nativeSupported()) {
             synchronized (lock) {
                 this.url = url;
-                publish(Phase.FAILED, "当前系统暂不支持内嵌行为验证；若登录必须完成行为验证，该流程暂不可用。", false);
+                publish(Phase.FAILED, "当前系统暂不支持此内嵌验证后端；需要 Windows WebView2，或 Linux X11/XWayland 与系统 WebKitGTK 4.1。", false);
             }
             return;
         }
@@ -475,7 +494,20 @@ public final class VerifyEmbedController {
             go = gen == generation && state.phase() == Phase.STARTING;
         }
         if (go) {
-            launch(gen, cookie);
+            if (launcher == DEFAULT_LAUNCHER && com.example.netease.core.DataPaths.nativeLinux()) {
+                Thread startup = new Thread(() -> {
+                    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
+                    try {
+                        while ((parentXid = com.example.netease.ui.LinuxVerifySurface.handle()) == 0) {
+                            synchronized (lock) { if (gen != generation) return; }
+                            if (System.nanoTime() >= deadline) { fail(gen, "Linux 验证承载区域未就绪，可重试"); return; }
+                            Thread.sleep(50);
+                        }
+                        launch(gen, cookie);
+                    } catch (Throwable error) { fail(gen, "Linux 验证组件缺失或不可用，请检查 GTK3 / WebKitGTK 4.1 依赖"); }
+                }, "verify-embed-start");
+                startup.setDaemon(true); startup.start();
+            } else launch(gen, cookie);
         }
     }
 
@@ -519,7 +551,7 @@ public final class VerifyEmbedController {
                 return;
             }
             sid = sessionId;
-            args = buildArgs(cookie);
+            args = buildArgs(launcher == DEFAULT_LAUNCHER ? "" : cookie);
         }
         Process p;
         try {
@@ -538,6 +570,14 @@ public final class VerifyEmbedController {
             if (keep) {
                 process = p;
                 stdin = new BufferedWriter(new OutputStreamWriter(p.getOutputStream(), StandardCharsets.UTF_8));
+                if (launcher == DEFAULT_LAUNCHER) {
+                    try {
+                        String payload = com.example.netease.core.Json.stringify(java.util.Map.of(
+                                "url", url, "cookies", cookie == null ? "" : cookie, "session", sid, "scale", scale));
+                        stdin.write("init " + java.util.Base64.getEncoder().encodeToString(payload.getBytes(StandardCharsets.UTF_8)));
+                        stdin.newLine(); stdin.flush();
+                    } catch (IOException error) { destroyQuietly(p); fail(gen, "验证组件初始化管道已关闭"); return; }
+                }
             }
         }
         if (!keep) {
@@ -552,14 +592,17 @@ public final class VerifyEmbedController {
     /** 组装参数（不含 exePath）；契约固定顺序。调用方需持有 lock。 */
     private List<String> buildArgs(String cookie) {
         List<String> args = new ArrayList<>(32);
-        args.add("--url");
-        args.add(url);
+        if (launcher == DEFAULT_LAUNCHER) args.add("--init-stdin");
+        else { args.add("--url"); args.add(url); }
         args.add("--pid");
         args.add(String.valueOf(ProcessHandle.current().pid()));
         args.add("--session");
         args.add(sessionId);
         args.add("--parent-class");
         args.add(PARENT_CLASS);
+        if (launcher == DEFAULT_LAUNCHER && com.example.netease.core.DataPaths.nativeLinux()) {
+            args.add("--parent-xid"); args.add(Long.toUnsignedString(parentXid));
+        }
         if (!parentTitle.isEmpty()) {
             args.add("--parent-title");
             args.add(parentTitle);
@@ -585,6 +628,7 @@ public final class VerifyEmbedController {
     /** 助手 exe 路径（可能为 null：目录或文件缺失）。 */
     private static String resolveExePath() {
         try {
+            if (com.example.netease.core.DataPaths.nativeLinux()) return VerifyHostPaths.linuxFile("VerifyHost").toString();
             Path dir = VerifyHostPaths.helperDir();
             if (dir == null) {
                 return null;
@@ -623,6 +667,7 @@ public final class VerifyEmbedController {
 
     /** 解析一行助手输出（先剥前缀再比关键字；载荷值不进日志）。 */
     private void onLine(long gen, String raw) {
+        boolean dismiss = false;
         String line = stripPrefix(raw);
         if (line.isEmpty()) {
             return;
@@ -692,15 +737,23 @@ public final class VerifyEmbedController {
             } else if (line.startsWith("cookie-in ")) {
                 String n = line.substring("cookie-in ".length()).trim();
                 host.log("i", "登录 cookie 已灌进验证页：" + n + " 项");
-            } else if (line.startsWith("cookies ")) {
-                String header = line.substring("cookies ".length()).trim();
+            } else if (line.startsWith("cookies ") || line.startsWith("cookies-session ")) {
+                String header;
+                if (line.startsWith("cookies-session ")) {
+                    String[] parts = line.split(" ", 3);
+                    if (parts.length != 3 || !sessionId.equals(parts[1])) return;
+                    header = parts[2].trim();
+                } else header = line.substring("cookies ".length()).trim();
                 if (!header.isEmpty()) {
                     host.log("d", "验证页回传 cookie 头（长度 " + header.length() + "，值不进日志）");
-                    host.mergeCookies(header);
+                    host.mergeCookies(header, epoch, () -> generation == gen);
                 }
             } else if (line.startsWith("cookie-dump-failed ")) {
                 String cls = line.substring("cookie-dump-failed ".length()).trim();
                 host.log("w", "验证页 cookie 导出失败：" + cls);
+            } else if (line.equals("escape-requested")) {
+                dismiss = true;
+                doClose = true;
             } else if (line.equals("window-close-requested")) {
                 doClose = true;
             } else if (line.startsWith("fail ")) {
@@ -708,6 +761,9 @@ public final class VerifyEmbedController {
             } else {
                 host.log("d", "未识别的助手输出（长度 " + line.length() + "）");
             }
+        }
+        if (dismiss && listener != null) {
+            try { listener.onDismissRequested(); } catch (Throwable ignored) { }
         }
         if (doClose) {
             close();
@@ -773,7 +829,9 @@ public final class VerifyEmbedController {
             sentRect = null;
             sentVisible = null;
             if (ph == Phase.STARTING) {
-                publish(Phase.FAILED, "验证组件提前退出（退出码 " + code + "）", true);
+                publish(Phase.FAILED, com.example.netease.core.DataPaths.nativeLinux() && code == 127
+                        ? "缺少 Linux 验证依赖：GTK3、WebKitGTK 4.1 或 JSON-GLib，请安装后重试"
+                        : "验证组件提前退出（退出码 " + code + "）", true);
             } else {
                 publish(Phase.FAILED, "验证组件已退出（退出码 " + code + "），可重试", true);
             }
@@ -966,8 +1024,9 @@ public final class VerifyEmbedController {
         };
     }
 
-    private static String rectCommand(int[] rect) {
-        return "rect " + rect[0] + " " + rect[1] + " " + rect[2] + " " + rect[3];
+    private String rectCommand(int[] rect) {
+        return "rect " + rect[0] + " " + rect[1] + " " + rect[2] + " " + rect[3]
+                + (launcher == DEFAULT_LAUNCHER && com.example.netease.core.DataPaths.nativeLinux() ? " " + scale : "");
     }
 
     private static String stripPrefix(String raw) {

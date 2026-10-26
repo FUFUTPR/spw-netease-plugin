@@ -15,6 +15,22 @@ import java.net.URL;
  * 避免两套定位逻辑漂移。</p>
  */
 public final class VerifyHostPaths {
+    /** Extract to private data storage: workshop ZIP extraction need not preserve executable bits. */
+    public static Path linuxFile(String name) throws Exception {
+        Path directory = helperDir();
+        if (directory == null || !name.matches("VerifyHost|libverify-surface\\.so")) throw new java.io.IOException("未找到 Linux 验证组件");
+        Path source = directory.resolve("linux-x86_64").resolve(name);
+        byte[] bytes = Files.readAllBytes(source);
+        String hash = java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(bytes));
+        Path root = com.example.netease.core.PrivateFiles.directory(DataPaths.data().resolve("verify-runtime"));
+        Path targetDir = com.example.netease.core.PrivateFiles.directory(root.resolve(hash));
+        Path target = targetDir.resolve(name);
+        if (!Files.isRegularFile(target) || !java.util.Arrays.equals(bytes, Files.readAllBytes(target)))
+            com.example.netease.core.PrivateFiles.atomicWrite(target, bytes);
+        if (name.equals("VerifyHost") && Files.getFileAttributeView(target, java.nio.file.attribute.PosixFileAttributeView.class) != null)
+            Files.setPosixFilePermissions(target, java.nio.file.attribute.PosixFilePermissions.fromString("rwx------"));
+        return target;
+    }
 
     private static final String OVERRIDE_PROP = "spw.verifyhost";
 
@@ -58,9 +74,7 @@ public final class VerifyHostPaths {
         try {
             Path d = DataPaths.data();
             if (d != null) {
-                Path target = d.resolve("verify-webview");
-                DataPaths.ensure(target);
-                return target;
+                return com.example.netease.core.PrivateFiles.directory(d.resolve("verify-webview"));
             }
         } catch (Throwable t) {
             PluginLog.w("verify-host", "取插件数据目录失败：" + t.getClass().getSimpleName());

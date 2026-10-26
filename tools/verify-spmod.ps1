@@ -1360,6 +1360,23 @@ try {
         $vhOff = if ($vhOk) { '' } else { '助手缺失或与资源目录不一致 —— 原生登录页的风控验证区域起不来（批次 4 会退回失败提示）' }
         Add-Result 'P10.39' '内嵌验证助手随包：classes/verify-host 下有 VerifyHost.exe 与 VerifyHost.dll，且与 src/main/resources/verify-host 逐字节相同（0.12.0 批次 4）' $vhOk ($vhParts -join '；') $vhOff
 
+        $linuxHelperOk=$true
+        $linuxHelperParts=@()
+        foreach($linuxLeaf in @('VerifyHost','libverify-surface.so')) {
+            $linuxBytes=Get-EntryBytes $zip ('classes/verify-host/linux-x86_64/'+$linuxLeaf)
+            $linuxSource=Join-Path $RepoRoot ('src/main/resources/verify-host/linux-x86_64/'+$linuxLeaf)
+            $linuxSame=$null -ne $linuxBytes -and $linuxBytes.Length -gt 64 -and (Test-Path -LiteralPath $linuxSource)
+            if($linuxSame) {
+                $linuxOriginal=[IO.File]::ReadAllBytes($linuxSource)
+                $linuxSame=$linuxOriginal.Length -eq $linuxBytes.Length
+                if($linuxSame){for($i=0;$i -lt $linuxBytes.Length;$i++){if($linuxBytes[$i] -ne $linuxOriginal[$i]){$linuxSame=$false;break}}}
+                $linuxSame=$linuxSame -and $linuxBytes[0] -eq 127 -and $linuxBytes[1] -eq 69 -and $linuxBytes[2] -eq 76 -and $linuxBytes[3] -eq 70 -and $linuxBytes[4] -eq 2 -and $linuxBytes[5] -eq 1 -and $linuxBytes[18] -eq 62 -and $linuxBytes[19] -eq 0
+            }
+            $linuxHelperOk=$linuxHelperOk -and $linuxSame
+            $linuxHelperParts+="$linuxLeaf ELF x86_64/source-match=$linuxSame"
+        }
+        Add-Result 'P10.50' 'Linux WebKitGTK 辅助程序和 JAWT 桥为 ELF x86_64，且与资源逐字节相同' $linuxHelperOk ($linuxHelperParts -join '; ') 'Linux 验证组件缺失、架构不符或打包了旧文件'
+
         # ---------- P10.25 退役不留痕（0.11.30 需求②）：独立扫码窗 ui/LoginWindow 整类不得回潮
         #  0.11.30 用户需求②「扫码登录与验证码登录使用完全相同的样式，不允许再弹出独立窗口」⇒
         #  扫码并入 ui/LoginDialog 的分段切换，ui.LoginWindow 整类退役；它的接线路标（showLoginDialog）

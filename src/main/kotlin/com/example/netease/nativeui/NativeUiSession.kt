@@ -17,6 +17,9 @@ import com.example.netease.ui.controller.VerifyEmbedController
 import java.util.Timer
 import java.util.TimerTask
 import java.util.concurrent.Callable
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.LinkedBlockingQueue
 import java.util.function.Consumer
 
 /**
@@ -25,7 +28,7 @@ import java.util.function.Consumer
  * <ul>
  *   <li>搜索/歌单/登录控制器各 tick 一次（只轮询宿主播放回报、账号变化与二维码状态，不做网络请求）；</li>
  *   <li>每 4 次 tick（1 秒）刷新一次只读同步状态与账号快照；</li>
- *   <li>按需刷新本地歌单列表（读盘在 tick 线程上，不阻塞 UI 线程）。</li>
+ *   <li>按需刷新本地歌单列表（读盘在独立单线程 daemon "native-ui-local-read" 上，tick 只投递合并信号，不阻塞 UI 线程也不拖延同一拍的二维码/登录轮询）。</li>
  * </ul>
  *
  * <p>关闭页面只改 [NativeUiState.visible]，不停止 tick、不取消已提交的同步；
@@ -57,6 +60,9 @@ internal object NativeUiSession {
     @Volatile
     private var verifyAreaLaidOut: Boolean = false
 
+    /** 验证窗属于哪一代登录；旧代次迟到的 READY/布局回调不得把新会话的窗显示出来。 */
+    private var verifyGeneration: Long = -1L
+
     @Volatile
     private var timer: Timer? = null
 
@@ -69,12 +75,23 @@ internal object NativeUiSession {
     @Volatile
     private var lastLocalSource: String = ""
 
+    /** 上一次刷新看到的同步阶段；用于只失效一次云端菜单缓存。 */
+    @Volatile
+    private var lastSyncPhase: SyncCoordinator.Phase? = null
+
     /** 上一次 tick 看到的账号 epoch；变化时让搜索页作废旧请求（PLAN §8.2）。 */
     @Volatile
     private var lastAccountEpoch: Long = -1L
 
     @Volatile
     private var started: Boolean = false
+
+    /**
+     * 登录展示代次：每次打开/关闭登录页或停用插件都会递增。
+     * 退场页按住旧代次，它的按钮回调/DisposableEffect 只能影响旧代次，不能开关新一代登录或验证窗。
+     */
+    @Volatile
+    private var loginGeneration: Long = 0L
 
     /**
      * 登录异步通道：与 [loginController] 同生命周期。关登录面板（[closeLogin]）只关控制器、
@@ -86,6 +103,16 @@ internal object NativeUiSession {
     /** 本地保存异步通道：与 [localSaveController] 同生命周期，[stop] 时在锁外关闭。 */
     @Volatile
     private var localSaveAsync: LocalSaveAsync? = null
+
+    /**
+     * 本地歌单读盘的唯一线程（250ms tick 只投递信号）。读盘曾直接跑在 tick 线程上，
+     * 大目录扫描会推迟同一拍里的二维码/登录轮询；现在读盘与 tick 解耦，信号队列自然合并重复请求。
+     */
+    @Volatile
+    private var localReader: ExecutorService? = null
+
+    /** 读盘请求信号；[stop] 用 shutdownNow 中断 take()，队列无需额外关闭。 */
+    private val localReadSignals = LinkedBlockingQueue<Unit>()
 
     /** 安装 Hook 成功后启动；失败只记日志，绝不影响插件其它功能。 */
     fun start() {
@@ -148,6 +175,7 @@ internal object NativeUiSession {
             )
             timer = t
             started = true
+            startLocalReader()
             refreshSync()
             refreshAccount()
             PluginLog.i(TAG, "原生页面控制器已启动（tick=250ms）")
@@ -184,6 +212,7 @@ internal object NativeUiSession {
             verify = verifyController,
             loginAsync = loginAsync,
             localSaveAsync = localSaveAsync,
+            localReader = localReader,
         )
         timer = null
         searchController = null
@@ -193,8 +222,11 @@ internal object NativeUiSession {
         verifyController = null
         loginAsync = null
         localSaveAsync = null
+        localReader = null
         verifyAreaLaidOut = false
         started = false
+        // 停用后任何仍挂着的旧登录页/验证页回调都失效，不能再启动助手进程。
+        loginGeneration++
         return closing
     }
 
@@ -245,9 +277,16 @@ internal object NativeUiSession {
         } catch (t: Throwable) {
             PluginLog.d(TAG, "关闭本地保存异步通道失败（已忽略）：$t")
         }
+        // 读盘线程是 daemon；shutdownNow 中断 take()，读盘中的 LocalPlaylists.list() 返回后自行退出。
+        try {
+            closing.localReader?.shutdownNow()
+        } catch (t: Throwable) {
+            PluginLog.d(TAG, "关闭本地歌单读盘线程失败（已忽略）：$t")
+        }
         // LatestTask.close 只 shutdownNow、不 join；这里做有界回收确认，避免反复启停累积线程。
         awaitWorkersGone(LOGIN_THREAD_NAME)
         awaitWorkersGone(LOCAL_SAVE_THREAD_NAME)
+        awaitWorkersGone(LOCAL_READ_THREAD_NAME)
     }
 
     /** 等待指定名字的 daemon 线程退出（有界；超时只记日志，绝不阻塞停用流程）。 */
@@ -282,6 +321,7 @@ internal object NativeUiSession {
         val verify: VerifyEmbedController?,
         val loginAsync: LoginAsync?,
         val localSaveAsync: LocalSaveAsync?,
+        val localReader: ExecutorService?,
     )
 
     fun search(): SearchController? = searchController
@@ -289,6 +329,9 @@ internal object NativeUiSession {
     fun playlist(): PlaylistController? = playlistController
 
     fun login(): LoginController? = loginController
+
+    /** 当前登录展示代次；页面把它冻结进快照，所有动作先比对这个值。 */
+    fun loginGeneration(): Long = loginGeneration
 
     fun localSave(): LocalSaveController? = localSaveController
 
@@ -318,6 +361,7 @@ internal object NativeUiSession {
     /** 打开唯一的登录流程（幂等；重复调用不会重复创建二维码轮询）。 */
     @Synchronized
     fun openLogin() {
+        loginGeneration++
         NativeUiState.visible = true
         NativeUiState.page = NativePage.LOGIN
         try {
@@ -329,12 +373,17 @@ internal object NativeUiSession {
     }
 
     /** 关闭登录流程：停轮询、关验证窗，不清登录态（取消 ≠ 退出账号）。 */
+    @Synchronized
     fun closeLogin() {
+        // 先换代次：退场页的 DisposableEffect/Actions 立刻失效；真正的控制器关闭仍在本方法内完成。
+        loginGeneration++
         try {
             loginController?.close()
         } catch (t: Throwable) {
             PluginLog.d(TAG, "关闭登录流程失败（已忽略）：$t")
         }
+        // 登录会话一结束就关掉原生验证子窗：不能等退场页 120ms 后的 onDispose（那时代次已换）。
+        closeEmbeddedVerify()
         refreshAccount()
     }
 
@@ -376,6 +425,8 @@ internal object NativeUiSession {
                 searchController?.onAccountChanged()
                 NativeTopSearch.accountChanged()
                 NativeSongMenu.stop()
+                // 账号切换时旧账号的移除确认/结果提示必须立即关闭，并让 (epoch,uid) 菜单缓存失效。
+                HostCloudSongMenu.stop()
             }
             searchController?.tick()
             NativeTopSearch.tick()
@@ -388,7 +439,7 @@ internal object NativeUiSession {
             }
             if (localRefreshRequested) {
                 localRefreshRequested = false
-                refreshLocalNow()
+                localReadSignals.offer(Unit)
             }
             val source = NativeUiState.playlist?.sourceName() ?: ""
             if (source != lastLocalSource) {
@@ -404,7 +455,14 @@ internal object NativeUiSession {
     /** 只读同步状态：与配置页 syncStatus() 读同一份 Status，不新增同步流程。 */
     fun refreshSync() {
         try {
-            NativeUiState.sync = NeteasePlugin.syncStatusSnapshot()
+            val status = NeteasePlugin.syncStatusSnapshot()
+            NativeUiState.sync = status
+            val phase = status?.phase()
+            // 同步刚完成时云歌单/成员关系可能已变；只在 COMPLETED 的上升沿失效一次。
+            if (phase == SyncCoordinator.Phase.COMPLETED && lastSyncPhase != SyncCoordinator.Phase.COMPLETED) {
+                CloudMenuCache.invalidateAll()
+            }
+            lastSyncPhase = phase
         } catch (t: Throwable) {
             PluginLog.d(TAG, "读取同步状态失败（已忽略）：$t")
         }
@@ -437,11 +495,44 @@ internal object NativeUiSession {
         localRefreshRequested = true
     }
 
-    private fun refreshLocalNow() {
-        try {
-            NativeUiState.localEntries = LocalPlaylists.list()
-        } catch (t: Throwable) {
-            PluginLog.d(TAG, "读取本地歌单列表失败（已忽略）：$t")
+    /**
+     * 启动读盘线程：信号到达后清空队列（合并读盘期间的重复请求），读盘前后各校验一次
+     * started 与账号 epoch——账号在扫描期间切换时结果属于旧账号，直接丢弃并重新排队。
+     */
+    private fun startLocalReader() {
+        val executor = Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, LOCAL_READ_THREAD_NAME).apply { isDaemon = true }
+        }
+        localReader = executor
+        executor.execute {
+            // 线程身份也参与退出判断：stop() 后立刻 start() 会重建 executor，
+            // 旧线程不能继续消费新会话的信号、更不能把旧一代的列表写进新会话。
+            while (started && localReader === executor) {
+                try {
+                    localReadSignals.take()
+                } catch (e: InterruptedException) {
+                    return@execute
+                }
+                localReadSignals.clear()
+                if (!started || localReader !== executor) {
+                    return@execute
+                }
+                val epoch = sessionEpoch()
+                val entries = try {
+                    LocalPlaylists.list()
+                } catch (t: Throwable) {
+                    PluginLog.d(TAG, "读取本地歌单列表失败（已忽略）：$t")
+                    null
+                } ?: continue
+                if (!started || localReader !== executor) {
+                    return@execute
+                }
+                if (epoch != sessionEpoch()) {
+                    localReadSignals.offer(Unit)
+                    continue
+                }
+                NativeUiState.localEntries = entries
+            }
         }
     }
 
@@ -504,6 +595,7 @@ internal object NativeUiSession {
             NativeUiState.verify = vc.state()
             return
         }
+        verifyGeneration = loginGeneration
         try {
             vc.open(
                 url,
@@ -552,9 +644,22 @@ internal object NativeUiSession {
         }
     }
 
+    /** 只有仍属于当前登录代次时才隐藏；旧退场页晚到的布局回调不能盖掉新会话。 */
+    internal fun hideEmbeddedVerifyFor(generation: Long) {
+        if (loginGeneration != generation) return
+        hideEmbeddedVerify()
+    }
+
+    /** 只有仍属于当前登录代次时才关闭；旧退场页的 onDispose 不能关掉新一代验证窗。 */
+    internal fun closeEmbeddedVerifyFor(generation: Long) {
+        if (loginGeneration != generation) return
+        closeEmbeddedVerify()
+    }
+
     /** 关闭登录流程/停用插件时关闭验证区域（有界退出助手进程）。 */
     internal fun closeEmbeddedVerify() {
         verifyAreaLaidOut = false
+        verifyGeneration = -1L
         try {
             verifyController?.close()
         } catch (t: Throwable) {
@@ -568,7 +673,8 @@ internal object NativeUiSession {
         if (vc.state().phase() != VerifyEmbedController.Phase.READY) {
             return
         }
-        val show = verifyAreaLaidOut && NativeUiState.visible && NativeUiState.page == NativePage.LOGIN
+        val show = verifyAreaLaidOut && verifyGeneration == loginGeneration &&
+            NativeUiState.visible && NativeUiState.page == NativePage.LOGIN
         try {
             vc.setVisible(show)
         } catch (t: Throwable) {
@@ -577,6 +683,7 @@ internal object NativeUiSession {
     }
 
     private object VerifyListener : VerifyEmbedController.Listener {
+        override fun onDismissRequested() { java.awt.EventQueue.invokeLater { closeLogin() } }
         override fun onStateChanged(state: VerifyEmbedController.State) {
             NativeUiState.verify = state
             // 就绪/失败都可能发生在后台线程，这里只更新 Compose state 并同步可见性（控制器内部有锁）。
@@ -684,4 +791,7 @@ internal object NativeUiSession {
     private const val LOGIN_THREAD_NAME = "native-ui-login"
 
     private const val LOCAL_SAVE_THREAD_NAME = "native-ui-local-save"
+
+    /** 本地歌单读盘线程；tick 只投递合并信号，读盘不占 250ms 拍子。 */
+    private const val LOCAL_READ_THREAD_NAME = "native-ui-local-read"
 }

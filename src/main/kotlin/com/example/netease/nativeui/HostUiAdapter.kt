@@ -9,6 +9,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Composer
 import androidx.compose.runtime.CompositionLocal
 import androidx.compose.runtime.currentComposer
+import androidx.compose.runtime.remember
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.text.TextStyle
@@ -105,7 +106,7 @@ internal object HostSaltTheme {
     /** SaltDynamicColors（light/dark 两套 SaltColors）。 */
     private const val DYNAMIC_COLORS_CLASS = "androidx.compose.ui.ʴ"
     /** SaltConfigs（isDarkTheme 等）。 */
-    private const val CONFIGS_CLASS = "androidx.compose.ui.ˤ"
+    internal const val CONFIGS_CLASS = "androidx.compose.ui.ˤ"
     /** SaltTextStyles（main/sub/paragraph/largeTitle）。 */
     private const val TEXT_STYLES_CLASS = "androidx.compose.ui.ʲ"
     /** SaltShapes（small/medium/large）。 */
@@ -132,6 +133,14 @@ internal object HostSaltTheme {
 
     /** SaltShapes：small,medium,large。 */
     private val SHAPE_GETTERS = listOf("Ϳ", "Ԩ", "ԩ")
+
+    /** 颜色/字体/圆角的中文名：只用于失败原因，让界面与日志能指出是哪一个宿主符号。 */
+    private val COLOR_NAMES = listOf(
+        "强调色", "主文字", "次文字", "背景", "次级背景", "弹层",
+        "描边", "强调前景", "成功", "警告", "错误",
+    )
+    private val TEXT_STYLE_NAMES = listOf("main", "sub", "paragraph", "largeTitle")
+    private val SHAPE_NAMES = listOf("small", "medium", "large")
 
     /** SaltTheme 下的实际配色（来自宿主当前 dark/light 的一套 SaltColors）。 */
     internal class Palette(
@@ -181,6 +190,45 @@ internal object HostSaltTheme {
      */
     internal fun colorFromPacked(packed: Long): Color = Color(packed.toULong())
 
+    /**
+     * 一次 [Reader.measureInto] 的实测值，供缓存按键比较。
+     *
+     * <p>比较的是“读到的值”而不是 4 个 Local 的实例身份。宿主 1.19.2 的 AppTheme
+     * （com.xuncorp.voxzen.ui.theme.Ԩ#Ϳ）每次执行都会重新构造 SaltThemeConfigs /
+     * SaltDynamicColors / SaltTextStyles / SaltShapes 并作为 staticCompositionLocalOf 的值
+     * 传进 SaltTheme：Local 身份每次都变，但主题值通常不变。反过来，SaltColors / SaltShapes
+     * 的字段虽然是 final，内部却是 MutableState（getter 走 State.getValue()），所以不能只
+     * 比对身份、跳过 getter —— 每次组合都要把 23 个 getter 读一遍，让 Snapshot 的真实
+     * 响应依赖全部建立。字节码证据见 harness/theme/THEME-IMMUTABILITY.md。</p>
+     */
+    private class Measured {
+        val colors = LongArray(COLOR_GETTERS.size)
+        val textStyles = arrayOfNulls<TextStyle>(TEXT_STYLE_GETTERS.size)
+        val shapes = arrayOfNulls<Shape>(SHAPE_GETTERS.size)
+        var dark = false
+
+        /** 值相等：颜色比较位模式，字体/圆角比较宿主提供的不可变值对象（equals）。 */
+        fun sameValuesAs(other: Measured): Boolean {
+            if (dark != other.dark) return false
+            if (!colors.contentEquals(other.colors)) return false
+            for (i in textStyles.indices) {
+                if (textStyles[i] != other.textStyles[i]) return false
+            }
+            for (i in shapes.indices) {
+                if (shapes[i] != other.shapes[i]) return false
+            }
+            return true
+        }
+
+        /** 只在值变化、确定要重建 Snapshot 时复制一次，避免每次组合都分配数组。 */
+        fun copyFrom(other: Measured) {
+            dark = other.dark
+            System.arraycopy(other.colors, 0, colors, 0, colors.size)
+            for (i in textStyles.indices) textStyles[i] = other.textStyles[i]
+            for (i in shapes.indices) shapes[i] = other.shapes[i]
+        }
+    }
+
     private class Reader(
         val configs: CompositionLocal<Any?>,
         val dynamicColors: CompositionLocal<Any?>,
@@ -193,50 +241,114 @@ internal object HostSaltTheme {
         val textStyleGetters: List<Method>,
         val shapeGetters: List<Method>,
     ) {
+        /** 只读 isDarkTheme；四个 Local 为空的判定需要它（缺值时返回 null）。 */
+        fun darkOf(configsValue: Any?): Boolean? =
+            if (configsValue == null) null else isDark.invoke(configsValue) as? Boolean
+
+        /**
+         * 一次完整读取（11 个颜色 + 4 个字体 + 3 个圆角 getter，共 23 次反射），写进调用方
+         * 传入的 [Measured]；不分配 Snapshot，供缓存按值逐项比较。
+         *
+         * <p>读不到时抛出带宿主符号名的异常，由调用方记录成界面/日志可读的失败原因。</p>
+         */
+        fun measureInto(
+            values: Measured,
+            dynamicValue: Any,
+            stylesValue: Any,
+            shapesValue: Any,
+            dark: Boolean,
+        ) {
+            values.dark = dark
+            val colorsMethod = if (dark) darkColors else lightColors
+            val saltColors = colorsMethod.invoke(dynamicValue)
+                ?: throw IllegalStateException("宿主配色不可读：" + DYNAMIC_COLORS_CLASS + "#" + colorsMethod.name)
+            for (i in values.colors.indices) {
+                val getter = colorGetters[i]
+                values.colors[i] = getter.invoke(saltColors) as? Long
+                    ?: throw IllegalStateException(
+                        "宿主颜色不可读：" + COLORS_CLASS + "#" + getter.name +
+                            "（" + COLOR_NAMES.getOrElse(i) { "第 " + i + " 个" } + "）"
+                    )
+            }
+            for (i in values.textStyles.indices) {
+                val getter = textStyleGetters[i]
+                values.textStyles[i] = getter.invoke(stylesValue) as? TextStyle
+                    ?: throw IllegalStateException(
+                        "宿主字体不可读：" + TEXT_STYLES_CLASS + "#" + getter.name +
+                            "（" + TEXT_STYLE_NAMES.getOrElse(i) { "第 " + i + " 个" } + "）"
+                    )
+            }
+            for (i in values.shapes.indices) {
+                val getter = shapeGetters[i]
+                values.shapes[i] = getter.invoke(shapesValue) as? Shape
+                    ?: throw IllegalStateException(
+                        "宿主圆角不可读：" + SHAPES_CLASS + "#" + getter.name +
+                            "（" + SHAPE_NAMES.getOrElse(i) { "第 " + i + " 个" } + "）"
+                    )
+            }
+        }
+
+        /** 用刚读到的值组装 Snapshot（不重新反射）。 */
+        fun snapshotOf(values: Measured): Snapshot = Snapshot(
+            dark = values.dark,
+            palette = Palette(
+                highlight = colorFromPacked(values.colors[0]),
+                text = colorFromPacked(values.colors[1]),
+                subText = colorFromPacked(values.colors[2]),
+                background = colorFromPacked(values.colors[3]),
+                subBackground = colorFromPacked(values.colors[4]),
+                popup = colorFromPacked(values.colors[5]),
+                stroke = colorFromPacked(values.colors[6]),
+                onHighlight = colorFromPacked(values.colors[7]),
+                success = colorFromPacked(values.colors[8]),
+                warning = colorFromPacked(values.colors[9]),
+                error = colorFromPacked(values.colors[10]),
+            ),
+            textStyles = TypeSet(
+                main = values.textStyles[0]!!,
+                sub = values.textStyles[1]!!,
+                paragraph = values.textStyles[2]!!,
+                largeTitle = values.textStyles[3]!!,
+            ),
+            shapes = ShapeSet(
+                small = values.shapes[0]!!,
+                medium = values.shapes[1]!!,
+                large = values.shapes[2]!!,
+            ),
+        )
+
+        /** 无缓存构建路径：读一次完整快照；行为与 0.12.18 一致（UiMountScopeProbe 仍反射调用）。 */
+        fun build(configsValue: Any, dynamicValue: Any, stylesValue: Any, shapesValue: Any, dark: Boolean): Snapshot {
+            val values = Measured()
+            measureInto(values, dynamicValue, stylesValue, shapesValue, dark)
+            return snapshotOf(values)
+        }
+
+        /**
+         * 无缓存构建路径：从当前 Composer 直接读一次完整快照。
+         *
+         * <p>UiMountScopeProbe 用反射直接调用它核对配色位模式，因此行为保持不变：
+         * 任何一项读不到都返回 null、不抛异常。生产组合走 [HostSaltTheme.read]，
+         * 快照由每个调用点自己的 remember 槽缓存复用。</p>
+         */
         fun read(composer: Composer): Snapshot? {
-            val configsValue = composer.consume(configs) ?: return null
-            val dynamicValue = composer.consume(dynamicColors) ?: return null
-            val stylesValue = composer.consume(textStyles) ?: return null
-            val shapesValue = composer.consume(shapes) ?: return null
-            val dark = isDark.invoke(configsValue) as? Boolean ?: return null
-            val saltColors = (if (dark) darkColors else lightColors).invoke(dynamicValue) ?: return null
-            val colors = colorGetters.map {
-                val value = it.invoke(saltColors) as? Long ?: return null
-                colorFromPacked(value)
+            // 先 consume 再进 try：consume 只读当前组合值，需要兜底的是后续 23 次反射读取。
+            val configsValue = composer.consume(configs)
+            val dynamicValue = composer.consume(dynamicColors)
+            val stylesValue = composer.consume(textStyles)
+            val shapesValue = composer.consume(shapes)
+            return try {
+                val dark = darkOf(configsValue)
+                if (configsValue == null || dynamicValue == null || stylesValue == null ||
+                    shapesValue == null || dark == null
+                ) {
+                    null
+                } else {
+                    build(configsValue, dynamicValue, stylesValue, shapesValue, dark)
+                }
+            } catch (t: Throwable) {
+                null
             }
-            val styles = textStyleGetters.map {
-                it.invoke(stylesValue) as? TextStyle ?: return null
-            }
-            val shapeValues = shapeGetters.map {
-                it.invoke(shapesValue) as? Shape ?: return null
-            }
-            return Snapshot(
-                dark = dark,
-                palette = Palette(
-                    highlight = colors[0],
-                    text = colors[1],
-                    subText = colors[2],
-                    background = colors[3],
-                    subBackground = colors[4],
-                    popup = colors[5],
-                    stroke = colors[6],
-                    onHighlight = colors[7],
-                    success = colors[8],
-                    warning = colors[9],
-                    error = colors[10],
-                ),
-                textStyles = TypeSet(
-                    main = styles[0],
-                    sub = styles[1],
-                    paragraph = styles[2],
-                    largeTitle = styles[3],
-                ),
-                shapes = ShapeSet(
-                    small = shapeValues[0],
-                    medium = shapeValues[1],
-                    large = shapeValues[2],
-                ),
-            )
         }
     }
 
@@ -272,22 +384,148 @@ internal object HostSaltTheme {
         )
     }
 
-    /** 组合期读取宿主主题；不可用返回 null，不绘制错误主题。 */
+    /**
+     * 每个调用点一份（remember { SnapshotCache() }）：实测主题值没变时返回同一个 Snapshot。
+     *
+     * <p>键不是 4 个 Local 的实例身份。宿主 AppTheme（com.xuncorp.voxzen.ui.theme.Ԩ#Ϳ）
+     * 每次执行都会 new SaltThemeConfigs / SaltDynamicColors / SaltTextStyles / SaltShapes
+     * 再交给 SaltTheme 的 staticCompositionLocalOf（javap 见 harness/theme/），身份每次组合
+     * 都可能变，但值通常不变；按身份缓存会让宿主每重组一次就重建 Snapshot 并让整棵插件子树
+     * 失效。</p>
+     *
+     * <p>每次 read 都先完整读 23 个 getter（[Reader.measureInto]），再按值比较：颜色比位模式，
+     * 字体/圆角比不可变值对象，isDarkTheme 单独比。这样即使宿主将来把 SaltColors / SaltShapes
+     * 内部的 MutableState 原位改写（当前字节码没有 setter/setValue，见
+     * harness/theme/THEME-IMMUTABILITY.md），组合期读 getter 也会注册快照依赖并读到新值，
+     * 不会因为跳过 getter 而漏掉响应式更新。</p>
+     *
+     * <p>只有成功建好 Snapshot 才写缓存：ABI 不匹配时每次组合都会重试读取，但
+     * recordFailure 会去重日志；窗口/页面重新进入会换新的 remember 槽。</p>
+     */
+    private class SnapshotCache {
+        /** 本次实测值；复用缓冲，命中时零分配。 */
+        private val measured = Measured()
+
+        /** 上一次成功建 Snapshot 时的值，只在确定重建时复制。 */
+        private val key = Measured()
+        private var primed = false
+        private var snapshot: Snapshot? = null
+
+        fun resolve(
+            reader: Reader,
+            configs: Any?,
+            dynamicColors: Any?,
+            textStyles: Any?,
+            shapes: Any?,
+            dark: Boolean?,
+        ): Snapshot? {
+            if (configs == null || dynamicColors == null || textStyles == null ||
+                shapes == null || dark == null
+            ) {
+                recordFailure(missingReason(configs, dynamicColors, textStyles, shapes, dark))
+                return null
+            }
+            return try {
+                reader.measureInto(measured, dynamicColors, textStyles, shapes, dark)
+                if (primed && measured.sameValuesAs(key)) {
+                    return snapshot
+                }
+                val built = reader.snapshotOf(measured)
+                key.copyFrom(measured)
+                primed = true
+                snapshot = built
+                built
+            } catch (t: Throwable) {
+                recordFailure("读取宿主 SaltTheme 失败：" + t)
+                null
+            }
+        }
+
+        private fun missingReason(
+            configs: Any?,
+            dynamicColors: Any?,
+            textStyles: Any?,
+            shapes: Any?,
+            dark: Boolean?,
+        ): String = when {
+            configs == null -> "宿主未提供 SaltConfigs（CompositionLocal 为空）"
+            dynamicColors == null -> "宿主未提供 SaltDynamicColors（CompositionLocal 为空）"
+            textStyles == null -> "宿主未提供 SaltTextStyles（CompositionLocal 为空）"
+            shapes == null -> "宿主未提供 SaltShapes（CompositionLocal 为空）"
+            dark == null ->
+                "宿主 SaltConfigs 的 isDarkTheme 读取失败：" + CONFIGS_CLASS + "#" + CONFIGS_IS_DARK
+            else -> "宿主主题读取失败（原因未识别）"
+        }
+    }
+
+    /** 最近一次读取失败的完整原因；供界面/日志反馈，没有失败过时为 null。 */
+    @Volatile
+    private var lastFailure: String? = null
+
+    /** 与 [lastFailure] 配合做日志去重：PluginLog 是同步写盘的，绝不能在组合里反复写。 */
+    @Volatile
+    private var loggedFailure: String? = null
+
+    /**
+     * 组合期读取宿主主题；不可用返回 null，不绘制错误主题。
+     *
+     * <p>每次组合都先 consume 4 个宿主 local（configs / dynamicColors / textStyles /
+     * shapes），再完整读 23 个主题 getter；快照只在「读到的值」变化时重建（见
+     * [SnapshotCache]）。因此深浅色、字体、圆角、颜色任一真正变化都会重建，而宿主仅仅
+     * 重新 new 一遍主题对象（值相同）时返回同一个 Snapshot 实例，LocalSaltSnapshot 不会
+     * 让整棵子树失效。缓存挂在每个调用点自己的 remember 槽（本文件调用点：NativeUiPanel、
+     * 开发者页、HostGlobalSearch.RootHook 的两处），多窗口、多入口互不影响。</p>
+     */
     @Composable
     fun read(): Snapshot? {
-        val current = reader ?: return null
+        val current = reader
+        if (current == null) {
+            recordFailure("宿主 SaltTheme ABI 不可用：" + THEME_CLASS + " 的主题 local 缺失")
+            return null
+        }
         val composer = currentComposer
+        val cache = remember { SnapshotCache() }
+        // 先 consume 再进 try：四个 local 每次都读（维持失效依赖），try 只包缓存/反射逻辑。
+        val configsValue = composer.consume(current.configs)
+        val dynamicValue = composer.consume(current.dynamicColors)
+        val stylesValue = composer.consume(current.textStyles)
+        val shapesValue = composer.consume(current.shapes)
         return try {
-            current.read(composer)
+            cache.resolve(current, configsValue, dynamicValue, stylesValue, shapesValue, current.darkOf(configsValue))
         } catch (t: Throwable) {
-            PluginLog.w(TAG, "读取宿主 SaltTheme 失败（已暂停绘制）：" + t)
+            recordFailure("读取宿主 SaltTheme 失败：" + t)
             null
         }
     }
 
+    /** 最近一次读取失败原因；界面与日志用它说明「为什么没画原生页面」。 */
+    fun failureReason(): String? = lastFailure
+
+    private fun recordFailure(reason: String) {
+        lastFailure = reason
+        if (reason != loggedFailure) {
+            loggedFailure = reason
+            PluginLog.w(TAG, "[native-ui] " + reason + "（已暂停绘制原生页面）")
+        }
+    }
+
+    /**
+     * 本次组合实际 consume 到的宿主 SaltConfigs。
+     *
+     * <p>宿主的 Indication 等配置 getter 只有实例才读得到；这里再 consume 一次而不是
+     * 缓存「最近一次 configs」，才不会在双窗口/多入口下读到另一个窗口的实例。</p>
+     */
+    @Composable
+    internal fun currentConfigs(): Any? {
+        val current = reader ?: return null
+        // 只读本次组合真正提供的实例，不缓存跨窗口的旧值；组合期正常不会抛异常。
+        return currentComposer.consume(current.configs)
+    }
+
     /** 开发者页使用的主题来源说明（不参与正式页面布局）。 */
     fun describe(snapshot: Snapshot?): String = if (snapshot == null) {
-        "不可用：未读到宿主 SaltTheme（混淆名可能已随宿主版本变化，已暂停绘制）"
+        "不可用：未读到宿主 SaltTheme（混淆名可能已随宿主版本变化，已暂停绘制）" +
+            (failureReason()?.let { "；最近失败：" + it } ?: "")
     } else {
         "宿主 SaltTheme（" + (if (snapshot.dark) "深色" else "浅色") +
             "；颜色/字体/圆角来自宿主 CompositionLocal）"

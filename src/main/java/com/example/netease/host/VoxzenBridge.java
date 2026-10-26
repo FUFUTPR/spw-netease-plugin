@@ -711,7 +711,9 @@ public final class VoxzenBridge {
      * 而不是等在线试播时才装。幂等；异常全吞，只降级不抛。</p>
      */
     public static void armNative() {
+        if (stopped) return;
         HostBridgeWorker.get().submit(() -> {
+            if (stopped) return;
             StringBuilder sb = new StringBuilder("原生装配：");
             try {
                 sb.append("活清单[").append(ensureInterceptorOnWorker()).append(']');

@@ -1,0 +1,11 @@
+{
+  "format": 1,
+  "source_sha256": {
+    "main.c": "7f60b0e4bd471050da0612df63af5a2c78fc953cc842ef52a243013488a02aba",
+    "surface.c": "eeb74f57490deba3b9d6f7072edc2c252c6e7ebb3080a032edf6d77a9918757d"
+  },
+  "binary_sha256": {
+    "VerifyHost": "d0ecdded97e9af078e69b94297630ab278133bb115ee48005cf02acf753a5064",
+    "libverify-surface.so": "7fb126ca52c426c82eafd7a56badb100c8355aa73475e6430ed8c548cf03191c"
+  }
+}

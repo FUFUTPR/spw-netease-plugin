@@ -548,6 +548,18 @@ def main() -> int:
 def _run_build(args) -> int:
     t0 = time.time()
     project = load_project()
+    native = ROOT / project['resourceDir'] / 'verify-host' / 'linux-x86_64'
+    try:
+        info = json.loads((native / 'build-info.json').read_text(encoding='utf-8'))
+        for name in ('main.c', 'surface.c'):
+            if hashlib.sha256((ROOT / 'tools/verify-host-linux' / name).read_bytes()).hexdigest() != info['source_sha256'][name]:
+                die('Linux verification sources changed; rebuild tools/verify-host-linux/build.sh before packaging')
+        for name in ('VerifyHost', 'libverify-surface.so'):
+            data = (native / name).read_bytes()
+            if hashlib.sha256(data).hexdigest() != info['binary_sha256'][name] or data[:6] != b'\x7fELF\x02\x01' or data[18:20] != b'\x3e\x00':
+                die('Linux verification resource mismatch: ' + name)
+    except (OSError, ValueError, KeyError) as error:
+        die('Missing or invalid Linux verification build metadata: ' + str(error))
     if args.dist_dir:
         project["distDir"] = args.dist_dir
     log(f"== 构建 {project['pluginId']} v{project['version']} ({project['name']}) ==")

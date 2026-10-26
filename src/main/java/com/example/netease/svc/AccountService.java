@@ -7,7 +7,6 @@ import com.example.netease.net.Dto;
 import com.example.netease.net.NeteaseApi;
 
 import java.nio.file.Path;
-import java.util.HashSet;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -24,8 +23,8 @@ import java.util.function.Consumer;
  *
  * <p><b>线程模型</b>：内部持有**唯一**的守护单线程 {@code netease-account}（自建 {@link ThreadFactory}，仿
  * {@code core.HostBridgeWorker}）。所有 net 登录 API（{@code qrCreate/qrPoll/accountInfo/exportCookies/
- * importCookies/loginByCaptcha/logout}）**只在这条线程上调用**——因为 {@code net.Http} 的 cookie jar 是进程级
- * 静态单例（docs/00 §11 第 7 条）。其它线程（UI/EDT、宿主回调、HostBridgeWorker）只读 {@link #status()} 的不可变快照。</p>
+ * importCookies/loginByCaptcha/logout}）在账号线程上协调。每次登录拥有独立的候选 Cookie 会话，确认身份并保存后才提交；
+ * HTTP I/O 使用可中断的 Java 25 虚拟线程。其它线程只读 {@link #status()} 的不可变快照。</p>
  *
  * <p><b>立即返回</b>：{@link #startQr()} / {@link #pollNow()} / {@link #logout()} 从 UI 线程调用时只改内存快照 +
  * 投递任务，绝不阻塞 EDT。{@link #loginByCaptcha} 允许阻塞（有 30s 上限），UI 需要异步时自行放到后台线程。</p>
@@ -211,6 +210,48 @@ public final class AccountService {
     private static final java.util.concurrent.atomic.AtomicLong QR_GEN =
             new java.util.concurrent.atomic.AtomicLong();
     private static volatile long qrGen;
+    private static final java.util.concurrent.atomic.AtomicLong LIFECYCLE = new java.util.concurrent.atomic.AtomicLong();
+    private static volatile NeteaseApi.CookieSession loginSession;
+    private static volatile LoginStatus loginPrior;
+    private static volatile String loginKind = "";
+    private static final Object LOGIN_LOCK = new Object();
+
+    private static NeteaseApi.CookieSession prepareLogin(String kind, boolean fresh) {
+        synchronized (LOGIN_LOCK) {
+            NeteaseApi.CookieSession existing = loginSession;
+            if (!fresh && kind.equals(loginKind) && existing != null && existing.valid()) return existing;
+            if (loginPrior == null) loginPrior = status().state() == State.LOGGED_IN ? status() : beforeQr;
+            NeteaseApi.CookieSession replacement;
+            try { replacement = existing != null && existing.valid() ? existing.call(NeteaseApi::beginLoginSession) : NeteaseApi.beginLoginSession(); }
+            catch (Exception cancelled) { replacement = NeteaseApi.beginLoginSession(); }
+            if (existing != null) existing.close();
+            if (!kind.equals(loginKind) && kind.equals("sms")) { qrGen = QR_GEN.incrementAndGet(); cancelPollLoop(); }
+            loginKind = kind;
+            loginSession = replacement;
+            return loginSession;
+        }
+    }
+    private static void abandonLogin(boolean restore) {
+        synchronized (LOGIN_LOCK) {
+            NeteaseApi.CookieSession old = loginSession; loginSession = null;
+            loginKind = "";
+            if (old != null) old.close();
+            LoginStatus back = loginPrior;
+            if (restore && back != null) NeteaseApi.captureCommittedSession().run(() -> setStatus(back));
+            loginPrior = null;
+        }
+    }
+    private static boolean saveLogin(String cookie) {
+        synchronized (LOGIN_LOCK) {
+            if (cookie == null || !java.util.regex.Pattern.compile("(?:^|;\\s*)MUSIC_U=[^;\\s]+").matcher(cookie).find()) return false;
+            NeteaseApi.CookieSession candidate = loginSession;
+            if (stopped || !NeteaseApi.requestSessionValid() || (candidate != null && !candidate.valid())) return false;
+            if (!CookieVault.saveVerified(cookie)) { abandonLogin(true); return false; }
+            if (candidate != null) candidate.commit();
+            loginSession = null; loginPrior = null; loginKind = "";
+            return true;
+        }
+    }
 
     private AccountService() {
     }
@@ -273,6 +314,9 @@ public final class AccountService {
      * **不**读取/注入本地凭据（对应配置键 {@code auto_login}，由调用方决定是否恢复）。
      */
     public static void init(Path dir, boolean autoLoginOn) {
+        LIFECYCLE.incrementAndGet();
+        abandonLogin(false);
+        NeteaseApi.resumeRequests();
         dataDir = dir;
         autoLogin = autoLoginOn;
         stopped = false;               // 新一轮生命周期：允许重新建账号线程
@@ -305,7 +349,14 @@ public final class AccountService {
 
     /** 停内部线程（幂等；{@code NeteasePlugin.stop()} 生命周期调用）。 */
     public static void stop() {
-        stopped = true;                // 停止之后绝不再新建账号线程（防「停了又冒一个」）
+        synchronized (LOGIN_LOCK) {
+        stopped = true;
+        LIFECYCLE.incrementAndGet();
+        qrGen = QR_GEN.incrementAndGet();
+        SESSION_EPOCH.incrementAndGet();
+        abandonLogin(false);
+        NeteaseApi.cancelRequests();
+        }
         qr = null;
         qrKey = null;
         POLL_PENDING.set(false);
@@ -390,6 +441,7 @@ public final class AccountService {
      *         false = 复用了现有码 / 已有一张码正在生成 —— 调用方不要动已有展示，只按快照同步
      */
     public static boolean startQr(boolean force) {
+        if (stopped) return false;
         long now = System.currentTimeMillis();
         LoginStatus before = status();
         // 开窗快照（0.11.44）：状态 + 登录成功代数 —— 界面只在这之后**真的**登录成功过时才自动关窗。
@@ -401,6 +453,7 @@ public final class AccountService {
         boolean fresh = have != null && key != null && !key.isBlank() && !qrServerExpired
                 && now - qrCreatedAtMs < QR_CLIENT_TTL_MS;
         boolean creating = qrCreating && qrCreatingGen == qrGen;
+        final NeteaseApi.CookieSession candidate = prepareLogin("qr", force || (!fresh && !creating));
         if (!force && (fresh || creating)) {
             if (fresh) {
                 // 0.11.42 规则保留：只有当前确实是 LOGGED_IN 才刷新关窗快照（会话进行中的复用不许冲掉）。
@@ -458,7 +511,7 @@ public final class AccountService {
                 if (gen != qrGen) {
                     return;                         // 会话已作废（用户没等二维码出来就关窗走了回滚）⇒ 丢弃
                 }
-                Dto.QrSession s = NeteaseApi.qrCreate();
+                Dto.QrSession s = candidate.call(NeteaseApi::qrCreate);
                 if (gen != qrGen) {
                     // 0.11.44：生成期间用户关窗回了滚（或又点了一次刷新）—— 结论**不落状态**
                     //（否则会把回滚压回等待态，0.11.41 的老毛病），但把码悄悄留着：重开窗时只要
@@ -545,6 +598,8 @@ public final class AccountService {
      */
     public static boolean pauseQrWatch() {
         boolean restored = restoreAbandonedQr();
+        qrGen = QR_GEN.incrementAndGet();
+        abandonLogin(true);
         if (pollLoop == null) {
             return restored;              // 本来就没在跑：不打日志，避免关窗噪声
         }
@@ -672,10 +727,11 @@ public final class AccountService {
         if (cb == null) {
             return;
         }
+        NeteaseApi.CookieSession candidate = loginSession;
         boolean posted = submit(() -> {
             String ck = null;
             try {
-                ck = NeteaseApi.exportCookies();
+                ck = candidate == null ? NeteaseApi.exportCookies() : candidate.call(NeteaseApi::exportCookies);
             } catch (Throwable t) {
                 PluginLog.w(TAG, "取 cookie 失败（照常继续）：" + describe(t));
             }
@@ -697,11 +753,29 @@ public final class AccountService {
      * 会话里更新的值退回旧值。</p>
      */
     public static void mergeCookies(String fromWebView) {
+        mergeCookies(fromWebView, sessionEpoch());
+    }
+
+    public static void mergeCookies(String fromWebView, long expectedEpoch) {
+        mergeCookies(fromWebView, expectedEpoch, () -> true);
+    }
+    public static void mergeCookies(String fromWebView, long expectedEpoch, java.util.function.BooleanSupplier valid) {
         if (fromWebView == null || fromWebView.isBlank()) {
             return;
         }
         String theirs = fromWebView.trim();
+        NeteaseApi.CookieSession candidate = loginSession;
         boolean posted = submit(() -> {
+            if (!valid.getAsBoolean() || sessionEpoch() != expectedEpoch || candidate != loginSession) return;
+            if (candidate != null) {
+                try { candidate.call(() -> { mergeVerificationCookies(theirs); return null; }); }
+                catch (Exception error) { PluginLog.w(TAG, "验证会话已失效，凭据未回灌"); }
+            } else mergeVerificationCookies(theirs);
+        });
+        if (!posted) PluginLog.w(TAG, "账号线程不可用，验证凭据已丢弃");
+    }
+
+    private static void mergeVerificationCookies(String theirs) {
             try {
                 String mine = "";
                 try {
@@ -714,49 +788,39 @@ public final class AccountService {
                 int before = cookieCount(mine);
                 int after = cookieCount(merged);
                 if (merged.equals(mine)) {
-                    PluginLog.d(TAG, "验证页 cookie 没有新名字 ⇒ 无需回灌（插件 " + before + " 项）");
+                    PluginLog.d(TAG, "验证页没有可更新的 cookie（插件 " + before + " 项）");
                     return;
                 }
-                NeteaseApi.importCookies(merged);
-                PluginLog.i(TAG, "验证页 cookie 已按名合并（插件 " + before + " 项 + 验证页独有 "
-                        + (after - before) + " 项 ⇒ " + after + " 项；值不进日志）");
+                NeteaseApi.updateCookies(merged);
+                PluginLog.i(TAG, "验证页 cookie 已更新（项数 " + before + " → " + after + "；值不进日志）");
             } catch (Throwable t) {
                 PluginLog.w(TAG, "回灌验证页 cookie 失败：" + describe(t));
             }
-        });
-        if (!posted) {
-            PluginLog.w(TAG, "账号线程不可用 ⇒ 验证页 cookie 丢弃（只记长度 " + theirs.length() + "）");
-        }
     }
 
-    /** 按名合并两个 {@code Cookie} 头（前者的名与值一律优先，后者只补前者没有的名字）。 */
+    /** Verification may refresh risk/device cookies, but may never replace authentication. */
     private static String mergeCookieHeader(String mine, String theirs) {
         String left = mine == null ? "" : mine.trim();
         String right = theirs == null ? "" : theirs.trim();
         if (right.isEmpty()) {
             return left;
         }
-        Set<String> have = new HashSet<>();
+        java.util.Map<String,String> values = new java.util.LinkedHashMap<>();
         for (String part : left.split(";")) {
             String name = cookieName(part.trim());
             if (!name.isEmpty()) {
-                have.add(name);
+                values.put(name, part.trim());
             }
         }
-        StringBuilder sb = new StringBuilder(left);
         for (String part : right.split(";")) {
             String item = part.trim();
             String name = cookieName(item);
-            if (name.isEmpty() || have.contains(name)) {
+            if (name.isEmpty() || Set.of("MUSIC_U", "MUSIC_A", "__csrf").contains(name)) {
                 continue;
             }
-            have.add(name);
-            if (sb.length() > 0 && sb.charAt(sb.length() - 1) != ';') {
-                sb.append("; ");
-            }
-            sb.append(item);
+            values.put(name, item);
         }
-        return sb.toString();
+        return String.join("; ", values.values());
     }
 
     private static String cookieName(String item) {
@@ -779,6 +843,7 @@ public final class AccountService {
 
     /** 催一次轮询（自驱定时器 + 登录窗定时器共用），立即返回；上一次没回来 / 节流窗口内直接丢弃。 */
     public static void pollNow() {
+        final NeteaseApi.CookieSession candidate = loginSession;
         State st = status().state();
         if (st != State.WAITING_SCAN && st != State.WAITING_CONFIRM) {
             cancelPollLoop();     // 已离开等待态：自驱任务自我了断
@@ -808,7 +873,8 @@ public final class AccountService {
                 if (gen != qrGen) {
                     return;   // 会话已换代（关窗回滚 / 重新取码）⇒ 这次结论一律丢弃（0.11.41）
                 }
-                NeteaseApi.QrPoll poll = NeteaseApi.qrPollFull(key);
+                NeteaseApi.QrPoll poll = candidate == null ? NeteaseApi.qrPollFull(key)
+                        : candidate.call(() -> NeteaseApi.qrPollFull(key));
                 if (gen != qrGen) {
                     // 0.11.43（真机 2026-10-03 21:13:04 实证）：网络调用期间用户关窗回了滚 ——
                     // 结论必须**再过一次**代号闸门，否则迟到的 801 会把回滚压回等待态，
@@ -818,7 +884,8 @@ public final class AccountService {
                 if (!feedTerminalOnce(poll)) {
                     return;   // 这把码的终局已经落过一次（迟到的复述）⇒ 丢弃（0.11.44）
                 }
-                onPollCode(poll);
+                if (candidate == null) onPollCode(poll);
+                else candidate.call(() -> { onPollCode(poll); return null; });
             } catch (Throwable t) {
                 if (gen != qrGen) {
                     return;   // 同上：迟到的失败也不许把回滚好的状态压回等待态
@@ -860,10 +927,12 @@ public final class AccountService {
         if (!startWorker()) {
             return new Dto.SmsResult(-1, "账号线程不可用");
         }
+        final NeteaseApi.CookieSession candidate = prepareLogin("sms", false);
         if (isOnAccountThread()) {
-            return doSmsSend(phone);
+            try { return candidate.call(() -> doSmsSend(phone)); }
+            catch (Exception error) { return new Dto.SmsResult(-1, "登录会话已取消"); }
         }
-        FutureTask<Dto.SmsResult> task = new FutureTask<>(() -> doSmsSend(phone));
+        FutureTask<Dto.SmsResult> task = new FutureTask<>(() -> candidate.call(() -> doSmsSend(phone)));
         if (!submit(task)) {
             return new Dto.SmsResult(-1, "账号线程不可用");
         }
@@ -871,7 +940,8 @@ public final class AccountService {
             Dto.SmsResult r = task.get(SMS_TIMEOUT_SEC, TimeUnit.SECONDS);
             return r == null ? new Dto.SmsResult(-1, "发送失败（无响应）") : r;
         } catch (Throwable t) {
-            task.cancel(false);
+            candidate.close();
+            task.cancel(true);
             PluginLog.w(TAG, "短信验证码发送等待超时/中断：" + describe(t));
             return new Dto.SmsResult(-1, "请求超时，请检查网络后重试");
         }
@@ -891,10 +961,12 @@ public final class AccountService {
         if (!startWorker()) {
             return new NeteaseApi.LoginOutcome(false, -1, "账号线程不可用（插件可能已停用）");
         }
+        final NeteaseApi.CookieSession candidate = prepareLogin("sms", false);
         if (isOnAccountThread()) {
-            return doCaptchaLogin(phone, captcha);
+            try { return candidate.call(() -> doCaptchaLogin(phone, captcha)); }
+            catch (Exception error) { return new NeteaseApi.LoginOutcome(false, -1, "登录会话已取消"); }
         }
-        FutureTask<NeteaseApi.LoginOutcome> task = new FutureTask<>(() -> doCaptchaLogin(phone, captcha));
+        FutureTask<NeteaseApi.LoginOutcome> task = new FutureTask<>(() -> candidate.call(() -> doCaptchaLogin(phone, captcha)));
         if (!submit(task)) {
             return new NeteaseApi.LoginOutcome(false, -1, "账号线程不可用（插件可能已停用）");
         }
@@ -902,7 +974,9 @@ public final class AccountService {
             NeteaseApi.LoginOutcome out = task.get(CELLPHONE_TIMEOUT_SEC, TimeUnit.SECONDS);
             return out == null ? new NeteaseApi.LoginOutcome(false, -1, "登录失败（无响应）") : out;
         } catch (Throwable t) {
-            task.cancel(false);
+            candidate.close();
+            task.cancel(true);
+            abandonLogin(true);
             PluginLog.w(TAG, "验证码登录等待超时/中断：" + describe(t));
             return new NeteaseApi.LoginOutcome(false, -1, "登录等待超时，请检查网络后重试");
         }
@@ -922,11 +996,16 @@ public final class AccountService {
 
     /** 退出登录：**立即**清内存快照（UI 立刻变「未登录」），落盘删除在账号线程上做。 */
     public static void logout() {
+        synchronized (LOGIN_LOCK) {
+        abandonLogin(false);
+        qrGen = QR_GEN.incrementAndGet();
+        NeteaseApi.logout();
         SESSION_EPOCH.incrementAndGet();
         qr = null;
         qrKey = null;
         POLL_PENDING.set(false);
         setStatus(new LoginStatus(State.NONE, "未登录", "", 0L, false, "", 0L));
+        }
         Runnable job = () -> {
             try {
                 NeteaseApi.logout();      // 清 cookie jar（只在账号线程）
@@ -1012,6 +1091,9 @@ public final class AccountService {
      * 等价于「重新 init 一次」。</p>
      */
     public static void __testReset() {
+        LIFECYCLE.incrementAndGet();
+        abandonLogin(false);
+        NeteaseApi.resumeRequests();
         stopped = false;               // 等价于新生命周期（生产路径由 init 复位）
         try {
             Device.reset();            // 清设备身份的内存态（不删 device.json）
@@ -1105,15 +1187,25 @@ public final class AccountService {
         String cookies = null;
         if (code == 803) {
             try {
-                cookies = NeteaseApi.exportCookies();      // 只在账号线程
+                Dto.Account account = NeteaseApi.accountInfo();
+                if (account == null || account.userId() <= 0) throw new IllegalStateException("无法确认登录账号");
+                cookies = NeteaseApi.exportCookies();
+                long previousSerial = loginSerial;
+                feedQrCode(code, poll.verifyUrl(), cookies, account.nickname(), account.userId(), account.vip());
+                if (loggedIn() && loginSerial != previousSerial) {
+                    NativeStreamServer.credentialsChanged();
+                    fireAfterLogin();
+                }
+                return;
             } catch (Throwable t) {
-                PluginLog.w(TAG, "导出 cookie 失败：" + describe(t));
+                PluginLog.w(TAG, "确认扫码账号失败：" + describe(t));
+                if (stopped || Thread.currentThread().isInterrupted()) return;
+                abandonLogin(true);
+                if (!loggedIn()) setStatus(new LoginStatus(State.ERROR, "无法确认登录账号，请重试", "", 0L, false, "", 0L));
+                return;
             }
         }
         feedQrCode(code, poll.verifyUrl(), cookies, null, 0L, false);
-        if (code == 803 && loggedIn()) {
-            refreshAccountInfo();
-        }
     }
 
     /** 轮询码的中文说明（日志与排障用）。 */
@@ -1190,13 +1282,18 @@ public final class AccountService {
                 setStatus(new LoginStatus(State.EXPIRED, "二维码已过期，请刷新二维码", "", 0L, false, "", 0L));
                 break;
             }
-            case 803: {
+            case 803: { synchronized (LOGIN_LOCK) {
                 if (cookies == null || cookies.isBlank()) {
                     PluginLog.w(TAG, "扫码成功（803）但 cookie 为空，视为失败");
                     setStatus(new LoginStatus(State.ERROR, "登录成功但凭据为空，请重试", "", 0L, false, "", 0L));
                     break;
                 }
-                CookieVault.save(cookies);
+                if (!saveLogin(cookies)) {
+                    if (status().state() != State.LOGGED_IN) setStatus(new LoginStatus(State.ERROR,
+                            "凭据加密落盘失败，请检查数据目录后重试", "", 0L, false, "", 0L));
+                    cancelPollLoop();
+                    break;
+                }
                 qr = null;
                 qrKey = null;
                 beforeQr = null;
@@ -1209,7 +1306,7 @@ public final class AccountService {
                 PluginLog.i(TAG, "扫码登录成功：凭据已加密落盘（明文长度 " + cookies.length()
                         + "，内容不落日志），昵称=" + (known ? nickname : "(待获取)"));
                 break;
-            }
+            } }
             case 8821:
             case -462: {
                 // 网易云风控：要求先完成「行为验证」才能继续（8821 = 老口径，-462 = 新口径，
@@ -1380,6 +1477,7 @@ public final class AccountService {
 
     /** 触发登录后回调（账号线程；异常只记日志，绝不影响登录态）。 */
     private static void fireAfterLogin() {
+        if (stopped || !NeteaseApi.requestSessionValid()) return;
         Runnable hook = afterLoginHook;
         if (hook == null) {
             return;
@@ -1408,12 +1506,24 @@ public final class AccountService {
             setStatus(new LoginStatus(State.ERROR, "手机号登录失败：" + result.hint(), "", 0L, false, "", 0L));
             return result;
         }
+        Dto.Account confirmed;
+        try {
+            confirmed = NeteaseApi.accountInfo();
+            if (confirmed == null || confirmed.userId() <= 0) throw new IllegalStateException("无法确认登录账号");
+        } catch (Throwable error) {
+            abandonLogin(true);
+            return new NeteaseApi.LoginOutcome(false, -3, "无法确认登录账号，请重试");
+        }
+        synchronized (LOGIN_LOCK) {
         if (!persistLogin(via, phone)) {
             return new NeteaseApi.LoginOutcome(false, -3, "凭据加密落盘失败（登录未生效）");
         }
-        setStatus(new LoginStatus(State.LOGGED_IN, "登录成功（正在获取账号信息）", "", 0L, false, "", 0L));
+        setStatus(new LoginStatus(State.LOGGED_IN, "登录成功", confirmed.nickname(), confirmed.userId(),
+                confirmed.vip(), confirmed.vipName(), 0L));
         loginSerial++;                      // 0.11.44：同 803，手机号登录也是「真的登录成功过一次」
-        refreshAccountInfo();
+        }
+        NativeStreamServer.credentialsChanged();
+        fireAfterLogin();
         return result;
     }
 
@@ -1432,18 +1542,9 @@ public final class AccountService {
                 setStatus(new LoginStatus(State.ERROR, "登录成功但凭据为空，请重试", "", 0L, false, "", 0L));
                 return false;
             }
-            CookieVault.save(cookie);
-            String back = CookieVault.load();
-            // "MUSIC_U=" 与 net/Http 的 cookie 名一致（NeteaseApi.COOKIE_MUSIC_U 在 net 包内私有）
-            if (back == null || back.isBlank() || !back.contains("MUSIC_U=")) {
-                PluginLog.e(TAG, how + "登录：凭据落盘后回读校验失败（exists=" + CookieVault.exists()
-                        + "，回读长度=" + len(back) + "）→ 登录未生效");
-                setStatus(new LoginStatus(State.ERROR,
-                        "凭据加密落盘失败：请检查插件数据目录写权限后重试", "", 0L, false, "", 0L));
-                return false;
-            }
+            if (!saveLogin(cookie)) return false;
             PluginLog.i(TAG, how + "登录成功：凭据已加密落盘并回读校验通过（明文长度 " + cookie.length()
-                    + "，回读长度 " + back.length() + "，内容不落日志，号码=" + maskPhone(phone) + "）");
+                    + "，内容不落日志，号码=" + maskPhone(phone) + "）");
             return true;
         } catch (Throwable t) {
             PluginLog.e(TAG, how + "登录：凭据落盘异常", t);
@@ -1567,7 +1668,9 @@ public final class AccountService {
             return false;
         }
         try {
-            w.execute(task);
+            long owner = LIFECYCLE.get();
+            NeteaseApi.CookieSession context = NeteaseApi.captureSession();
+            w.execute(() -> { if (!stopped && owner == LIFECYCLE.get()) context.run(task); });
             return true;
         } catch (Throwable t) {
             PluginLog.w(TAG, "账号任务投递失败（线程已停止？）：" + describe(t));
@@ -1581,6 +1684,7 @@ public final class AccountService {
     }
 
     private static synchronized void setStatus(LoginStatus s) {
+        if (THREAD_NAME.equals(Thread.currentThread().getName()) && (stopped || !NeteaseApi.requestSessionValid())) return;
         if (s == null) {
             return;
         }

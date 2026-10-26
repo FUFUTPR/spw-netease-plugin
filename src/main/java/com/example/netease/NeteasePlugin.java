@@ -397,6 +397,17 @@ public final class NeteasePlugin extends SpwPlugin {
             // 自动同步才启动，否则插件启动后的第一首会连接被拒绝。配置稍后加载完成时会异步
             // 应用真实容量，服务在此先按安全默认值就绪。
             NativeStreamServer.start();
+            // Restored queue items may be loaded before the delayed ready toast (3s)
+            // and native-route retry (8s). Install the stream interceptor now, on the
+            // existing host worker, before cover warming can occupy that queue.
+            // No prepare/play/queue replacement: startup must remain paused.
+            VoxzenBridge.armNative();
+            // Some hosts create the active player after plugin start returns.
+            // Bounded early retries cover that window without waiting for the
+            // slow full-library registration, and stop() cancels these timers.
+            Timers.later(500L, VoxzenBridge::armNative);
+            Timers.later(1500L, VoxzenBridge::armNative);
+            Timers.later(3000L, VoxzenBridge::armNative);
             com.example.netease.svc.LocalPlaybackCompatibility.start();
 
             // ③ 纯文件的服务初始化（0.5.0 瘦身版：只剩账号/客户端登录态这一条线）

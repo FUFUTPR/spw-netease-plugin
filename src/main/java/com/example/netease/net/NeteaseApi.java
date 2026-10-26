@@ -1215,6 +1215,32 @@ public final class NeteaseApi {
         Http.setCookies(null);
     }
 
+    /** A private cookie jar for one login, never visible to background account requests. */
+    public static final class CookieSession implements AutoCloseable {
+        private final Http.Session session;
+        private CookieSession(Http.Session session) { this.session = session; }
+        public <T> T call(java.util.concurrent.Callable<T> action) throws Exception {
+            if (!session.valid) throw new java.util.concurrent.CancellationException("登录会话已取消");
+            Http.Session previous = Http.enter(session);
+            try { return action.call(); } finally { Http.leave(previous); }
+        }
+        public boolean valid() { return session.valid; }
+        public void run(Runnable action) {
+            Http.Session previous = Http.enter(session);
+            try { action.run(); } finally { Http.leave(previous); }
+        }
+        public void commit() { Http.commit(session); }
+        @Override public void close() { session.cancel(); }
+    }
+    public static CookieSession beginLoginSession() { return new CookieSession(Http.candidate()); }
+    public static CookieSession captureSession() { return new CookieSession(Http.session()); }
+    public static CookieSession captureCommittedSession() { return new CookieSession(Http.activeSession()); }
+    public static void cancelRequests() { Http.cancelRequests(); }
+    public static void resumeRequests() { Http.resume(); }
+    public static boolean requestSessionValid() { return Http.session().valid && !Thread.currentThread().isInterrupted(); }
+    /** Verified updates within the same account do not replace its request generation. */
+    public static void updateCookies(String header) { Http.updateCookies(header); }
+
     /** 是否有登录态（本地判断 MUSIC_U，不发请求）。 */
     public static boolean isLoggedIn() {
         return Http.cookie(COOKIE_MUSIC_U) != null;

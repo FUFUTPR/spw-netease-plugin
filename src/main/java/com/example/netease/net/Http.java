@@ -2,6 +2,7 @@ package com.example.netease.net;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InterruptedIOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
@@ -43,7 +44,47 @@ final class Http {
     static final long MAX_TEXT_BYTES = 4L * 1024 * 1024;
 
     private static final Object LOCK = new Object();
-    private static final Map<String, String> COOKIES = new LinkedHashMap<>();
+    static final class Session {
+        final Map<String, String> cookies = new LinkedHashMap<>();
+        final java.util.Set<HttpURLConnection> connections = java.util.concurrent.ConcurrentHashMap.newKeySet();
+        final java.util.Set<Thread> transfers = java.util.concurrent.ConcurrentHashMap.newKeySet();
+        volatile boolean valid = true;
+        void cancel() {
+            valid = false;
+            // Socket I/O on a Java 25 virtual thread is interruptible. Calling
+            // HttpURLConnection.disconnect() from another platform thread can leave
+            // a response-header read blocked until its timeout.
+            for (Thread transfer : transfers) transfer.interrupt();
+        }
+    }
+    private static volatile Session current = new Session();
+    private static final ThreadLocal<Session> scope = new ThreadLocal<>();
+    private static final Object RATE_LOCK = new Object();
+    static Session session() { Session s = scope.get(); return s == null ? current : s; }
+    static Session activeSession() { return current; }
+    static Session candidate() {
+        Session s = new Session();
+        synchronized (LOCK) { s.cookies.putAll(session().cookies); }
+        s.cookies.keySet().removeAll(java.util.Set.of("MUSIC_U", "MUSIC_A", "__csrf"));
+        return s;
+    }
+    static Session enter(Session s) { Session old = scope.get(); scope.set(s); return old; }
+    static void leave(Session old) { if (old == null) scope.remove(); else scope.set(old); }
+    static void commit(Session s) {
+        Session old;
+        synchronized (LOCK) {
+            if (!s.valid) throw new java.util.concurrent.CancellationException("登录会话已失效");
+            old = current; current = s;
+            if (old != s) old.valid = false;
+        }
+        if (old != s) old.cancel();
+    }
+    static void cancelRequests() { current.cancel(); }
+    static void resume() {
+        synchronized (LOCK) {
+            if (!current.valid) { Session fresh = new Session(); fresh.cookies.putAll(current.cookies); current = fresh; }
+        }
+    }
     private static volatile long rateLimitMs = DEFAULT_RATE_LIMIT_MS;
     private static long lastRequestNanos = 0L;
     /** 最近一次响应状态码（0 = 还没发过请求 / 连接层就失败了）。 */
@@ -64,7 +105,23 @@ final class Http {
 
     /** 注入 cookie：{@code "k=v; k2=v2"}；null / 空串 = 清空。 */
     static void setCookies(String cookieHeader) {
+        Session replacement = new Session();
+        Session scoped = scope.get();
+        if (scoped != null && scoped != current) { updateCookies(cookieHeader); return; }
+        Session old;
         synchronized (LOCK) {
+            old = current;
+            current = replacement;
+            if (scoped != null) scope.set(replacement);
+            updateCookies(cookieHeader);
+            old.valid = false;
+        }
+        old.cancel();
+    }
+
+    static void updateCookies(String cookieHeader) {
+        synchronized (LOCK) {
+            Map<String,String> COOKIES = session().cookies;
             COOKIES.clear();
             if (cookieHeader == null || cookieHeader.isBlank()) {
                 return;
@@ -82,6 +139,7 @@ final class Http {
     /** 当前 cookie 串：{@code "k=v; k2=v2"}；无 cookie 时返回空串（绝不为 null）。 */
     static String cookies() {
         synchronized (LOCK) {
+            Map<String,String> COOKIES = session().cookies;
             if (COOKIES.isEmpty()) {
                 return "";
             }
@@ -99,7 +157,7 @@ final class Http {
     /** 取单个 cookie 值（内部使用，避免把整串 cookie 传出去）。 */
     static String cookie(String name) {
         synchronized (LOCK) {
-            return COOKIES.get(name);
+            return session().cookies.get(name);
         }
     }
 
@@ -142,8 +200,9 @@ final class Http {
     }
     /** Cloud mutations must not be replayed after an uncertain transport failure. */
     static String postFormOnce(String url, Map<String, String> form) throws IOException {
-        throttle();
-        return exchange("POST", url, encodeForm(form), null, MAX_TEXT_BYTES, Http::readText);
+        Session s = session();
+        throttle(s);
+        return exchange(s, "POST", url, encodeForm(form), null, MAX_TEXT_BYTES, Http::readText);
     }
 
     /** GET 字节（限长，自动解 gzip）。 */
@@ -176,6 +235,7 @@ final class Http {
                                  Map<String, String> headers, long maxBytes, Io<T> io)
             throws IOException {
         String target = urlText;
+        Session s = session();
         IOException last = null;
         for (int attempt = 0; attempt < 2; attempt++) {
             if (attempt > 0) {
@@ -187,15 +247,16 @@ final class Http {
                     throw new IOException("请求被中断", ie);
                 }
             }
-            throttle();
+            throttle(s);
             last = null;
             try {
-                return exchange(method, target, body, headers, maxBytes, io);
+                return exchange(s, method, target, body, headers, maxBytes, io);
             } catch (IOException e) {
                 last = e;
+                if (!s.valid || Thread.currentThread().isInterrupted()) throw e;
                 PluginLog.w("http", "第 " + (attempt + 1) + " 次请求失败：" + safeUrl(target)
                         + " → " + e.getClass().getSimpleName());
-                if (!shouldRetry(e)) {
+                if (!s.valid || Thread.currentThread().isInterrupted() || !shouldRetry(e)) {
                     break;
                 }
             }
@@ -206,6 +267,7 @@ final class Http {
 
     /** 只对"可能是瞬时故障"的错误重试：4xx / 畸形 URL / 超长响应都不重试。 */
     private static boolean shouldRetry(IOException e) {
+        if (e instanceof InterruptedIOException && !(e instanceof java.net.SocketTimeoutException)) return false;
         if (e instanceof HttpStatusException) {
             return ((HttpStatusException) e).status() >= 500;
         }
@@ -220,28 +282,66 @@ final class Http {
     }
 
     /** 节流：保证两次真实请求之间至少间隔 rateLimitMs。 */
-    private static void throttle() {
-        synchronized (LOCK) {
+    private static void check(Session s) throws InterruptedIOException {
+        if (!s.valid || Thread.currentThread().isInterrupted()) throw new InterruptedIOException("请求会话已取消");
+    }
+
+    private static void throttle(Session s) throws IOException {
+        check(s);
+        synchronized (RATE_LOCK) {
+            check(s);
             long waitMs = rateLimitMs - (System.nanoTime() - lastRequestNanos) / 1_000_000L;
             if (waitMs > 0) {
                 try {
                     Thread.sleep(waitMs);
                 } catch (InterruptedException ie) {
                     Thread.currentThread().interrupt();
+                    throw new InterruptedIOException("请求被中断");
                 }
             }
             lastRequestNanos = System.nanoTime();
+            check(s);
         }
     }
 
-    private static <T> T exchange(String method, String urlText, String body,
+    private static <T> T exchange(Session s, String method, String urlText, String body,
+                                  Map<String, String> headers, long maxBytes, Io<T> io)
+            throws IOException {
+        check(s);
+        java.util.concurrent.CompletableFuture<T> result = new java.util.concurrent.CompletableFuture<>();
+        Thread transfer = Thread.ofVirtual().name("netease-http-transfer").unstarted(() -> {
+            Session previous = enter(s);
+            try { result.complete(exchangeOnTransfer(s, method, urlText, body, headers, maxBytes, io)); }
+            catch (Throwable error) { result.completeExceptionally(error); }
+            finally { leave(previous); s.transfers.remove(Thread.currentThread()); }
+        });
+        s.transfers.add(transfer);
+        try {
+            check(s);
+            transfer.start();
+            return result.get();
+        } catch (InterruptedException cancelled) {
+            transfer.interrupt(); Thread.currentThread().interrupt();
+            throw new InterruptedIOException("请求被中断");
+        } catch (java.util.concurrent.ExecutionException failed) {
+            Throwable cause = failed.getCause();
+            if (cause instanceof IOException error) throw error;
+            if (cause instanceof RuntimeException error) throw error;
+            throw new IOException("网络传输失败", cause);
+        } finally { if (!transfer.isAlive()) s.transfers.remove(transfer); }
+    }
+
+    private static <T> T exchangeOnTransfer(Session s, String method, String urlText, String body,
                                   Map<String, String> headers, long maxBytes, Io<T> io)
             throws IOException {
         HttpURLConnection conn = null;
         try {
+            check(s);
             lastStatus = 0;
             java.net.URL url = java.net.URI.create(urlText).toURL();
             conn = open(url);
+            s.connections.add(conn);
+            check(s);
             conn.setRequestMethod(method);
             conn.setInstanceFollowRedirects(false);   // 302 交给上层（尤其 outer/url 直链）
             conn.setConnectTimeout(CONNECT_TIMEOUT_MS);
@@ -249,7 +349,9 @@ final class Http {
             conn.setUseCaches(false);
             conn.setDoInput(true);
 
-            Map<String, String> merged = merge(headers);
+            Session previous = enter(s);
+            Map<String, String> merged;
+            try { merged = merge(headers); } finally { leave(previous); }
             if (body != null && !merged.containsKey("Content-Type")) {
                 merged.put("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8");
             }
@@ -257,6 +359,7 @@ final class Http {
                 conn.setRequestProperty(e.getKey(), e.getValue());
             }
             if (body != null) {
+                check(s);
                 byte[] data = body.getBytes(StandardCharsets.UTF_8);
                 conn.setDoOutput(true);
                 conn.setFixedLengthStreamingMode(data.length);
@@ -267,10 +370,12 @@ final class Http {
                 }
             }
 
+            check(s);
             int code = conn.getResponseCode();
+            check(s);
             lastStatus = code;
             lastLocation = conn.getHeaderField("Location");
-            absorbCookies(conn.getHeaderFields());
+            absorbCookies(s, conn.getHeaderFields());
             if (code >= 400) {
                 // 4xx 是确定性失败、5xx 允许外层再试一次；两者都带 status 字段，由 request() 决定是否重试
                 throw new HttpStatusException(code, "HTTP " + code + " @ " + safeUrl(urlText));
@@ -279,10 +384,13 @@ final class Http {
                 if (raw == null) {
                     return null;
                 }
-                return io.read(gzip(raw));
+                T result = io.read(gzip(raw));
+                check(s);
+                return result;
             }
         } finally {
             if (conn != null) {
+                s.connections.remove(conn);
                 conn.disconnect();
             }
         }
@@ -338,7 +446,7 @@ final class Http {
     }
 
     /** 收集 Set-Cookie（同名覆盖，取 ';' 之前部分，形如 name=value）。 */
-    private static void absorbCookies(Map<String, List<String>> headerFields) {
+    private static void absorbCookies(Session s, Map<String, List<String>> headerFields) {
         if (headerFields == null || headerFields.isEmpty()) {
             return;
         }
@@ -356,6 +464,8 @@ final class Http {
             return;
         }
         synchronized (LOCK) {
+            if (!s.valid) return;
+            Map<String,String> COOKIES = s.cookies;
             for (String raw : setCookies) {
                 if (raw == null || raw.isEmpty()) {
                     continue;
@@ -433,7 +543,7 @@ final class Http {
     /** 只读快照（自测脚本用，不应出现在业务日志里）。 */
     static Map<String, String> snapshotCookies() {
         synchronized (LOCK) {
-            return Collections.unmodifiableMap(new LinkedHashMap<>(COOKIES));
+            return Collections.unmodifiableMap(new LinkedHashMap<>(session().cookies));
         }
     }
 }

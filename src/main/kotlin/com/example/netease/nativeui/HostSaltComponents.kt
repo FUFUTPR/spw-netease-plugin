@@ -50,6 +50,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.example.netease.core.PluginLog
 import com.example.netease.net.Dto
 import java.lang.reflect.Method
 import java.lang.reflect.Modifier as JavaModifier
@@ -68,7 +69,7 @@ private val artworkDispatcher = Dispatchers.IO.limitedParallelism(2)
 internal object HostSaltComponents {
     private fun component(owner: String, vararg parameters: String): Method {
         val matches = HostUiAbi.type(owner).declaredMethods.filter {
-            JavaModifier.isStatic(it.modifiers) && it.name == "\u037f" &&
+            JavaModifier.isStatic(it.modifiers) && it.name == COMPOSABLE_ENTRY &&
                 it.parameterTypes.map(Class<*>::getName) == parameters.map(HostUiAbi::name)
         }
         check(matches.size == 1) { "Salt UI signature missing or ambiguous: $owner ${parameters.toList()}" }
@@ -81,6 +82,11 @@ internal object HostSaltComponents {
     private const val F1 = "kotlin.jvm.functions.Function1"
     private const val F2 = "kotlin.jvm.functions.Function2"
     private const val F3 = "kotlin.jvm.functions.Function3"
+
+    private const val TAG = "native-ui"
+
+    /** 宿主所有 @Composable 组件的入口方法名。 */
+    private const val COMPOSABLE_ENTRY = "\u037f"
 
     // Voxzen uikit Button adds the player's small shape and hairline border to
     // SaltUI BasicButton. Calling SaltUI Button directly would use pill corners.
@@ -158,7 +164,8 @@ internal object HostSaltComponents {
         displayTrack(Dto.Song(1, "", "", "", 0, 0, true, ""), 0)
     }
 
-    fun describe(): String = "宿主 Voxzen Button / Salt Text / ItemEdit / Item / TrackItem / BasicScreenBox / ItemOuter"
+    fun describe(): String =
+        "宿主 Voxzen Button / Salt Text / ItemEdit / Item / TrackItem / BasicScreenBox / ItemOuter / TrackItem 展示缓存"
 
     fun drawBack(onClick: () -> Unit, composer: Composer) { back.invoke(null, onClick, composer, 0) }
 
@@ -198,17 +205,64 @@ internal object HostSaltComponents {
             0L, null, null, null, composer, 0, 0, ((1 shl 13) - 1) xor explicit)
     }
 
+    /** 25 参 Track 的显式参数位（其余走宿主默认掩码）。 */
+    private val trackExplicitMask = listOf(0, 1, 2, 3, 4, 7, 10, 11, 12, 17).fold(0) { mask, bit -> mask or (1 shl bit) }
+
+    /** 其它字段全部使用宿主默认值的掩码。 */
+    private val trackDefaultMask = ((1 shl 23) - 1) xor trackExplicitMask
+
+    private const val TRACK_CACHE_LIMIT = 256
+
+    /**
+     * 展示用 Track 的有界缓存：同一行反复重组（remember 失效、封面异步到达）时复用
+     * 同一个只读展示对象，避免每次都走 25 参构造器反射。键包含全部实际展示字段
+     * （id/歌名/歌手/专辑/时长/可播放性/行号/封面路径），同 id 元数据更新不会命中旧对象；
+     * 不含账号；对象本身只携带展示字段，从不写入宿主数据库。
+     *
+     * <p>容量上限 256：满了整体 clear（而不是逐条淘汰），避免为维护 LRU 引入额外开销；
+     * 清空只影响复用率，不影响正确性。</p>
+     */
+    private val trackCache = java.util.concurrent.ConcurrentHashMap<String, Any>()
+
+    private fun trackKey(song: Dto.Song, index: Int, coverPath: String?): String = buildString(64) {
+        append(song.id()).append('|')
+        append(song.name()).append('|')
+        append(song.artists()).append('|')
+        append(song.album()).append('|')
+        append(song.durationMs()).append('|')
+        append(song.playable()).append('|')
+        append(song.fee()).append('|')
+        // picUrl 也参与键：封面 URL 变了但本地封面路径暂时未变时，不能命中旧展示对象。
+        append(song.picUrl()).append('|')
+        append(index).append('|')
+        append(coverPath.orEmpty())
+    }
+
     /** A read-only presentation object; never inserted into the host database. */
     fun displayTrack(song: Dto.Song, index: Int, coverPath: String? = null): Any {
-        val explicit = listOf(0, 1, 2, 3, 4, 7, 10, 11, 12, 17).fold(0) { mask, bit -> mask or (1 shl bit) }
-        return trackConstructor.newInstance("netease-${song.id()}", song.name().orEmpty(), song.artists().orEmpty(),
+        val key = trackKey(song, index, coverPath)
+        trackCache[key]?.let { return it }
+        val created = newTrack(song, index, coverPath)
+        if (trackCache.size >= TRACK_CACHE_LIMIT) {
+            trackCache.clear()
+        }
+        return trackCache.putIfAbsent(key, created) ?: created
+    }
+
+    private fun newTrack(song: Dto.Song, index: Int, coverPath: String?): Any =
+        trackConstructor.newInstance("netease-${song.id()}", song.name().orEmpty(), song.artists().orEmpty(),
             song.album().orEmpty(), song.artists().orEmpty(), "", 0, index + 1, false, 0, index,
             coverPath ?: "netease-${song.id()}.flac", song.playable(), 0L, 0L, 0L, 0, song.durationMs(), 0, 0, 0f,
-            null, "", ((1 shl 23) - 1) xor explicit, null)
-    }
+            null, "", trackDefaultMask, null)
 
     fun drawTrack(presentation: Any, modifier: Modifier, composer: Composer, showImage: Boolean = true) {
         track.invoke(null, presentation, modifier, trackProperties(showImage), composer, 0, 0)
+    }
+
+    /** 插件卸载时释放展示缓存，避免下一次安装/换账号继续持有旧 Track。 */
+    fun clearCaches() {
+        trackCache.clear()
+        trackPropertiesCache.clear()
     }
 
     fun drawScreen(modifier: Modifier, title: String, action: Any, tools: Any, content: Any, composer: Composer) {
@@ -237,6 +291,7 @@ internal object HostStyle {
     val colors: HostSaltTheme.Palette @Composable get() = LocalSaltSnapshot.current.palette
     val shapes: HostSaltTheme.ShapeSet @Composable get() = LocalSaltSnapshot.current.shapes
     val typography: SaltTypography @Composable get() = SaltTypography(LocalSaltSnapshot.current.textStyles)
+
 }
 
 internal class SaltTypography(t: HostSaltTheme.TypeSet) {
@@ -258,19 +313,20 @@ internal fun SaltText(text: String, modifier: Modifier = Modifier, style: TextSt
 @Composable
 internal fun SaltButton(onClick: () -> Unit, modifier: Modifier = Modifier, enabled: Boolean = true,
                         content: @Composable RowScope.() -> Unit) {
-    HostSaltComponents.drawButton(onClick, modifier, enabled, "Filled", content, currentComposer)
+    // 记录真实按下的控件，供对话框/页面退场结束后归还焦点（按窗口隔离）。
+    HostSaltComponents.drawButton(onClick, modifier.focusReturnTarget(), enabled, "Filled", content, currentComposer)
 }
 
 @Composable
 internal fun SaltSecondaryButton(onClick: () -> Unit, modifier: Modifier = Modifier, enabled: Boolean = true,
                                  content: @Composable RowScope.() -> Unit) {
-    HostSaltComponents.drawButton(onClick, modifier, enabled, "Subtle", content, currentComposer)
+    HostSaltComponents.drawButton(onClick, modifier.focusReturnTarget(), enabled, "Subtle", content, currentComposer)
 }
 
 @Composable
 internal fun SaltPlainButton(onClick: () -> Unit, modifier: Modifier = Modifier, enabled: Boolean = true,
                              content: @Composable RowScope.() -> Unit) {
-    HostSaltComponents.drawButton(onClick, modifier, enabled, "Plain", content, currentComposer)
+    HostSaltComponents.drawButton(onClick, modifier.focusReturnTarget(), enabled, "Plain", content, currentComposer)
 }
 
 @Composable
@@ -306,7 +362,7 @@ internal fun SaltScreen(title: String, modifier: Modifier = Modifier, action: @C
 
 @Composable
 internal fun SaltItem(title: String, subtitle: String = "", modifier: Modifier = Modifier, onClick: () -> Unit) {
-    HostSaltComponents.drawItem(title, subtitle, modifier, onClick, currentComposer)
+    HostSaltComponents.drawItem(title, subtitle, modifier.focusReturnTarget(), onClick, currentComposer)
 }
 
 @Composable
@@ -360,4 +416,3 @@ internal fun SaltTrack(song: Dto.Song, index: Int, modifier: Modifier = Modifier
         })
     }
 }
-

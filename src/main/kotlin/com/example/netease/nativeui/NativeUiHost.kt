@@ -16,6 +16,7 @@ object NativeUiHost {
     @JvmStatic
     fun uninstall() {
         HostUiAdapter.uninstall()
+        HostSaltComponents.clearCaches()
         NativeUiPresentation.showConfiguration()
     }
 
