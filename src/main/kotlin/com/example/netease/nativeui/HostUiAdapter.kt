@@ -581,6 +581,7 @@ internal object HostUiAdapter {
     fun install(hostVersion: String, pluginVersion: String) {
         HostLibraryNotices.install()
         HostRowCoverHook.install()
+        HostSystemMediaCoverHook.install()
         NativeUiRuntime.hostVersion = hostVersion.ifBlank { "unknown" }
         NativeUiRuntime.pluginVersion = pluginVersion.ifBlank { "unknown" }
         if (handle != null) {
@@ -649,7 +650,7 @@ internal object HostUiAdapter {
             // 避免其它插件的配置页（共享同一个 ModConfigScreen）被本插件覆盖（REVIEW issue2）。
             NativeUiState.status =
                 "已挂载（唯一匹配，宿主 " + hostVersion + "，priority=" + PRIORITY + "）"
-            val warnings = listOfNotNull(HostLibraryNotices.failureMessage, HostRowCoverHook.failureMessage)
+            val warnings = listOfNotNull(HostLibraryNotices.failureMessage, HostRowCoverHook.failureMessage, HostSystemMediaCoverHook.failureMessage)
             if (warnings.isNotEmpty()) NativeUiState.status += "；" + warnings.joinToString("；")
             PluginLog.i(
                 TAG,
@@ -667,6 +668,7 @@ internal object HostUiAdapter {
     fun uninstall() {
         HostLibraryNotices.uninstall()
         HostRowCoverHook.uninstall()
+        HostSystemMediaCoverHook.uninstall()
         HostGlobalSearch.uninstall()
         val h = handle
         if (h == null) {

@@ -1478,6 +1478,13 @@ public final class CoverStore {
      * <p>纯离线：只按索引查文件名再读盘，不联网。专辑没登记 / 原图不在 → {@code null}。</p>
      */
     public static byte[] originalImage(String refKey) {
+        Path image=originalImageFile(refKey);
+        try {return image==null?null:Files.readAllBytes(image);}
+        catch(Throwable missing){PluginLog.d(TAG,"取封面原图失败（忽略）："+missing);return null;}
+    }
+
+    /** Stable cached original for the native Windows media session; no download or audio stub. */
+    public static Path originalImageFile(String refKey) {
         if (refKey == null || refKey.isBlank()) {
             return null;
         }
@@ -1497,7 +1504,7 @@ public final class CoverStore {
                 return null;
             }
             Path img = imagePath(name);
-            return Files.isRegularFile(img) ? Files.readAllBytes(img) : null;
+            return Files.isRegularFile(img) ? img : null;
         } catch (Throwable t) {
             PluginLog.d(TAG, "取封面原图失败（忽略）：" + t);
             return null;

@@ -27,6 +27,7 @@ public final class PluginUpdater implements AutoCloseable {
         public boolean busy() { return phase==Phase.PROBING || phase==Phase.DOWNLOADING || phase==Phase.VERIFYING; }
     }
     public record Source(String prefix, String label) { }
+    public record CheckResult(State state,String error) { }
     private record Probe(Source source, double speed) { }
     private static final List<Source> SOURCES = List.of(new Source("", "GitHub 官方"),
         new Source("https://gh-proxy.com/", "GH-Proxy"), new Source("https://ghfast.top/", "GHFast"));
@@ -52,6 +53,7 @@ public final class PluginUpdater implements AutoCloseable {
     private final Consumer<State> listener;
     private volatile State state = EMPTY;
     private volatile boolean closed, notifications = true;
+    private CompletableFuture<CheckResult> manualCheck;
 
     public PluginUpdater(Path data, String currentVersion, URI endpoint, List<Source> sources, Consumer<State> listener) {
         this(data,currentVersion,endpoint,sources,listener,null);
@@ -92,6 +94,19 @@ public final class PluginUpdater implements AutoCloseable {
     private void resolveDownloads() { if(!downloadsResolved){downloads=UserDownloads.resolve();downloadsResolved=true;} }
     public boolean notificationsEnabled() { return notifications; }
     public void checkNow() { if(!closed)try{worker.execute(()->check(true));}catch(RejectedExecutionException stopped){} }
+    /** Manual checks bypass startup reminder opt-out, without interrupting a download. */
+    public synchronized CompletableFuture<CheckResult> checkManually() {
+        if(closed)return CompletableFuture.completedFuture(new CheckResult(state,"检查已取消"));
+        if(state.busy())return CompletableFuture.completedFuture(new CheckResult(state,""));
+        if(manualCheck!=null)return manualCheck;
+        var result=new CompletableFuture<CheckResult>();manualCheck=result;
+        try{worker.execute(()->{
+            CheckResult checked=performCheck(true);
+            synchronized(this){if(manualCheck==result)manualCheck=null;}
+            result.complete(checked);
+        });}catch(RejectedExecutionException stopped){manualCheck=null;result.complete(new CheckResult(state,"检查已取消"));}
+        return result;
+    }
     public CompletableFuture<Boolean> setNotifications(boolean value) {
         CompletableFuture<Boolean> result=new CompletableFuture<>();
         if(closed){result.complete(false);return result;}
@@ -104,16 +119,20 @@ public final class PluginUpdater implements AutoCloseable {
         return result;
     }
     private void check(boolean manual) {
-        if(closed || state.busy())return;
+        performCheck(manual);
+    }
+    private CheckResult performCheck(boolean manual) {
+        if(closed)return new CheckResult(state,"检查已取消");
+        if(state.busy())return new CheckResult(state,"");
         long token=generation.incrementAndGet();
         try {
             try {
                 if(Files.isRegularFile(preferences) && Files.size(preferences)<8192)
                     notifications=!Boolean.FALSE.equals(Json.object(Files.readString(preferences)).get("notifications"));
             }catch(Exception invalid){PluginLog.w("updates","更新提醒设置不可读，使用默认提醒");}
-            if(!manual&&!notifications){publish(token,EMPTY);return;}
+            if(!manual&&!notifications){publish(token,EMPTY);return new CheckResult(state,"");}
             numbers(currentVersion.replaceFirst("^[vV]",""));
-            publish(token,new State(Phase.CHECKING,null,0,0,null,"",""));
+            publish(token,new State(Phase.CHECKING,null,0,0,null,"正在检查最新版本",""));
             Release release=null;boolean fetched=false;
             List<Source> metadata=fixture?List.of(new Source("","fixture")):sources;
             for(Source source:metadata) {
@@ -122,12 +141,14 @@ public final class PluginUpdater implements AutoCloseable {
                 catch(Exception failure){PluginLog.d("updates","发布信息线路暂不可用："+source.label());}
             }
             if(!fetched)throw new IOException("无法获取 GitHub 发布信息");
-            if(release==null || compareVersions(release.version(),currentVersion)<=0){publish(token,EMPTY);return;}
+            if(release==null || compareVersions(release.version(),currentVersion)<=0){publish(token,EMPTY);return new CheckResult(state,"");}
             resolveDownloads();ensure(token);
             Path existing=existingDownload(release);
-            if(existing!=null){publish(token,new State(Phase.COMPLETE,release,release.size(),release.size(),existing,"下载完毕","本地文件"));return;}
+            if(existing!=null){publish(token,new State(Phase.COMPLETE,release,release.size(),release.size(),existing,"下载完毕","本地文件"));return new CheckResult(state,"");}
             publish(token,new State(Phase.AVAILABLE,release,0,release.size(),null,"网易云插件已有新版本",""));
-        }catch(Exception error){if(valid(token)){PluginLog.w("updates","自动检查更新未完成："+error.getClass().getSimpleName());publish(token,EMPTY);}}
+            return new CheckResult(state,"");
+        }catch(Exception error){if(valid(token)){PluginLog.w("updates","检查更新未完成："+error.getClass().getSimpleName());publish(token,EMPTY);}
+            return new CheckResult(state,closed?"检查已取消":"检查更新失败，请检查网络后重试");}
     }
     @SuppressWarnings("unchecked")
     public static Release parseRelease(String payload,boolean fixture) throws IOException {
@@ -330,7 +351,8 @@ public final class PluginUpdater implements AutoCloseable {
     private void ensure(long token)throws IOException {if(!valid(token))throw new IOException("更新任务已取消");}
     private synchronized void publish(long token,State next){if(!valid(token))return;state=next;if(listener!=null)try{listener.accept(next);}catch(Throwable ignored){}}
     @Override public void close() {
-        synchronized(this){if(closed)return;closed=true;generation.incrementAndGet();}
+        synchronized(this){if(closed)return;closed=true;generation.incrementAndGet();
+            if(manualCheck!=null){manualCheck.complete(new CheckResult(state,"检查已取消"));manualCheck=null;}}
         pending.forEach(f->f.cancel(true));closeConnectionsAsync();
         worker.shutdownNow();probes.shutdownNow();connectionCloser.shutdown();
         long deadline=System.nanoTime()+TimeUnit.MILLISECONDS.toNanos(600);

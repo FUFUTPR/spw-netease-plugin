@@ -1358,6 +1358,11 @@ public final class PlaybarCover {
         }
         callStaticArgs(pmKt, "updateImageBitmap", monitor, owner);
         lastOwnerInjected = owner;                             // 判「这一曲到底投成没投成」（诊断用）
+        if(com.example.netease.host.HostSystemMediaCover.supported()) {
+            String ref=refKeyOf(songId);
+            java.nio.file.Path original=CoverStore.originalImageFile(ref);
+            if(original!=null)com.example.netease.host.HostSystemMediaCover.offer(songId,original.toFile());
+        }
         return null;
     }
 

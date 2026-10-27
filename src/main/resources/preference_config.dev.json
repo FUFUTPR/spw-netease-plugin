@@ -212,6 +212,13 @@
       "config": "config.json",
       "preferences": [
         {
+          "type": "button",
+          "title": "检查更新",
+          "summary": "检查网易云插件是否有新版本",
+          "arrow_type": "none",
+          "on_click": "com.example.netease.NeteasePlugin.checkForUpdates"
+        },
+        {
           "type": "switch",
           "key": "enabled",
           "title": "启用插件",

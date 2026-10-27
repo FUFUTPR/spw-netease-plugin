@@ -9,6 +9,9 @@ package com.example.netease.nativeui
  */
 object NativeUiHost {
     @JvmStatic
+    fun checkForUpdates(): Boolean = NativeUpdateUi.checkForUpdates()
+
+    @JvmStatic
     fun install(hostVersion: String, pluginVersion: String) {
         // Compose forget/dispose may run in a later frame, after PF4J has closed and moved this module.
         com.example.netease.core.UiCallbackLifetime.prime(NativeUiHost::class.java)

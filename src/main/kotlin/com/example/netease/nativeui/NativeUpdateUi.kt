@@ -40,18 +40,48 @@ internal object NativeUpdateUi {
     private var installed by mutableStateOf(false)
     private var error by mutableStateOf("")
     private var epoch = 0L
+    private var checking by mutableStateOf(false)
+    private var checkNotice by mutableStateOf("")
+    private var manualRequest = 0L
+    private data class DialogState(val update:PluginUpdater.State,val checking:Boolean,val notice:String)
     fun attach() {
         val token=++epoch
         installing=false;installed=false
+        checking=false;checkNotice="";++manualRequest
         PluginUpdater.observe { next -> if (token==epoch) state=next }
     }
     fun stop() {
         ++epoch;PluginUpdater.observe(null)
         visible=false;exiting=false;background=false;saving=false;installing=false;installed=false;error=""
+        checking=false;checkNotice="";++manualRequest
         state=PluginUpdater.snapshot()
     }
     fun dialogOpen() = visible || exiting
-    fun windowUnavailable() { visible=false;exiting=false;background=true;saving=false }
+    fun windowUnavailable() { visible=false;exiting=false;background=true;saving=false;checking=false;checkNotice="";++manualRequest }
+    fun checkForUpdates(): Boolean {
+        val engine=PluginUpdater.global() ?: return false
+        if(checking)return true
+        if(installing || saving || (NativeUiPresentation.anyDialogOpen() && !visible))return false
+        if(engine.state().busy()) {state=engine.state();if(!visible)openDialog();return true}
+        val lifecycle=epoch;val request=++manualRequest
+        checking=true;checkNotice="";error="";installed=false;background=false;visible=true
+        engine.checkManually().whenComplete { result, failure -> java.awt.EventQueue.invokeLater {
+            if(lifecycle==epoch && request==manualRequest && checking && PluginUpdater.global()===engine) {
+                checking=false
+                if(failure!=null || result==null)checkNotice="检查更新失败，请稍后重试"
+                else {
+                    state=result.state()
+                    checkNotice=when {
+                        result.error().isNotBlank() -> result.error()
+                        state.release()==null -> "没有可用的新版本"
+                        else -> ""
+                    }
+                    optedOut=!engine.notificationsEnabled()
+                }
+            }
+        }}
+        return true
+    }
     private fun closeDialog() {
         if (!visible) return
         visible=false;exiting=true
@@ -77,6 +107,7 @@ internal object NativeUpdateUi {
     }
     fun dismiss() {
         if(!visible || saving || installing)return
+        if(checking || checkNotice.isNotBlank()) {checking=false;checkNotice="";++manualRequest;closeDialog();return}
         when {
             state.busy() -> { PluginUpdater.global()?.cancel();closeDialog() }
             state.phase()==Phase.COMPLETE -> closeDialog()
@@ -84,7 +115,7 @@ internal object NativeUpdateUi {
         }
     }
     fun confirm(displayed:Phase) {
-        if(!visible || saving || installing)return
+        if(!visible || saving || installing || checking || checkNotice.isNotBlank())return
         when {
             displayed in listOf(Phase.PROBING,Phase.DOWNLOADING,Phase.VERIFYING) -> {
                 // Preserve the clicked button's intent even if completion arrived
@@ -166,21 +197,26 @@ internal object NativeUpdateUi {
             }
         }
         DisposableEffect(Unit) { guardedCleanup { windowUnavailable() } }
-        val shown=rememberRetained(state.takeIf { visible }) ?: state
+        val presentation=DialogState(state,checking,checkNotice)
+        val shown=rememberRetained(presentation.takeIf { visible }) ?: presentation
         AnimatedVisibility(visibleState=transition,modifier=Modifier.fillMaxSize(),
             enter=fadeIn(Motion.dialogEnter()),exit=fadeOut(Motion.dialogExit())) {
-            val current=shown
+            val current=shown.update
+            val checkingNow=shown.checking
+            val notice=shown.notice
             val complete=current.phase()==Phase.COMPLETE
             val busy=current.busy()
             EmbeddedSaltDialog(
-                title=when {complete->"下载完毕";busy->"正在下载新版本，请耐心等待";else->"网易云插件已有新版本"},
-                onDismiss=::dismiss,onConfirm={confirm(current.phase())},confirmVisible=true,
-                cancelText=when {busy->"取消下载";complete->"关闭";else->"取消"},
+                title=when {checkingNow->"正在检查最新版本";notice.isNotBlank()->"检查更新";complete->"下载完毕";busy->"正在下载新版本，请耐心等待";else->"网易云插件已有新版本"},
+                onDismiss=::dismiss,onConfirm={confirm(current.phase())},confirmVisible=!checkingNow&&notice.isBlank(),
+                cancelText=when {checkingNow||notice.isNotBlank()->"关闭";busy->"取消下载";complete->"关闭";else->"取消"},
                 confirmText=when {busy->"后台下载";complete->"安装";else->"确定"},
                 interactive=visible,
             ) {
                 Column(Modifier.fillMaxWidth().animateContentSize(Motion.state()),verticalArrangement=Arrangement.spacedBy(12.dp)) {
-                    if(busy || complete) {
+                    if(checkingNow || notice.isNotBlank()) {
+                        SaltText(if(checkingNow)"请稍候…" else notice)
+                    } else if(busy || complete) {
                         SaltText(if(complete)"安装完成后请手动启动插件" else "下载完成后可点击安装",style=HostStyle.typography.bodySmall)
                         UpdateProgress(current,small=false)
                     } else {

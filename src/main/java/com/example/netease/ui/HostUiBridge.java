@@ -31,6 +31,11 @@ public final class HostUiBridge {
         invoke("uninstall");
     }
 
+    public static boolean checkForUpdates() {
+        try {return Boolean.TRUE.equals(Class.forName(IMPL).getMethod("checkForUpdates").invoke(null));}
+        catch(Throwable error){PluginLog.w("updates","手动更新界面不可用："+error);return false;}
+    }
+
     /**
      * 原生页面路由（批次 3）：宿主配置页的「搜索歌曲 / 歌单与同步状态 / 登录 / 当前账号」先尝试
      * 打开主窗口内的原生页；返回 false 表示原生层未就绪（Hook 未装、Kotlin 类缺失等），调用方回退旧窗口。

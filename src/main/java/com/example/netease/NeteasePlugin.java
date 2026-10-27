@@ -1427,6 +1427,17 @@ public final class NeteasePlugin extends SpwPlugin {
 
     // ------------------------------------------------- 「维护」组：清缓存 / 重同步 / 诊断
 
+    /** Explicit user action, available with developer mode disabled too. */
+    public static void checkForUpdates() {
+        guard(() -> HostBridgeWorker.get().submit(() -> {
+            if(!HostUiBridge.checkForUpdates()) {
+                try{com.xuncorp.spw.workshop.api.WorkshopApi.ui().toast("暂时无法检查更新，请确认插件已启动后重试",
+                    com.xuncorp.spw.workshop.api.WorkshopApi.Ui.ToastType.Warning);}
+                catch(Throwable error){PluginLog.w("updates","手动检查更新入口不可用："+error);}
+            }
+        }));
+    }
+
     /** 把多行摘要压成一行（toast 与日志都只放得下一行）。 */
     private static String oneLine(String s) {
         if (s == null || s.isBlank()) {

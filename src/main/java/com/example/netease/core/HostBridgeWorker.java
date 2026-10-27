@@ -104,12 +104,34 @@ public final class HostBridgeWorker {
         return Thread.currentThread() == thread && thread != null;
     }
 
+    /** Native import waits for the host's separate stop callback. Reserve this worker
+     * for that callback's final cleanup instead of waiting for it on this same worker.
+     * Binding/validation are complete before this explicit handoff; no ordinary host
+     * work runs concurrently with the native transaction. Failed handoffs resume it.
+     */
+    public synchronized boolean handoffNativeInstall(Runnable transaction) {
+        if(!isOnWorkerThread()||closing||transaction==null)return false;
+        Thread owner=thread;
+        var held=new java.util.ArrayList<Runnable>();
+        closing=true;queue.drainTo(held);
+        Runnable resume=()->{synchronized(this){
+            if(running&&thread==owner){closing=false;for(Runnable task:held)queue.offerLast(task);}
+            held.clear();
+        }};
+        try {
+            Thread handoff=new Thread(()->{try{transaction.run();}finally{resume.run();}},"netease-native-install");
+            handoff.setDaemon(true);
+            handoff.setContextClassLoader(HostBridgeWorker.class.getClassLoader().getParent());
+            handoff.start();return true;
+        }catch(Throwable failed){resume.run();return false;}
+    }
+
     /**
      * 投递一个宿主交互任务。**永不阻塞、永不抛**；队列满或未启动时丢弃并记日志。
      *
      * @return 是否成功入队
      */
-    public boolean submit(Runnable task) {
+    public synchronized boolean submit(Runnable task) {
         if (task == null) {
             return false;
         }
@@ -135,7 +157,7 @@ public final class HostBridgeWorker {
      *
      * @return 是否成功入队
      */
-    public boolean submitFast(Runnable task) {
+    public synchronized boolean submitFast(Runnable task) {
         if (task == null) {
             return false;
         }
