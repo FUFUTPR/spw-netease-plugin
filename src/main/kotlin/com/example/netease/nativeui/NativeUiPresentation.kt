@@ -60,7 +60,7 @@ internal object NativeUiPresentation {
     fun isPage(page: NativePage) = page == NativePage.SEARCH || page == NativePage.PLAYLIST
     fun modalOpen() = NativeUiState.visible && NativeUiState.page != NativePage.HOME && !isPage(NativeUiState.page)
     fun anyDialogOpen() = modalOpen() || modalClosing || localSaveOpen || localSaveClosing ||
-        modalAnimating || localSaveAnimating || HostCloudSongMenu.dialogOpen()
+        modalAnimating || localSaveAnimating || HostCloudSongMenu.dialogOpen() || NativeUpdateUi.dialogOpen()
 
 
     /** 页面转场期间也要阻止背景（宿主配置页）获得焦点/点击。 */

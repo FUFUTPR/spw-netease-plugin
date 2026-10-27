@@ -69,6 +69,36 @@ public final class CoverDelivery {
     private CoverDelivery() {
     }
 
+    /** Inspect the host's live index, not just files or an externally appended journal. */
+    static boolean thumbnailReady(String key, long sourceTime) {
+        Object cache = disk();
+        return cache != null && snapshotLen(cache, key) > 0 && !staleKey(key, sourceTime);
+    }
+
+    /** Prepared image bytes only. Returns 1 for a committed write, 0 for a hit, -1 for failure. */
+    static int putThumbnail(String key, byte[] bytes, long sourceTime) {
+        Object cache = disk();
+        if (cache == null || bytes == null || bytes.length == 0) return -1;
+        if (snapshotLen(cache, key) > 0 && !staleKey(key, sourceTime)) return 0;
+        StringBuilder why = new StringBuilder();
+        if (write(cache, key, bytes, why) <= 0 || snapshotLen(cache, key) != bytes.length) {
+            fail("列表封面提交未通过回验：" + why);
+            return -1;
+        }
+        KEYS_OK.incrementAndGet();
+        return 1;
+    }
+
+    static void retireThumbnail(String key) {
+        try {
+            Object cache = disk();
+            if (cache != null) cache.getClass().getMethod("remove", String.class).invoke(cache, key);
+            WROTE_KEYS.remove(key);
+        } catch (ReflectiveOperationException error) {
+            PluginLog.d(TAG, "旧封面键等待宿主自然淘汰：" + error);
+        }
+    }
+
     /**
      * 给一首曲目补投宿主封面键（幂等：已命中正条目的键直接跳过；<b>陈旧键例外</b> —— 图换过
      * 时不受「本会话已写」兜底，一律重写，见 {@link #staleKey}）。
@@ -178,7 +208,7 @@ public final class CoverDelivery {
                     detail.append(sz).append(" 档 陈旧（图 mtime ").append(srcT)
                             .append(" > 键）⇒ 重写（忽略本会话已写兜底）；");
                 }
-                if (!stale && WROTE_KEYS.contains(key)) {
+                if (!stale && mOpenSnapshot == null && WROTE_KEYS.contains(key)) {
                     ok++;                              // 本会话刚写过（回读不可用时的幂等兜底）
                     hit++;
                     detail.append(sz).append(" 档 本会话已写（跳过）");
@@ -274,7 +304,7 @@ public final class CoverDelivery {
     // ------------------------------------------------------------------ 宿主库行
 
     /** {@code album / artist / path / size / coverRevision}；读不到返回 null。 */
-    private static String[] readRow(long songId) {
+    static String[] readRow(long songId) {
         Path db = CoverPrimer.hostDb();
         if (db == null) {
             return null;
@@ -595,12 +625,13 @@ public final class CoverDelivery {
      * 签名只作兜底，并把结果写进 {@link #lastSnapWhy} 让「未命中」自解释。</p>
      */
     private static long snapshotLen(Object disk, String key) {
+        Object snap = null;
         try {
             if (mOpenSnapshot == null) {
                 lastSnapWhy = "openSnapshot 句柄不可用";
                 return 0L;
             }
-            Object snap = mOpenSnapshot.invoke(disk, key);
+            snap = mOpenSnapshot.invoke(disk, key);
             if (snap == null) {
                 lastSnapWhy = "openSnapshot(key) 返回 null";
                 return 0L;
@@ -620,12 +651,13 @@ public final class CoverDelivery {
             long n = p == null ? 0L : Files.size(p);
             lastSnapWhy = "命中 " + n + " B（" + how + " " + getData.getName() + " → " + p + "）";
             lastSnapLen = n;
-            closeQuietly(snap);
             return n;
         } catch (Throwable t) {
             lastSnapWhy = "读键异常 " + t.getClass().getSimpleName() + "：" + t.getMessage();
             PluginLog.d(TAG, "读宿主缓存键失败（当作未命中）：" + t);
             return 0L;
+        } finally {
+            closeQuietly(snap);
         }
     }
 

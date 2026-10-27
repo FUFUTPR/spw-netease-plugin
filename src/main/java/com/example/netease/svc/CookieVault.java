@@ -89,7 +89,9 @@ public final class CookieVault {
             } catch (Throwable t) {
                 PluginLog.w("account", "创建凭据目录失败：" + dataDir + " :: " + t);
             }
+            VaultRecovery.restoreMissing(dataDir);
             key = loadOrCreateKey();
+            VaultRecovery.checkpoint(dataDir);
         }
     }
 
@@ -138,6 +140,7 @@ public final class CookieVault {
                 backupHostConfigIfAny(f);
                 writeAtomically(f, text);
                 if (!plaintextCookie.equals(load())) throw new java.io.IOException("凭据回读与本次写入不一致");
+                VaultRecovery.checkpoint(dir);
                 PluginLog.i("account", "凭据已加密保存：" + f.getFileName() + "（密文 " + text.length()
                         + " 字符 / 明文长度 " + plaintextCookie.length() + "，内容不落日志）");
                 return true;
@@ -196,6 +199,8 @@ public final class CookieVault {
                 return;
             }
             try {
+                // An explicit logout must not be undone by recovery on the next import/start.
+                VaultRecovery.clear(dir);
                 boolean deleted = Files.deleteIfExists(f);
                 PluginLog.i("account", deleted ? "凭据文件已删除（密钥保留）" : "凭据文件本就不存在");
             } catch (Throwable t) {
@@ -213,6 +218,9 @@ public final class CookieVault {
     public static Path dir() {
         return dir;
     }
+
+    /** Called before an in-player module update; no network, never changes valid credentials. */
+    public static void checkpoint() { synchronized (LOCK) { if (dir != null) VaultRecovery.checkpoint(dir); } }
 
     // ------------------------------------------------------------------ 内部
 

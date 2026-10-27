@@ -66,4 +66,5 @@ internal object HostUiAbi {
         else -> renamed[value] ?: value
     }
     fun type(value: String): Class<*> = Class.forName(name(value), false, javaClass.classLoader)
+    fun workshopRoute(): Any = type("com.xuncorp.voxzen.ui.navigation.ScreenRoute\$Workshop").getField("INSTANCE").get(null)
 }

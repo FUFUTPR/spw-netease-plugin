@@ -101,7 +101,7 @@ internal object NativeUiState {
 @Composable
 internal fun NativeUiPanel() {
     DisposableEffect(Unit) {
-        onDispose {
+        guardedCleanup {
             // 路由卸载后不会再有 Transition 观察者来清 animating/closing；先回落路由，再统一清标志，
             // 否则 leaveHostRoute() 里的 showConfiguration() 会把 modalClosing/pageClosing 留在 true。
             NativeUiPresentation.leaveHostRoute()
@@ -171,7 +171,7 @@ private fun NativeUiShell() {
     }
     // 路由在转场中途被卸载时，动画状态不会自己归零；残留的 true 会永久挡住背景焦点与点击。
     DisposableEffect(Unit) {
-        onDispose { NativeUiPresentation.resetMotion() }
+        guardedCleanup { NativeUiPresentation.resetMotion() }
     }
 
     if (background == NativePage.HOME && !NativeUiPresentation.anyDialogOpen() && PluginConfig.devMode()) {

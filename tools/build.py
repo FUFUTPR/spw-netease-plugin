@@ -629,7 +629,7 @@ def _run_build(args) -> int:
     log(f"  sha256  : {digest}")
     log(f"  耗时    : {time.time() - t0:.1f}s")
     log("")
-    log("  安装／升级：在椒盐的模组管理中导入此 .spmod，应用可保持打开。")
+    log("  安装／升级：在椒盐的模组管理中直接导入此 .spmod。")
     return 0
 
 

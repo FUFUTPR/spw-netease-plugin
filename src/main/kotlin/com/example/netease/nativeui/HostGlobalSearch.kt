@@ -4,6 +4,8 @@ package com.example.netease.nativeui
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.background
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
@@ -13,14 +15,26 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.input.pointer.*
 import androidx.compose.animation.*
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.MotionDurationScale
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.awt.LocalAwtWindow
 import com.example.netease.core.PluginLog
@@ -82,6 +96,7 @@ internal object HostGlobalSearch {
             handles += WorkshopApi.hookRegistrar.replaceComposable(HostUiAbi.name(TITLE), "\u037f", titleCaller(), titleParams.map(HostUiAbi::name), 100, TitleHook)
             enabled = PluginConfig.searchBoxEnabled()
             HostCloudSongMenu.install()
+            NativeUpdateUi.attach()
             if (enabled) NativeTopSearch.start()
             PluginConfig.setSearchBoxHook { value ->
                 enabled = value
@@ -91,6 +106,7 @@ internal object HostGlobalSearch {
         } catch (error: Throwable) { uninstall(); throw error }
     }
     fun uninstall() {
+        NativeUpdateUi.stop()
         HostCloudSongMenu.uninstall()
         PluginConfig.setSearchBoxHook(null)
         NativeTopSearch.stop()
@@ -111,16 +127,21 @@ internal object HostGlobalSearch {
             LaunchedEffect(material == null, HostCloudSongMenu.dialogOpen()) {
                 if (material == null && HostCloudSongMenu.dialogOpen()) HostCloudSongMenu.stop()
             }
-            LaunchedEffect(mainTitle, HostCloudSongMenu.dialogOpen(), material) {
-                // 标题退场后，等云歌单菜单的退场动画结束再释放材质（否则 PopupHazeState 会缺席）。
-                if (!mainTitle && !HostCloudSongMenu.dialogOpen()) popupMaterial = null
+            LaunchedEffect(material == null, NativeUpdateUi.dialogOpen()) {
+                if(material == null && NativeUpdateUi.dialogOpen()) NativeUpdateUi.windowUnavailable()
             }
-            DisposableEffect(Unit) { onDispose { popupMaterial = null } }
-            Box(Modifier.fillMaxSize().onGloballyPositioned { rootBounds = it.boundsInRoot() }
+            LaunchedEffect(mainTitle, HostCloudSongMenu.dialogOpen(), NativeUpdateUi.dialogOpen(), material) {
+                // 标题退场后，等云歌单菜单的退场动画结束再释放材质（否则 PopupHazeState 会缺席）。
+                if (!mainTitle && !HostCloudSongMenu.dialogOpen() && !NativeUpdateUi.dialogOpen()) popupMaterial = null
+            }
+            DisposableEffect(Unit) { guardedCleanup { popupMaterial = null } }
+            BoxWithConstraints(Modifier.fillMaxSize().onGloballyPositioned { rootBounds = it.boundsInRoot() }
                 .onPointerEvent(PointerEventType.Press, PointerEventPass.Initial) { event ->
                     val position = event.changes.firstOrNull()?.position?.plus(rootBounds.topLeft)
-                    if (position != null && (NativeTopSearch.focused || NativeTopSearch.expanded) &&
+                    if (position != null && !NativeUiPresentation.anyDialogOpen() &&
+                        (NativeTopSearch.focused || NativeTopSearch.expanded || NativeTopSearch.compactOpen) &&
                         !NativeTopSearch.fieldBounds.contains(position) &&
+                        !(NativeTopSearch.compactOpen && NativeTopSearch.compactBounds.contains(position)) &&
                         !(NativeTopSearch.expanded && NativeTopSearch.suggestionBounds.contains(position))) {
                         NativeTopSearch.collapse(); focus.clearFocus()
                         // Observe only: the same click still reaches the host control underneath.
@@ -133,8 +154,8 @@ internal object HostGlobalSearch {
                     val interactive = !NativeUiPresentation.anyDialogOpen()
                     HostSaltTheme.read()?.let { snapshot ->
                         CompositionLocalProvider(LocalSaltSnapshot provides snapshot) {
-                            if (enabled) Overlay(interactive)
-                            if (interactive) SyncNotice()
+                            Overlay(interactive, maxWidth)
+                            NativeUpdateUi.run { Bubble(maxWidth) }
                         }
                     }
                 }
@@ -143,6 +164,14 @@ internal object HostGlobalSearch {
                         CompositionLocalProvider(LocalSaltSnapshot provides snapshot,
                             hazeLocals[0] provides material.wallpaper, hazeLocals[1] provides material.popup) {
                             HostCloudSongMenu.Dialogs()
+                        }
+                    }
+                }
+                if (NativeUpdateUi.dialogOpen() && material != null) {
+                    HostSaltTheme.read()?.let { snapshot ->
+                        CompositionLocalProvider(LocalSaltSnapshot provides snapshot,
+                            hazeLocals[0] provides material.wallpaper,hazeLocals[1] provides material.popup) {
+                            NativeUpdateUi.Dialogs()
                         }
                     }
                 }
@@ -163,7 +192,7 @@ internal object HostGlobalSearch {
                 draw(title, call.arguments.take(4), currentComposer)
             }
             // 只标记标题已退场；材质由 RootHook 在「无对话框且无退场动画」后统一释放，避免撤得太早。
-            DisposableEffect(Unit) { onDispose { mainTitle = false; navigator.clear() } }
+            DisposableEffect(Unit) { guardedCleanup { mainTitle = false; navigator.clear() } }
         }
     }
     private fun navigate(): Boolean {
@@ -177,24 +206,19 @@ internal object HostGlobalSearch {
         } catch (error: Throwable) { PluginLog.w("native-ui", "打开搜索结果失败：$error"); false }
     }
 
-    @Composable private fun BoxScope.SyncNotice() {
-        val message = syncProgressMessage(NativeUiState.sync)
-        // 退场期间仍显示最后一条同步提示，避免文字先消失、卡片再淡出。
-        val shown = rememberRetained(message.takeIf { it.isNotBlank() })
-        val width = with(LocalDensity.current) { titleBounds.width.toDp() }
-        AnimatedVisibility(
-            visible = message.isNotBlank(),
-            modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth()
-                .padding(start = if (width >= 640.dp) 244.dp else 16.dp, end = 16.dp, bottom = 104.dp),
-            enter = fadeIn(Motion.state()) + expandVertically(Motion.state(), expandFrom = Alignment.Top),
-            exit = fadeOut(Motion.state()) + shrinkVertically(Motion.state(), shrinkTowards = Alignment.Top),
-        ) {
-            SaltText(shown.orEmpty(), modifier = Modifier.fillMaxWidth()
-                .background(HostStyle.colors.subBackground, RoundedCornerShape(10.dp)).padding(12.dp),
-                style = HostStyle.typography.bodyMedium)
+    internal fun openWorkshop(): Boolean {
+        val nav=navigator.get() ?: return false
+        return try {
+            NativeUiPresentation.showConfiguration()
+            nav.javaClass.getMethod("navigate",Class.forName("com.xuncorp.voxzen.ui.navigation.ScreenRoute"))
+                .invoke(nav,HostUiAbi.workshopRoute())
+            true
+        } catch(error:Throwable) {
+            PluginLog.w("updates","打开工坊页面失败：$error");false
         }
     }
-    @Composable private fun BoxScope.Overlay(interactive: Boolean) {
+
+    @Composable private fun BoxScope.Overlay(interactive: Boolean, rootWidth: Dp) {
         val density = LocalDensity.current
         val focus = LocalFocusManager.current
         val overlayAlpha by animateFloatAsState(
@@ -204,29 +228,164 @@ internal object HostGlobalSearch {
         )
         val x = with(density) { (titleBounds.left - rootBounds.left).toDp() }
         val y = with(density) { (titleBounds.top - rootBounds.top).toDp() }
-        val w = with(density) { titleBounds.width.toDp() }
+        // Read current measurement constraints, not the previous frame's global
+        // bounds. Main title spans the root inside the symmetric native frame.
+        val w = (rootWidth - x * 2).coerceAtLeast(0.dp)
         val h = with(density) { titleBounds.height.toDp() }
-        // The host's sidebar toggle and account/window buttons do not shrink with the window.
-        // Percentage padding let the focused field expand across those controls at small widths.
+        val message = syncProgressMessage(NativeUiState.sync)
+        val visibility = remember { MutableTransitionState(false) }
+        visibility.targetState = interactive && message.isNotBlank()
+        val showing = visibility.currentState || visibility.targetState
+        SideEffect { HostLibraryNotices.progressVisible = showing }
+        DisposableEffect(Unit) { guardedCleanup { HostLibraryNotices.progressVisible = false } }
+        val count = NativeUiState.sync?.takeIf { it.total() > 0 }?.let { "${it.completed()}/${it.total()}" }.orEmpty()
+        val shown = rememberRetained(message.takeIf { it.isNotBlank() }?.let {
+            Triple(it.substringBefore("（"), count, it)
+        })
         if (w < 420.dp) return
-        val contentLeft = 244.dp // Native sidebar is 220 dp; keep a visible 24 dp gutter.
-        val left = if (w >= 640.dp) contentLeft else 56.dp
-        val right = if (w >= 640.dp) w - 330.dp else minOf(180.dp, w - 330.dp)
-        val fieldWidth = (right - left).coerceAtLeast(0.dp)
-        val suggestionWidth = minOf(w - contentLeft - 16.dp, maxOf(320.dp, minOf(740.dp, fieldWidth)))
-        val suggestionLeft = (left + (fieldWidth - suggestionWidth) / 2)
-            .coerceIn(contentLeft, (w - 16.dp - suggestionWidth).coerceAtLeast(contentLeft))
-        Box(Modifier.offset(x + left, y).width(fieldWidth).height(h).alpha(overlayAlpha)
-            .then(if (interactive) Modifier else Modifier.blockAllPointerEvents().clearAndSetSemantics {}),
-            contentAlignment = Alignment.Center) {
-            NativeTopSearchField(::navigate, Modifier.widthIn(max = 740.dp).fillMaxWidth().height(minOf(34.dp, h)),
-                interactive = interactive)
+        val contentLeft = 244.dp
+        val left = minOf(contentLeft, (w - 510.dp).coerceAtLeast(56.dp))
+        val right = w - 330.dp
+        val available = (right - left).coerceAtLeast(0.dp)
+        // Modal fading must not also expand/collapse the titlebar underneath it.
+        val reserved = message.isNotBlank() || showing
+        var wasCompact by remember { mutableStateOf(false) }
+        val threshold = if (reserved) 580.dp else 180.dp
+        // Resize noise near the breakpoint cannot flip input modes every frame.
+        val compact = enabled && available < threshold + if (wasCompact) 12.dp else (-12).dp
+        SideEffect {
+            wasCompact = compact
+            // A previous compact session must not reopen on the next shrink.
+            if (!compact) NativeTopSearch.compactOpen = false
         }
-        Box(Modifier.offset(x + suggestionLeft, y + h).width(suggestionWidth), contentAlignment = Alignment.TopCenter) {
-            AnimatedVisibility(NativeTopSearch.expanded,
+        LaunchedEffect(compact) {
+            if (compact && !NativeTopSearch.compactOpen) {
+                NativeTopSearch.suspendForDialog()
+                focus.clearFocus()
+            }
+        }
+        LaunchedEffect(enabled, interactive) {
+            if (!enabled) NativeTopSearch.collapse()
+            else if (!interactive) NativeTopSearch.suspendForDialog()
+        }
+        val gap = if (reserved && enabled) 8.dp else 0.dp
+        val noticeTarget = if (reserved) {
+            val searchSpace = if (!enabled) 0.dp else if (compact) 42.dp else 252.dp
+            minOf(360.dp, (available - searchSpace).coerceAtLeast(0.dp))
+        } else 0.dp
+        val fieldTarget = (available - noticeTarget - gap).coerceAtLeast(0.dp)
+        val noticeWidth = noticeTarget
+        val fieldWidth = (available - noticeWidth - gap).coerceAtLeast(0.dp)
+        val dropdown = compact && NativeTopSearch.compactOpen
+        val editorVisible = enabled && (!compact || dropdown)
+        // Animate user interaction as a fraction of the CURRENT layout. A resize
+        // replaces only these animation states at their current semantic targets,
+        // so geometry snaps to the new constraints without rebuilding the editor.
+        val focusFraction = key(w, fieldTarget, compact) {
+            animateFloatAsState(if (NativeTopSearch.focused) 1f else 0f,
+                Motion.topbar(), label = "top-focus-expansion").value
+        }
+        val popupFraction = key(w, h, compact) {
+            animateFloatAsState(if (dropdown) 1f else 0f,
+                Motion.topbar(), label = "top-popup-reveal").value
+        }
+        val unfocusedWidth = minOf(220.dp, fieldTarget)
+        val focusedWidth = minOf(740.dp, fieldTarget)
+        val inputTarget = if (compact) w - 32.dp else
+            unfocusedWidth + (focusedWidth - unfocusedWidth) * focusFraction
+        // Window changes are synchronous; only clicks/focus changes animate.
+        val inputWidth = inputTarget
+        val inputLeft = if (compact) 16.dp else left + (fieldTarget - inputTarget) / 2
+        val inputTop = if (compact) h + 12.dp * (1f - popupFraction) else (h - 34.dp) / 2
+        // Reset reveal state on a mode change; never fade the old inline editor
+        // at the dropdown's new location before the user clicks the icon.
+        val inputAlpha = overlayAlpha * if (compact) popupFraction else 1f
+        val safeInputWidth = minOf(inputWidth, if (compact) w - 32.dp else fieldWidth).coerceAtLeast(0.dp)
+        val safeInputLeft = inputLeft.coerceIn(16.dp, (w - 16.dp - safeInputWidth).coerceAtLeast(16.dp))
+        val suggestionTargetWidth = if (compact) w - 32.dp else
+            minOf(w - contentLeft - 16.dp, maxOf(320.dp, minOf(740.dp, fieldTarget)))
+        val suggestionTargetLeft = if (compact) 16.dp else (left + (fieldTarget - suggestionTargetWidth) / 2)
+            .coerceIn(contentLeft, (w - 16.dp - suggestionTargetWidth).coerceAtLeast(contentLeft))
+        val suggestionWidth = minOf(suggestionTargetWidth, w - 32.dp)
+        val suggestionLeft = suggestionTargetLeft.coerceIn(16.dp, (w - 16.dp - suggestionWidth).coerceAtLeast(16.dp))
+        if (enabled) {
+            Box(Modifier.offset(x + left, y).width(fieldWidth).height(h).alpha(overlayAlpha)
+                .testTag("top-search-slot"), contentAlignment = Alignment.Center) {
+                AnimatedVisibility(compact, enter = fadeIn(Motion.state()), exit = fadeOut(Motion.state())) {
+                    SearchIcon(interactive && compact) {
+                        if (NativeTopSearch.compactOpen) { NativeTopSearch.collapse(); focus.clearFocus() }
+                        else NativeTopSearch.compactOpen = true
+                    }
+                }
+            }
+            // One persistent input/focus node in both modes; no Crossfade or
+            // AnimatedVisibility may keep a second live editor during a handoff.
+            Box(Modifier.offset(x + safeInputLeft, y + inputTop).width(safeInputWidth)
+                .height(if (compact) 40.dp else 34.dp).alpha(inputAlpha)
+                .then(if (interactive && editorVisible) Modifier else
+                    Modifier.blockAllPointerEvents().clearAndSetSemantics {})
+                .layout { measurable, constraints ->
+                    val child = measurable.measure(constraints)
+                    layout(child.width, child.height) {
+                        // Keep composition identity without an invisible hit target
+                        // over the host once the compact editor has faded away.
+                        if (editorVisible || inputAlpha > .001f) child.place(0, 0)
+                    }
+                }) {
+                NativeTopSearchField(::navigate, Modifier.fillMaxSize()
+                    .then(if (compact) Modifier.background(HostStyle.colors.popup, HostStyle.shapes.small)
+                        .padding(horizontal = 8.dp) else Modifier),
+                    interactive = interactive && editorVisible,
+                    requestFocus = NativeTopSearch.compactOpen, fillAvailable = true)
+            }
+        }
+        AnimatedVisibility(visibleState = visibility,
+            modifier = Modifier.offset(x + right - noticeWidth, y + (h - 30.dp) / 2)
+                .width(noticeWidth).clipToBounds().alpha(overlayAlpha),
+            enter = fadeIn(Motion.state()), exit = fadeOut(Motion.state())) {
+            val motionScale = rememberCoroutineScope().coroutineContext[MotionDurationScale]?.scaleFactor ?: 1f
+            // A changing count must not remeasure/restart the marquee. Its fixed
+            // slot is based on total digits, not on the current completion count.
+            val totalDigits = NativeUiState.sync?.total()?.toString()?.length ?: 1
+            val countSlot = minOf(80.dp, ((totalDigits * 2 + 1) * 7 + 4).dp)
+            Row(Modifier.fillMaxWidth().height(30.dp).testTag("top-sync-notice")
+                .background(HostStyle.colors.subBackground, HostStyle.shapes.small)
+                .semantics { contentDescription = shown?.third.orEmpty() }
+                .padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                SaltText(shown?.first.orEmpty(), modifier = Modifier.weight(1f)
+                    .testTag(if (motionScale > 0f) "sync-marquee" else "sync-static").then(
+                    if (motionScale > 0f) Modifier.basicMarquee(iterations = Int.MAX_VALUE,
+                        initialDelayMillis = 900, repeatDelayMillis = 900, velocity = 28.dp) else Modifier),
+                    style = HostStyle.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (noticeTarget >= 120.dp && shown?.second?.isNotBlank() == true) {
+                    SaltText(shown.second, Modifier.width(countSlot).padding(start = 4.dp),
+                        style = HostStyle.typography.bodySmall, maxLines = 1)
+                }
+            }
+        }
+        Box(Modifier.offset(x + suggestionLeft, y + inputTop + if (compact) 40.dp else 34.dp + (h - 34.dp) / 2).width(suggestionWidth)
+            .alpha(if (compact && !dropdown) 0f else overlayAlpha)
+            .then(if (interactive && (!compact || dropdown)) Modifier else Modifier.blockAllPointerEvents().clearAndSetSemantics {}),
+            contentAlignment = Alignment.TopCenter) {
+            AnimatedVisibility(NativeTopSearch.expanded && (!compact || dropdown),
                 enter = fadeIn(tween(140)) + expandVertically(tween(180), expandFrom = Alignment.Top),
                 exit = fadeOut(tween(100)) + shrinkVertically(tween(140), shrinkTowards = Alignment.Top)) {
                 NativeTopSearchSuggestions(Modifier.widthIn(max = 740.dp).fillMaxWidth())
+            }
+        }
+    }
+
+    @Composable private fun SearchIcon(interactive: Boolean, onClick: () -> Unit) {
+        SaltPlainButton(onClick, modifier = Modifier.size(34.dp).testTag("top-search-icon")
+            .onGloballyPositioned { NativeTopSearch.compactBounds = it.boundsInRoot() }
+            .semantics { contentDescription = "打开搜索" }, enabled = interactive) {
+            val color = HostStyle.colors.text
+            Canvas(Modifier.size(16.dp)) {
+                val stroke = 1.6.dp.toPx()
+                drawCircle(color, radius = size.minDimension * .30f,
+                    center = Offset(size.width * .4f, size.height * .4f), style = Stroke(stroke))
+                drawLine(color, Offset(size.width * .63f, size.height * .63f),
+                    Offset(size.width * .9f, size.height * .9f), strokeWidth = stroke, cap = StrokeCap.Round)
             }
         }
     }

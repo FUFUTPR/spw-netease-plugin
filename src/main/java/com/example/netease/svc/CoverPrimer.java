@@ -8,12 +8,9 @@ import java.awt.RenderingHints;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
-import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
-import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -25,26 +22,10 @@ import java.util.concurrent.ConcurrentHashMap;
 import javax.imageio.ImageIO;
 
 /**
- * 歌曲行 / 播放条封面 —— <b>零音频下载</b>方案（0.11.3）。
- *
- * <p>宿主行内缩略图走 coil3 磁盘缓存（{@code <宿主数据>\cache\shared_cover}），键可从宿主字节码逐字得到
- * （{@code AudioCoverKeyerKt.cacheKey}）：</p>
- *
- * <pre>
- *   key   = "{Track.path}?v=1&t={modifiedTime}&s={size}&r={coverRevision}&w={w}&h={h}"
- *   .0    = 元数据（可为 0 字节，宿主自己的正条目就是 0 字节）
- *   .1    = 图片字节
- *   journal 行 = "CLEAN &lt;sha256(key)&gt; 0 &lt;图片字节数&gt;"
- * </pre>
- *
- * <p>把「这首歌的封面图」按上述键写进缓存 + 追加一条 journal 行 ⇒ 行内出图，<b>不需要本地音频、
- * 不翻 {@code Track.path}、不产生任何音乐流量</b>（真机实证：{@code docs\08} §42）。</p>
- *
- * <p><b>铁律（上次踩过）</b>：<b>只追加、绝不重写 journal</b>（0.11.2 实验期整份重写 → 宿主判定
- * 不可信 → 重建整层缓存、10,425 个文件被清）。本类只做：写自己的 {@code .0/.1} + 追加 CLEAN 行；
- * 任何异常只记日志，绝不影响播放。</p>
- *
- * <p><b>线程</b>：自建守护单线程 {@code netease-cover-primer}。</p>
+ * Full-library thumbnail warming through the host's live DiskCache, with two image workers.
+ * A repaired row receives a new coverRevision only after both sizes commit and read back.
+ * This restarts failed row requests without audio downloads, path changes, or a library scan.
+ * The host exclusively owns its cache files and journal; this class never edits them directly.
  */
 public final class CoverPrimer {
 
@@ -73,6 +54,7 @@ public final class CoverPrimer {
     private static volatile Thread worker;
     private static volatile boolean stop;
     private static volatile boolean requested;
+    private static final java.util.concurrent.atomic.AtomicLong LIFECYCLE = new java.util.concurrent.atomic.AtomicLong();
 
     /** 本次会话铺过的键（巡检判据）。 */
     private static final Set<String> PUSHED = ConcurrentHashMap.newKeySet();
@@ -107,6 +89,7 @@ public final class CoverPrimer {
             if (worker != null && worker.isAlive()) {
                 return;
             }
+            LIFECYCLE.incrementAndGet();
             stop = false;
             requested = true;
             Thread t = new Thread(CoverPrimer::loop, "netease-cover-primer");
@@ -121,6 +104,7 @@ public final class CoverPrimer {
 
     public static void stop() {
         stop = true;
+        LIFECYCLE.incrementAndGet();
         Thread t = worker;
         if (t == null) {
             return;
@@ -147,7 +131,7 @@ public final class CoverPrimer {
                     requested = false;
                     idle = 0;
                     primeOnce();
-                    if (PUSHED.isEmpty()) {
+                    if (PLANNED.get() == 0) {
                         Thread.sleep(5000L);         // 库还没就绪（插件启动早于宿主曲库可读）：退避后重试
                         requested = true;
                     }
@@ -172,181 +156,137 @@ public final class CoverPrimer {
 
     // ------------------------------------------------------------------ 铺库
 
-    /**
-     * 铺一轮：<b>取图/缩放多线程</b>（{@link #WARM_CONCURRENCY} 路，A11 全量 ≤60 s）+ <b>写盘与 journal 追加单线程</b>
-     * （journal 只允许追加，且必须串行 —— 见类头铁律）。
-     *
-     * <p>按<b>专辑</b>分组派活：同一专辑的多首歌共用一份原图与两张缩略图，既不重复下载也不重复缩放。
-     * 素材只走 {@code CoverStore}（唯一入口：1200 单尺寸 + sha256 去重 + 失败分类），<b>全程零音频</b>。</p>
-     */
+    /** Decode once per album; commit through the host cache, then publish request revisions. */
+    private record Repair(String[] row, int previous, int revision, String[] keys, byte[][] images, long sourceTime) { }
+
+    private static String thumbnailKey(String[] row, int revision, int size) {
+        return rowPath(row) + "?v=1&t=" + KEY_MTIME + "&s=" + rowSize(row) + "&r=" + revision
+                + "&w=" + size + "&h=" + size;
+    }
+
     private static void primeOnce() {
-        Path journal = journalPath();
-        if (journal == null) {
-            PluginLog.d(TAG, "封面预热跳过：找不到宿主缩略图缓存（<宿主数据>\\cache\\shared_cover）");
-            return;
-        }
-        long t0 = System.currentTimeMillis();
-        // ⓪ 先把 modifiedTime 钉成常量（键稳定性前提；已经是常量就跳过）
+        if (stop) return;
+        long epoch = LIFECYCLE.get();
+        long started = System.currentTimeMillis();
         pinModifiedTime();
-        Map<String, Long> have = journalLastSize(journal);
         List<String[]> rows = readRows();
         boolean fromDb = !rows.isEmpty();
-        if (!fromDb) {
-            rows = loadCachedRows();
-        }
-        final Path cacheDir = journal.getParent();
-
-        // 按专辑分派（同专辑只取一次图、只缩一次图）
-        Map<String, List<String[]>> byAlbum = new java.util.LinkedHashMap<>();
-        for (String[] row : rows) {
-            if (row.length < 4 || rowPath(row).isBlank()) {
-                continue;
-            }
-            // 0.11.49：按（专辑+歌手）分组 —— 同名专辑不同艺人各取各的图（旧按专辑名 = 首登记胜出）
-            byAlbum.computeIfAbsent(rowRefKey(row), k -> new ArrayList<>()).add(row);
-        }
+        if (!fromDb) rows = loadCachedRows();
         PLANNED.set(rows.size() * SIZES.length);
         SKIPPED.set(0);
-
-        java.util.concurrent.BlockingQueue<Object[]> out = new java.util.concurrent.LinkedBlockingQueue<>();
-        java.util.concurrent.CountDownLatch latch =
-                new java.util.concurrent.CountDownLatch(byAlbum.size());
-        java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(
-                Math.min(WARM_CONCURRENCY, Math.max(1, byAlbum.size())), r -> {
-                    Thread t = new Thread(r, "netease-cover-warm");
-                    t.setDaemon(true);
-                    t.setPriority(Thread.NORM_PRIORITY - 1);
-                    return t;
-                });
-        for (Map.Entry<String, List<String[]>> e : byAlbum.entrySet()) {
-            final String refKey = e.getKey();
-            final List<String[]> mine = e.getValue();
+        PUSHED.clear();
+        Map<String, List<String[]>> albums = new java.util.LinkedHashMap<>();
+        for (String[] row : rows) {
+            if (row.length >= 4 && !rowPath(row).isBlank())
+                albums.computeIfAbsent(rowRefKey(row), key -> new ArrayList<>()).add(row);
+        }
+        var ready = new java.util.concurrent.ArrayBlockingQueue<Repair>(32);
+        var remaining = new java.util.concurrent.CountDownLatch(albums.size());
+        var pool = java.util.concurrent.Executors.newFixedThreadPool(WARM_CONCURRENCY, job -> {
+            Thread thread = new Thread(job, "netease-cover-warm");
+            thread.setDaemon(true);
+            return thread;
+        });
+        for (var album : albums.entrySet()) {
             pool.execute(() -> {
                 try {
-                    // ① 先把两档键算出来，命中的直接跳过（纯本地判断，不取图）
-                    long srcT = CoverStore.imageTime(refKey);   // 0.11.49：图换过就不算命中（陈旧自愈）
-                    List<String> hexes = new ArrayList<>(mine.size() * SIZES.length);
-                    List<int[]> missing = new ArrayList<>();
-                    for (int j = 0; j < mine.size(); j++) {
-                        String[] row = mine.get(j);
-                        long size;
-                        int rev;
-                        try {
-                            size = Long.parseLong(rowSize(row));
-                            rev = Integer.parseInt(rowRev(row));
-                        } catch (Throwable t) {
-                            continue;
+                    String ref = album.getKey();
+                    long sourceTime = CoverStore.imageTime(ref);
+                    byte[][] images = null;
+                    for (String[] row : album.getValue()) {
+                        if (stop || epoch != LIFECYCLE.get()) return;
+                        int revision = Integer.parseInt(rowRev(row));
+                        boolean valid = true;
+                        for (int size : SIZES)
+                            valid &= CoverDelivery.thumbnailReady(thumbnailKey(row, revision, size), sourceTime);
+                        if (valid) { SKIPPED.addAndGet(SIZES.length); continue; }
+                        if (images == null) {
+                            byte[] source = CoverStore.fetchImage(ref);
+                            if (source == null) { source = placeholder(CoverStore.albumOfRef(ref)); NO_IMG.add(ref); }
+                            else NO_IMG.remove(ref);
+                            if (source == null) return;
+                            images = new byte[SIZES.length][];
+                            for (int i = 0; i < SIZES.length; i++) images[i] = shrink(source, SIZES[i]);
                         }
-                        for (int i = 0; i < SIZES.length; i++) {
-                            int sz = SIZES[i];
-                            String hex = sha256Hex(rowPath(row) + "?v=1&t=" + KEY_MTIME + "&s=" + size + "&r=" + rev
-                                    + "&w=" + sz + "&h=" + sz);
-                            if (hex == null) {
-                                continue;
-                            }
-                            Path f1 = cacheDir.resolve(hex + ".1");
-                            Long lastSize = have.get(hex);
-                            if (lastSize != null && lastSize > 0L && Files.isRegularFile(f1)
-                                    && sizeOf(f1) == lastSize && !olderThan(f1, srcT)) {
-                                SKIPPED.incrementAndGet();
-                                continue;
-                            }
-                            hexes.add(hex);
-                            missing.add(new int[]{j, i});
-                        }
+                        // A new revision restarts already failed Coil requests in this session.
+                        // Publish it only after BOTH live cache entries can be read back.
+                        int next = revision == Integer.MAX_VALUE ? 1 : revision + 1;
+                        String[] keys = new String[SIZES.length];
+                        for (int i = 0; i < SIZES.length; i++) keys[i] = thumbnailKey(row, next, SIZES[i]);
+                        ready.put(new Repair(row, revision, next, keys, images, sourceTime));
                     }
-                    if (missing.isEmpty()) {
-                        return;
-                    }
-                    // ② 取图（唯一入口；只取图片 URL，不下音乐）
-                    byte[] src = CoverStore.fetchImage(refKey);
-                    if (src == null) {
-                        src = placeholder(CoverStore.albumOfRef(refKey));   // 取不到才用占位图（R11：不留 ♪）
-                        NO_IMG.add(refKey);
-                    }
-                    if (src == null) {
-                        return;
-                    }
-                    byte[][] thumbs = new byte[SIZES.length][];      // 本专辑两档缩略图各缩一次
-                    for (int k = 0; k < missing.size(); k++) {
-                        int[] mi = missing.get(k);
-                        int i = mi[1];
-                        if (thumbs[i] == null) {
-                            thumbs[i] = shrink(src, SIZES[i]);
-                            if (thumbs[i] == null) {
-                                continue;
-                            }
-                        }
-                        out.put(new Object[]{hexes.get(k), thumbs[i]});
-                    }
-                } catch (InterruptedException ie) {
+                } catch (InterruptedException interrupted) {
                     Thread.currentThread().interrupt();
-                } catch (Throwable t) {
-                    PluginLog.d(TAG, "预热取图异常（跳过 " + CoverStore.display(refKey) + "）：" + t);
-                } finally {
-                    latch.countDown();
-                }
+                } catch (Throwable error) {
+                    PluginLog.w(TAG, "准备列表封面失败：" + error);
+                } finally { remaining.countDown(); }
             });
         }
-
-        // 单线程消费：写 .0/.1 + 收集 journal 行（每 500 行追一次，内存有界）
-        StringBuilder append = new StringBuilder(1 << 16);
-        int tracks = rows.size(), pushed = 0, writeFails = 0;
-        long bytes = 0L;
+        int written = 0, failed = 0, published = 0;
+        long bytes = 0;
+        List<Repair> batch = new ArrayList<>();
         try {
-            while (latch.getCount() > 0L || !out.isEmpty()) {
-                Object[] item = out.poll(200L, java.util.concurrent.TimeUnit.MILLISECONDS);
-                if (item == null) {
-                    if (stop) {
-                        break;
+            while (remaining.getCount() > 0 || !ready.isEmpty()) {
+                if (stop || epoch != LIFECYCLE.get()) break;
+                Repair repair = ready.poll(200, java.util.concurrent.TimeUnit.MILLISECONDS);
+                if (repair == null) continue;
+                boolean complete = true;
+                for (int i = 0; i < SIZES.length; i++) {
+                    int result = CoverDelivery.putThumbnail(repair.keys()[i], repair.images()[i], repair.sourceTime());
+                    if (result < 0) { complete = false; WRITE_FAILS.incrementAndGet(); failed++; }
+                    else {
+                        PUSHED.add(repair.keys()[i]);
+                        if (result > 0) { written++; bytes += repair.images()[i].length; }
                     }
-                    continue;
                 }
-                String hex = (String) item[0];
-                byte[] jpg = (byte[]) item[1];
-                try {
-                    Files.write(cacheDir.resolve(hex + ".0"), new byte[0]);
-                    Files.write(cacheDir.resolve(hex + ".1"), jpg);
-                } catch (Throwable t) {
-                    writeFails++;
-                    WRITE_FAILS.incrementAndGet();
-                    if (writeFails <= 3) {
-                        PluginLog.w(TAG, "写缓存文件失败（跳过该键）：" + t);
-                    }
-                    continue;
-                }
-                append.append("CLEAN ").append(hex).append(" 0 ").append(jpg.length).append('\n');
-                PUSHED.add(hex);
-                pushed++;
-                bytes += jpg.length;
-                if (pushed % 500 == 0) {
-                    appendJournal(journal, append.toString());
-                    append.setLength(0);
-                }
-                if (stop) {
-                    break;
+                if (complete) batch.add(repair);
+                if (batch.size() >= 128) {
+                    published += publishRevisions(batch, epoch);
+                    batch.clear();
                 }
             }
-        } catch (InterruptedException e) {
+            if (!batch.isEmpty() && !stop && epoch == LIFECYCLE.get()) published += publishRevisions(batch, epoch);
+        } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
-        } finally {
-            pool.shutdownNow();
+        } finally { pool.shutdownNow(); }
+        if (fromDb && !stop && epoch == LIFECYCLE.get()) {
+            List<String[]> current = readRows();
+            if (!current.isEmpty()) saveRows(current);
         }
+        PluginLog.i(TAG, "列表封面：曲目 " + rows.size() + " 首，live 提交 " + written + " 键 / " + bytes / 1024
+                + " KB，已就绪 " + SKIPPED.get() + "，请求刷新 " + published + " 行，失败 " + failed
+                + "，并发 " + WARM_CONCURRENCY + "，用时 " + (System.currentTimeMillis() - started) + " ms");
+    }
 
-        boolean ok = append.length() == 0 || appendJournal(journal, append.toString());
-        if (fromDb) {
-            saveRows(rows);                      // 实时素材落盘：下次启动即使读不到库也能零延迟铺
+    /** CAS guards newer sync/track changes; host Room invalidation refreshes affected rows only. */
+    private static int publishRevisions(List<Repair> repairs, long epoch) {
+        Path db = resolveDb();
+        if (db == null) return 0;
+        try {
+            Integer result = com.example.netease.host.HostSqlBridge.onHostConnection(db.toString(),
+                    com.example.netease.host.HostSqlBridge.guarded(() -> !stop && LIFECYCLE.get() == epoch, sql -> {
+                        for (Repair repair : repairs) {
+                            String[] row = repair.row();
+                            sql.exec("UPDATE Track SET coverRevision = ? WHERE id GLOB 'netease-[0-9]*'"
+                                            + " AND path = ? AND size = ? AND coverRevision = ?",
+                                    repair.revision(), rowPath(row), Long.parseLong(rowSize(row)), repair.previous());
+                        }
+                        return repairs.size();
+                    }));
+            if (result == null) return 0;
+            Map<String, String[]> current = new HashMap<>();
+            for (String[] row : readRows()) current.put(rowPath(row), row);
+            for (Repair repair : repairs) {
+                String[] row = current.get(rowPath(repair.row()));
+                if (row == null || !rowSize(row).equals(rowSize(repair.row()))
+                        || Integer.parseInt(rowRev(row)) != repair.revision()) continue;
+                for (int size : SIZES) CoverDelivery.retireThumbnail(thumbnailKey(repair.row(), repair.previous(), size));
+            }
+            return result;
+        } catch (Throwable error) {
+            PluginLog.w(TAG, "封面已缓存，刷新列表请求失败（保留下轮重试）：" + error);
+            return 0;
         }
-        if (tracks == 0 && retryLogged++ < 20) {
-            PluginLog.i(TAG, "封面预热：宿主曲库暂不可读（读到 0 首，稍后自动重试）"
-                    + (lastDbError.isEmpty() ? "" : "；最近一次错误：" + lastDbError));
-            return;
-        }
-        PluginLog.i(TAG, "封面预热：" + (fromDb ? "读库" : "用上一轮素材") + " → 曲目 " + tracks + " 首 → 新铺 "
-                + pushed + " 条 / " + (bytes / 1024L)
-                + " KB（跳过 " + SKIPPED.get() + "，该专辑无图 " + NO_IMG.size() + "，journal 原有 " + have.size()
-                + " 条，追加 " + (ok ? "成功" : "失败") + "，写盘失败 " + writeFails
-                + "，并发 " + WARM_CONCURRENCY + "，用时 " + (System.currentTimeMillis() - t0) + " ms）");
     }
 
     /** 再钉一次 {@code modifiedTime} 并请求铺一轮（{@code RowCover} 清理历史本地路径后必须调：mtime 被改过）。 */
@@ -386,65 +326,34 @@ public final class CoverPrimer {
         }
     }
 
-    /**
-     * 巡检：**所有**我们该有的键是不是都「最后一条 CLEAN 行 > 0 且 {@code .1} 长度对得上」。
-     *
-     * <p>键由上一轮落盘的素材重算（跨会话稳定），所以不依赖本会话铺过什么 —— 宿主 compaction 丢行、
-     * 或它请求未命中写下 0 字节负行，30 秒内就会被发现并重铺（重铺行追加在负行之后 ⇒ 下次启动即生效）。</p>
-     */
+    /** Cheap post-certification patrol; missing/stale files schedule a live-cache repair pass. */
     private static boolean patrol() {
         try {
-            Path journal = journalPath();
-            if (journal == null) {
-                return false;
-            }
-            List<String[]> rows = loadCachedRows();
-            if (rows.isEmpty()) {
-                return false;
-            }
-            Map<String, Long> have = journalLastSize(journal);
-            Map<String, Long> srcTimes = new HashMap<>();
             int missing = 0;
-            for (String[] row : rows) {
-                if (row.length < 4 || rowPath(row).isBlank()) {
-                    continue;
-                }
-                long size;
-                int rev;
-                try {
-                    size = Long.parseLong(rowSize(row));
-                    rev = Integer.parseInt(rowRev(row));
-                } catch (Throwable t) {
-                    continue;
-                }
-                String refKey = rowRefKey(row);
-                Long srcT = srcTimes.get(refKey);
-                if (srcT == null) {
-                    srcT = CoverStore.imageTime(refKey);
-                    srcTimes.put(refKey, srcT);
-                }
-                for (int sz : SIZES) {
-                    String hex = sha256Hex(rowPath(row) + "?v=1&t=" + KEY_MTIME + "&s=" + size + "&r=" + rev
-                            + "&w=" + sz + "&h=" + sz);
-                    if (hex == null) {
-                        continue;
-                    }
-                    Long lastSize = have.get(hex);
-                    Path f1 = journal.getParent().resolve(hex + ".1");
-                    if (lastSize == null || lastSize <= 0L || !Files.isRegularFile(f1)
-                            || sizeOf(f1) != lastSize || olderThan(f1, srcT)) {
-                        missing++;
-                    }
+            Map<String, Long> times = new HashMap<>();
+            for (String[] row : loadCachedRows()) {
+                if (row.length < 4 || rowPath(row).isBlank()) continue;
+                long time = times.computeIfAbsent(rowRefKey(row), CoverStore::imageTime);
+                int revision = Integer.parseInt(rowRev(row));
+                for (int size : SIZES) {
+                    // The startup/sync pass certifies the live index. Routine patrol only checks
+                    // files owned by that cache, avoiding thousands of LRU READ journal writes.
+                    String key = thumbnailKey(row, revision, size);
+                    String hash = com.example.netease.core.Hashes.sha256Hex(key.getBytes(StandardCharsets.UTF_8));
+                    Path cache = cacheDir();
+                    Path image = cache == null ? null : cache.resolve(hash + ".1");
+                    boolean absent = image == null || !Files.isRegularFile(image);
+                    // LRU eviction is normal. Visible rows now refill themselves without whole-library churn.
+                    if (absent && RowCoverSource.active()) continue;
+                    if (absent || Files.size(image) == 0 || olderThan(image, time)) missing++;
                 }
             }
-            if (missing > 0) {
-                PluginLog.i(TAG, "封面预热：巡检发现 " + missing + " 条失效（宿主 compaction / 负缓存覆盖 / 文件被清），重铺");
-                return true;
-            }
-        } catch (Throwable t) {
-            PluginLog.d(TAG, "封面预热巡检异常（忽略）：" + t);
+            if (missing > 0) PluginLog.i(TAG, "列表封面巡检：live 缓存缺少 " + missing + " 键，提交修复");
+            return missing > 0;
+        } catch (Throwable error) {
+            PluginLog.w(TAG, "列表封面巡检失败：" + error);
+            return false;
         }
-        return false;
     }
 
     /**
@@ -534,20 +443,6 @@ public final class CoverPrimer {
         return null;
     }
 
-    private static Path journalPath() {
-        Path dir = cacheDir();
-        if (dir == null) {
-            return null;
-        }
-        Path j = dir.resolve("journal");
-        return Files.isRegularFile(j) ? j : null;
-    }
-
-    /**
-     * 直接读库取素材（不依赖宿主桥：预热必须赶在宿主「第一次取图读 journal」之前完成）。
-     *
-     * <p>只用只读连接，宿主侧照常读写（真机实测：宿主运行期间外部只读查询稳定）。</p>
-     */
     // ---- 0.11.49 行素材的下标适配：新 5 列（专辑/歌手/路径/大小/修订），旧 4 列（无歌手）照读 ----
 
     private static String rowAlbum(String[] row) {
@@ -597,7 +492,7 @@ public final class CoverPrimer {
              java.sql.Statement s = c.createStatement();
              java.sql.ResultSet r = s.executeQuery(
                      "SELECT album, artist, path, size, coverRevision FROM Track"
-                     + " WHERE path LIKE 'http://127.0.0.1%'")) {
+                     + " WHERE id GLOB 'netease-[0-9]*' AND path LIKE 'http://127.0.0.1%'")) {
             while (r.next()) {
                 out.add(new String[]{
                         r.getString(1) == null ? "" : r.getString(1),
@@ -696,57 +591,6 @@ public final class CoverPrimer {
         }
     }
 
-    /**
-     * journal 里每个键的<b>最后一条 CLEAN 行</b>的 size1（0 = 宿主写的负缓存；读取规则是「以最后一条为准」）。
-     */
-    private static Map<String, Long> journalLastSize(Path journal) {
-        Map<String, Long> out = new ConcurrentHashMap<>();
-        try {
-            for (String line : Files.readAllLines(journal, StandardCharsets.UTF_8)) {
-                if (!line.startsWith("CLEAN ")) {
-                    continue;
-                }
-                String[] p = line.split(" ");
-                if (p.length >= 4) {
-                    try {
-                        out.put(p[1], Long.parseLong(p[3]));
-                    } catch (Throwable ignored) {
-                        // 畸形行跳过
-                    }
-                }
-            }
-        } catch (Throwable t) {
-            PluginLog.d(TAG, "读 journal 失败（按空处理）：" + t);
-        }
-        return out;
-    }
-
-    /** <b>只追加</b>（绝不重写）：宿主自己也用追加写 journal。 */
-    private static boolean appendJournal(Path journal, String lines) {
-        try {
-            boolean needLf = true;
-            long n = Files.size(journal);
-            if (n > 0) {
-                byte[] last = new byte[1];
-                try (var ch = Files.newByteChannel(journal)) {
-                    ch.position(n - 1);
-                    ch.read(ByteBuffer.wrap(last));
-                }
-                needLf = last[0] != '\n';
-            }
-            try (var out = Files.newBufferedWriter(journal, StandardCharsets.UTF_8, StandardOpenOption.APPEND)) {
-                if (needLf) {
-                    out.write("\n");
-                }
-                out.write(lines);
-            }
-            return true;
-        } catch (Throwable t) {
-            PluginLog.d(TAG, "追加 journal 失败（文件已写，靠宿主下次重建自愈）：" + t);
-            return false;
-        }
-    }
-
     // ------------------------------------------------------------------ 图片
 
     /** 单曲投递（{@code svc.CoverDelivery}）复用同一套缩放参数：两边的同一档键必须字节一致。 */
@@ -830,30 +674,4 @@ public final class CoverPrimer {
         }
     }
 
-    private static long sizeOf(Path p) {        try {
-            return Files.size(p);
-        } catch (Throwable t) {
-            return 0L;
-        }
-    }
-
-    /** 宿主缓存键 = sha256(明文字符串)，小写十六进制。 */
-    private static String sha256Hex(String s) {
-        try {
-            byte[] d = MessageDigest.getInstance("SHA-256").digest(s.getBytes(StandardCharsets.UTF_8));
-            StringBuilder sb = new StringBuilder();
-            for (byte x : d) {
-                sb.append(String.format("%02x", x));
-            }
-            return sb.toString();
-        } catch (Throwable t) {
-            return null;
-        }
-    }
 }
-
-
-
-
-
-

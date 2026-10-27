@@ -68,13 +68,14 @@ internal object FocusReturn {
 @Composable
 internal fun Modifier.focusReturnTarget(window: Window? = LocalAwtWindow.current): Modifier {
     val requester = remember { FocusRequester() }
+    val owner = remember { FocusReturn }
     DisposableEffect(window, requester) {
-        onDispose { FocusReturn.forget(window, requester) }
+        guardedCleanup { owner.forget(window, requester) }
     }
     return this
         .focusRequester(requester)
-        .onFocusChanged { if (it.isFocused) FocusReturn.note(window, requester) }
+        .onFocusChanged { if (it.isFocused) owner.note(window, requester) }
         .onPointerEvent(PointerEventType.Press, PointerEventPass.Initial) {
-            FocusReturn.note(window, requester)
+            owner.note(window, requester)
         }
 }

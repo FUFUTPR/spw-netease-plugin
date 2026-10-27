@@ -197,7 +197,7 @@ internal object HostCloudSongMenu {
     @Composable fun Dialogs() {
         // 兜底：宿主材质/provider 被撤时整个 Dialogs 会离开组合，退场回调没机会跑；
         // 若仍留着 removal/message，dialogOpen() 会永久为 true，焦点与 Esc 就再也回不来。
-        DisposableEffect(Unit) { onDispose { clearRemoval(); clearMessage() } }
+        DisposableEffect(Unit) { guardedCleanup { clearRemoval(); clearMessage() } }
         removal?.let { request ->
             DialogSlot(removalVisible, ::clearRemoval) {
                 EmbeddedSaltDialog("从此歌单移除", ::dismissRemoval, ::confirmRemoval, true, "取消", "移除",

@@ -119,7 +119,7 @@ internal fun EmbeddedVerifyArea(
         }
     }
     DisposableEffect(generation) {
-        onDispose {
+        guardedCleanup {
             // 只关同代次：旧页面晚 120ms 才销毁，无代次关闭会打断刚打开的新一轮验证。
             NativeUiSession.closeEmbeddedVerifyFor(generation)
             // Linux 画布的静态引用同理：本代次仍是当前会话时才释放，别把新实例刚建的 surface 置空。

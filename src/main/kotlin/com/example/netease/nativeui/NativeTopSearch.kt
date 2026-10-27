@@ -23,6 +23,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.*
@@ -36,9 +38,20 @@ import kotlinx.coroutines.delay
 internal object NativeTopSearch {
     var expanded by mutableStateOf(false)
     var focused by mutableStateOf(false)
+    var compactOpen by mutableStateOf(false)
+    private var focusOwner: Any? = null
     var fieldBounds = Rect.Zero
+    var compactBounds = Rect.Zero
     var suggestionBounds = Rect.Zero
-    fun collapse() { expanded = false; focused = false; highlighted = -1 }
+    fun collapse() { expanded = false; focused = false; compactOpen = false; highlighted = -1; focusOwner = null }
+    fun suspendForDialog() { expanded = false; focused = false; highlighted = -1; focusOwner = null }
+    fun focusChanged(owner: Any, hasFocus: Boolean) {
+        if (hasFocus) {
+            focusOwner = owner; focused = true; expanded = NativeUiState.searchKeyword.isNotBlank()
+        } else if (focusOwner === owner) {
+            focusOwner = null; focused = false; expanded = false
+        }
+    }
     var state by mutableStateOf<SearchController.State?>(null)
     var highlighted by mutableStateOf(-1)
     @Volatile private var controller: SearchController? = null
@@ -48,7 +61,7 @@ internal object NativeTopSearch {
     fun stop() {
         val old = synchronized(this) { val c = controller; controller = null; c }
         old?.close()
-        collapse(); state = null; fieldBounds = Rect.Zero; suggestionBounds = Rect.Zero
+        collapse(); state = null; fieldBounds = Rect.Zero; compactBounds = Rect.Zero; suggestionBounds = Rect.Zero
     }
     fun edit(text: String) {
         NativeUiState.searchKeyword = text
@@ -105,9 +118,13 @@ private fun suggestPhase(rows: List<Dto.Song>): SuggestPhase = when {
 private fun suggestRowKey(song: Dto.Song, occurrence: Int): String = song.id().toString() + ":" + occurrence
 
 @Composable
-internal fun NativeTopSearchField(navigate: () -> Boolean, modifier: Modifier = Modifier, interactive: Boolean = true) {
+internal fun NativeTopSearchField(navigate: () -> Boolean, modifier: Modifier = Modifier, interactive: Boolean = true,
+                                  requestFocus: Boolean = false, fillAvailable: Boolean = false) {
     val keyword = NativeUiState.searchKeyword
     val focus = LocalFocusManager.current
+    val requester = remember { FocusRequester() }
+    val focusOwner = remember { Any() }
+    LaunchedEffect(requestFocus) { if (requestFocus && interactive) requester.requestFocus() }
     // 关闭弹窗（存歌单/登录等）后把焦点还给顶栏搜索框（按窗口登记真实触发点）。
     val radius by animateDpAsState(if (NativeTopSearch.focused) 9.dp else 18.dp,
         tween(220, easing = FastOutSlowInEasing), label = "search-radius")
@@ -118,11 +135,11 @@ internal fun NativeTopSearchField(navigate: () -> Boolean, modifier: Modifier = 
         animationSpec = Motion.state(),
         label = "search-border",
     )
-    LaunchedEffect(NativeTopSearch.focused) { if (!NativeTopSearch.focused) focus.clearFocus() }
+    LaunchedEffect(NativeTopSearch.focused) { if (!NativeTopSearch.focused && !requestFocus) focus.clearFocus() }
     // 对话框打开时搜索层仍保留在组合里（关闭后要靠它归还焦点），但必须立刻收起候选并让出焦点。
     LaunchedEffect(interactive) {
         if (!interactive) {
-            NativeTopSearch.collapse()
+            NativeTopSearch.suspendForDialog()
             focus.clearFocus()
         }
     }
@@ -133,17 +150,17 @@ internal fun NativeTopSearchField(navigate: () -> Boolean, modifier: Modifier = 
     // BoxWithConstraints 的测量顺序（width / height / fieldBounds）保持原样。
     BoxWithConstraints(modifier, contentAlignment = Alignment.Center) {
     val availableWidth = maxWidth
-    val width by animateDpAsState(if (NativeTopSearch.focused) maxWidth else minOf(220.dp, maxWidth),
-        tween(220, easing = FastOutSlowInEasing), label = "search-width")
+    val width = if (fillAvailable) maxWidth else animateDpAsState(
+        if (NativeTopSearch.focused) maxWidth else minOf(220.dp, maxWidth),
+        Motion.topbar(), label = "search-width").value
     Row(Modifier.width(minOf(width, maxWidth)).height(34.dp)
         .onGloballyPositioned { NativeTopSearch.fieldBounds = it.boundsInRoot() }
         .border(1.dp, borderColor, shape)
         .background(HostStyle.colors.subBackground, shape).clip(shape),
         verticalAlignment = Alignment.CenterVertically) {
         SaltInput(keyword, { text -> if (interactive) NativeTopSearch.edit(text) },
-            Modifier.weight(1f).focusReturnTarget().onFocusChanged {
-                NativeTopSearch.focused = it.isFocused
-                NativeTopSearch.expanded = it.isFocused && NativeUiState.searchKeyword.isNotBlank()
+            Modifier.weight(1f).focusRequester(requester).focusReturnTarget().onFocusChanged {
+                NativeTopSearch.focusChanged(focusOwner, it.isFocused)
             }
                 .onPreviewKeyEvent { event ->
                     if (!interactive) true

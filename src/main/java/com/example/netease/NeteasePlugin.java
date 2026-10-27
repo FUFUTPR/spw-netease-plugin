@@ -378,7 +378,6 @@ public final class NeteasePlugin extends SpwPlugin {
 
             // ③ 原生 UI 适配层（0.11.60 批次 1）：只在生命周期入口注册一次；
             // 混淆名只出现在 Kotlin 适配层，Java 侧经反射进入，失败也只记日志。
-            HostUiBridge.install(spwVersion, pluginVersion);
 
             // ② 起线程（顺序敏感：HostBridgeWorker 必须先于一切宿主交互）
             HostBridgeWorker.get().start();
@@ -412,6 +411,9 @@ public final class NeteasePlugin extends SpwPlugin {
 
             // ③ 纯文件的服务初始化（0.5.0 瘦身版：只剩账号/客户端登录态这一条线）
             AccountService.init(DataPaths.data());    // 账号：加密凭据 + 唯一 netease-account 守护线程
+            // Restored playback must be admitted before UI dependency priming/hook registration.
+            HostUiBridge.install(spwVersion, pluginVersion);
+            com.example.netease.svc.PluginUpdater.startGlobal(DataPaths.data(), PluginVersions.read());
 
             // ③′ 封面独立缓存（0.11.1）：建目录、把 0.10.x 躺在 cover\ 根的旧桩搬进 cover\stub\、
             // 读回 cover-index.json / cover-refs.json。纯文件操作，不联网（同步时才由 CoverStore 下载）。
@@ -1012,7 +1014,7 @@ public final class NeteasePlugin extends SpwPlugin {
             syncNote = "歌单 " + fetched + " / 曲目 " + songs.size() + " / 关联 " + links + "（宿主同连接，已实时显示）";
             syncFailure = null;
             VoxzenBridge.refreshHostLibrary();
-            Notifier.success("歌单与歌曲已同步：" + fetched + " 个歌单，" + songs.size() + " 首歌曲；封面在后台补齐");
+            PluginLog.i(TAG, "歌单与歌曲已同步：" + fetched + " 个歌单，" + songs.size() + " 首歌曲；封面在后台补齐");
             scheduleSyncArtwork(java.util.List.copyOf(entries), ticket);
         } catch (Throwable error) {
             if (!coordinator.isValid(ticket) || error instanceof java.util.concurrent.CancellationException)
@@ -1167,6 +1169,7 @@ public final class NeteasePlugin extends SpwPlugin {
     @Override
     public void stop() {
         try {
+            com.example.netease.svc.PluginUpdater.stopGlobal();
             SYNC.stop();
             com.example.netease.svc.LocalPlaybackCompatibility.stop();
             VoxzenBridge.stop();
@@ -1215,6 +1218,7 @@ public final class NeteasePlugin extends SpwPlugin {
     @Override
     public void update() {
         try {
+            com.example.netease.svc.CookieVault.checkpoint();
             PluginLog.i(TAG, "update()：版本更新（当前版本 " + PluginVersions.read() + "，无 schema 迁移）");
         } catch (Throwable t) {
             safeLogError("update() 异常（已忽略）", t);

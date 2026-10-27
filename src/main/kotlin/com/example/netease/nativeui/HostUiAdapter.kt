@@ -579,6 +579,8 @@ internal object HostUiAdapter {
 
     /** 安装（幂等）。失败时只更新页面状态与日志，不抛异常。 */
     fun install(hostVersion: String, pluginVersion: String) {
+        HostLibraryNotices.install()
+        HostRowCoverHook.install()
         NativeUiRuntime.hostVersion = hostVersion.ifBlank { "unknown" }
         NativeUiRuntime.pluginVersion = pluginVersion.ifBlank { "unknown" }
         if (handle != null) {
@@ -647,6 +649,8 @@ internal object HostUiAdapter {
             // 避免其它插件的配置页（共享同一个 ModConfigScreen）被本插件覆盖（REVIEW issue2）。
             NativeUiState.status =
                 "已挂载（唯一匹配，宿主 " + hostVersion + "，priority=" + PRIORITY + "）"
+            val warnings = listOfNotNull(HostLibraryNotices.failureMessage, HostRowCoverHook.failureMessage)
+            if (warnings.isNotEmpty()) NativeUiState.status += "；" + warnings.joinToString("；")
             PluginLog.i(
                 TAG,
                 "install 成功：宿主=" + hostVersion + " 插件=" + pluginVersion +
@@ -661,6 +665,8 @@ internal object HostUiAdapter {
 
     /** 卸载（幂等）：停用插件后不留页面。 */
     fun uninstall() {
+        HostLibraryNotices.uninstall()
+        HostRowCoverHook.uninstall()
         HostGlobalSearch.uninstall()
         val h = handle
         if (h == null) {

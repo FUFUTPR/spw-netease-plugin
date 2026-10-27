@@ -26,6 +26,7 @@ internal fun NativeModalEscapeGate(window: Window?) {
             } else if (event.id == KeyEvent.KEY_PRESSED && (NativeUiPresentation.anyDialogOpen() || NativeTopSearch.expanded || NativeTopSearch.focused)) {
                 consuming = true
                 if (!NativeUiPresentation.anyDialogOpen()) NativeTopSearch.collapse()
+                else if (NativeUpdateUi.dialogOpen()) NativeUpdateUi.dismiss()
                 else if (HostCloudSongMenu.removal != null) HostCloudSongMenu.dismissRemoval()
                 else if (HostCloudSongMenu.message.isNotBlank()) HostCloudSongMenu.dismissMessage()
                 else if (NativeUiPresentation.localSaveOpen) NativeUiPresentation.closeLocalSave(cancel = true)
@@ -34,6 +35,6 @@ internal fun NativeModalEscapeGate(window: Window?) {
             } else false
         }
         if (window != null) manager.addKeyEventDispatcher(dispatcher)
-        onDispose { if (window != null) manager.removeKeyEventDispatcher(dispatcher) }
+        guardedCleanup { if (window != null) manager.removeKeyEventDispatcher(dispatcher) }
     }
 }
