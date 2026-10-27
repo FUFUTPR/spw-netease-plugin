@@ -67,4 +67,5 @@ internal object HostUiAbi {
     }
     fun type(value: String): Class<*> = Class.forName(name(value), false, javaClass.classLoader)
     fun workshopRoute(): Any = type("com.xuncorp.voxzen.ui.navigation.ScreenRoute\$Workshop").getField("INSTANCE").get(null)
+    fun modManagementRoute(): Any = type("com.xuncorp.voxzen.ui.navigation.ScreenRoute\$ModManagement").getField("INSTANCE").get(null)
 }

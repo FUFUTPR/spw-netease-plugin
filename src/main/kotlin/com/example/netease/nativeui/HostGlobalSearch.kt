@@ -218,6 +218,18 @@ internal object HostGlobalSearch {
         }
     }
 
+    internal fun captureModManagementNavigation(): Runnable? {
+        val nav=navigator.get() ?: return null
+        return try {
+            val route=HostUiAbi.modManagementRoute()
+            val method=nav.javaClass.getMethod("navigate",Class.forName("com.xuncorp.voxzen.ui.navigation.ScreenRoute"))
+            // Capture before self-unload clears this plugin's weak navigator.
+            Runnable { method.invoke(nav,route) }
+        } catch(error:Throwable) {
+            PluginLog.w("updates","模组管理页入口不可用：${error.javaClass.simpleName}");null
+        }
+    }
+
     @Composable private fun BoxScope.Overlay(interactive: Boolean, rootWidth: Dp) {
         val density = LocalDensity.current
         val focus = LocalFocusManager.current

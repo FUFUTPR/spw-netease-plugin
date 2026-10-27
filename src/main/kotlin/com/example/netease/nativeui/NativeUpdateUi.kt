@@ -24,11 +24,9 @@ import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import java.nio.file.Path
-import com.example.netease.core.DirectoryOpener
-import com.example.netease.core.PluginLog
 import com.example.netease.svc.PluginUpdater
 import com.example.netease.svc.PluginUpdater.Phase
+import com.example.netease.svc.PluginUpdateInstaller
 
 /** Presentation only. Downloading/verification survive closing a foreground dialog. */
 internal object NativeUpdateUi {
@@ -38,16 +36,18 @@ internal object NativeUpdateUi {
     private var background by mutableStateOf(false)
     private var optedOut by mutableStateOf(false)
     private var saving by mutableStateOf(false)
+    private var installing by mutableStateOf(false)
+    private var installed by mutableStateOf(false)
     private var error by mutableStateOf("")
     private var epoch = 0L
-    var folderOpener: (Path) -> Unit = { DirectoryOpener.open(it);Unit }
     fun attach() {
         val token=++epoch
+        installing=false;installed=false
         PluginUpdater.observe { next -> if (token==epoch) state=next }
     }
     fun stop() {
         ++epoch;PluginUpdater.observe(null)
-        visible=false;exiting=false;background=false;saving=false;error=""
+        visible=false;exiting=false;background=false;saving=false;installing=false;installed=false;error=""
         state=PluginUpdater.snapshot()
     }
     fun dialogOpen() = visible || exiting
@@ -76,7 +76,7 @@ internal object NativeUpdateUi {
         }
     }
     fun dismiss() {
-        if(!visible || saving)return
+        if(!visible || saving || installing)return
         when {
             state.busy() -> { PluginUpdater.global()?.cancel();closeDialog() }
             state.phase()==Phase.COMPLETE -> closeDialog()
@@ -84,7 +84,7 @@ internal object NativeUpdateUi {
         }
     }
     fun confirm(displayed:Phase) {
-        if(!visible || saving)return
+        if(!visible || saving || installing)return
         when {
             displayed in listOf(Phase.PROBING,Phase.DOWNLOADING,Phase.VERIFYING) -> {
                 // Preserve the clicked button's intent even if completion arrived
@@ -92,36 +92,41 @@ internal object NativeUpdateUi {
                 background=true;closeDialog()
             }
             displayed==Phase.COMPLETE && state.phase()==Phase.COMPLETE -> {
-                val opened=HostGlobalSearch.openWorkshop()
-                openFolder()
-                if(opened)closeDialog() else error="无法打开工坊页面，下载文件已保留"
+                install()
             }
-            !state.busy() && state.phase()!=Phase.COMPLETE -> saveThen { PluginUpdater.global()?.download() }
+            !state.busy() && state.phase()!=Phase.COMPLETE -> saveThen { error="";PluginUpdater.global()?.download() }
         }
     }
-    private fun openFolder() {
-        val directory=state.file()?.parent ?: return
-        val token=epoch
-        Thread({
-            try { folderOpener(directory) }
-            catch(failure:Exception) {
-                PluginLog.w("updates","打开下载文件夹失败：${failure.javaClass.simpleName}")
-                if(token==epoch)error="无法打开下载文件夹：$directory"
+    private fun install() {
+        if(installing||installed||state.phase()!=Phase.COMPLETE)return
+        val navigation=HostGlobalSearch.captureModManagementNavigation()
+        if(navigation==null){error="暂时无法打开模组管理页，请稍后重试";return}
+        val token=epoch;val snapshot=state
+        installing=true;error=""
+        val accepted=PluginUpdateInstaller.request(snapshot,navigation) { result ->
+            if(token==epoch) {
+                installing=false;installed=result.installed()
+                if(!result.installed()) {
+                    error=result.message()
+                    if(result.needsDownload())PluginUpdater.global()?.invalidateCompleted(snapshot,error)
+                }
             }
-        },"netease-update-open-directory").apply { isDaemon=true;start() }
+        }
+        if(accepted)closeDialog() else {installing=false;error="安装任务暂未启动，请稍后重试"}
     }
     @Composable fun BoxScope.Bubble(rootWidth: Dp) {
         val current=state
         val reminders=PluginUpdater.global()?.notificationsEnabled()!=false
         val offered=(reminders && current.phase() in listOf(Phase.AVAILABLE,Phase.CANCELLED)) ||
             current.phase() in listOf(Phase.FAILED,Phase.COMPLETE) || current.busy()
-        val show=offered && !NativeUiPresentation.anyDialogOpen() && (!current.busy() || background)
+        val show=offered && !installed && !NativeUiPresentation.anyDialogOpen() && (!current.busy() || background)
         val retained=rememberRetained(current.takeIf { offered }) ?: current
         AnimatedVisibility(show, modifier=Modifier.align(Alignment.BottomStart).padding(16.dp)
             .width(minOf(188.dp,(rootWidth-32.dp).coerceAtLeast(0.dp))).testTag("update-bubble"),
             enter=fadeIn(Motion.dialogEnter())+slideInVertically(Motion.dialogEnter()){it/2},
             exit=fadeOut(Motion.dialogExit())+slideOutVertically(Motion.dialogExit()){it/2}) {
             val title=when {
+                installing -> "正在安装"
                 retained.busy() -> "正在下载"
                 retained.phase()==Phase.COMPLETE -> "下载完毕"
                 retained.phase()==Phase.FAILED -> "下载失败，点击重试"
@@ -131,9 +136,9 @@ internal object NativeUpdateUi {
             Column(modifier=Modifier.fillMaxWidth().shadow(6.dp,HostStyle.shapes.small)
                 .clip(HostStyle.shapes.small).background(HostStyle.colors.popup)
                 .border(1.dp,HostStyle.colors.stroke,HostStyle.shapes.small).focusReturnTarget()
-                .clickable(enabled=show,role=Role.Button,onClick={
-                if(show) {
-                    if(current.phase()==Phase.COMPLETE && !titleMotion.isRunning && titleMotion.currentState=="下载完毕")openFolder()
+                .clickable(enabled=show&&!installing,role=Role.Button,onClick={
+                if(show&&!installing) {
+                    if(current.phase()==Phase.COMPLETE && !titleMotion.isRunning && titleMotion.currentState=="下载完毕")install()
                     else openDialog()
                 }
                 }).padding(12.dp)) {
@@ -143,7 +148,7 @@ internal object NativeUpdateUi {
                     }
                     if(retained.busy() || retained.phase()==Phase.COMPLETE) UpdateProgress(retained,small=true)
                     if(!retained.busy())SaltText(
-                        if(retained.phase()==Phase.COMPLETE) "点击打开下载文件夹" else "点击更新 · ${retained.release()?.version().orEmpty()}",
+                        if(installing) "请稍候，安装后请手动启动插件" else if(retained.phase()==Phase.COMPLETE) "点击安装" else "点击更新 · ${retained.release()?.version().orEmpty()}",
                         style=HostStyle.typography.labelSmall,maxLines=2)
                     if(error.isNotBlank())SaltText(error,style=HostStyle.typography.labelSmall,maxLines=2)
                 }
@@ -171,12 +176,12 @@ internal object NativeUpdateUi {
                 title=when {complete->"下载完毕";busy->"正在下载新版本，请耐心等待";else->"网易云插件已有新版本"},
                 onDismiss=::dismiss,onConfirm={confirm(current.phase())},confirmVisible=true,
                 cancelText=when {busy->"取消下载";complete->"关闭";else->"取消"},
-                confirmText=when {busy->"后台下载";complete->"打开工坊页面和文件夹";else->"确定"},
+                confirmText=when {busy->"后台下载";complete->"安装";else->"确定"},
                 interactive=visible,
             ) {
                 Column(Modifier.fillMaxWidth().animateContentSize(Motion.state()),verticalArrangement=Arrangement.spacedBy(12.dp)) {
                     if(busy || complete) {
-                        SaltText("下好后的文件需自行导入",style=HostStyle.typography.bodySmall)
+                        SaltText(if(complete)"安装完成后请手动启动插件" else "下载完成后可点击安装",style=HostStyle.typography.bodySmall)
                         UpdateProgress(current,small=false)
                     } else {
                         SaltText("是否下载新版本 ${current.release()?.version().orEmpty()}？")

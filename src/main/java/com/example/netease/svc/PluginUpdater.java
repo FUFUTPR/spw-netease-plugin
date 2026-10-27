@@ -3,6 +3,7 @@ package com.example.netease.svc;
 import com.example.netease.core.Json;
 import com.example.netease.core.PluginLog;
 import com.example.netease.core.PrivateFiles;
+import com.example.netease.core.UserDownloads;
 import java.io.*;
 import java.net.*;
 import java.nio.charset.StandardCharsets;
@@ -34,7 +35,9 @@ public final class PluginUpdater implements AutoCloseable {
     private static volatile Consumer<State> observer;
     private static final AtomicLong GLOBAL_GENERATION = new AtomicLong();
     private static final State EMPTY = new State(Phase.IDLE,null,0,0,null,"","");
-    private final Path root, preferences, downloads;
+    private final Path root, preferences;
+    private volatile Path downloads;
+    private boolean downloadsResolved;
     private final String currentVersion;
     private final URI endpoint;
     private final List<Source> sources;
@@ -51,8 +54,13 @@ public final class PluginUpdater implements AutoCloseable {
     private volatile boolean closed, notifications = true;
 
     public PluginUpdater(Path data, String currentVersion, URI endpoint, List<Source> sources, Consumer<State> listener) {
+        this(data,currentVersion,endpoint,sources,listener,null);
+    }
+    public PluginUpdater(Path data, String currentVersion, URI endpoint, List<Source> sources, Consumer<State> listener, Path downloadDirectory) {
         this.root=data.toAbsolutePath().normalize().resolve("updates");
-        this.preferences=root.resolve("preferences.json");this.downloads=root.resolve("downloads");
+        this.preferences=root.resolve("preferences.json");
+        this.downloads=downloadDirectory==null?UserDownloads.fallback():downloadDirectory.toAbsolutePath().normalize();
+        this.downloadsResolved=downloadDirectory!=null;
         this.currentVersion=currentVersion;this.endpoint=endpoint;this.sources=List.copyOf(sources);this.listener=listener;
         this.fixture=loopback(endpoint);
         worker=Executors.newSingleThreadScheduledExecutor(r->daemon(r,"netease-update-worker"));
@@ -76,6 +84,12 @@ public final class PluginUpdater implements AutoCloseable {
     public static void observe(Consumer<State> target) { observer=target;if(target!=null)target.accept(snapshot()); }
     public State state() { return state; }
     public Path downloadDirectory() { return downloads; }
+    public synchronized void invalidateCompleted(State expected,String message) {
+        if(closed||state!=expected||state.phase()!=Phase.COMPLETE)return;
+        long token=generation.incrementAndGet();
+        publish(token,new State(Phase.FAILED,state.release(),0,state.total(),null,message,""));
+    }
+    private void resolveDownloads() { if(!downloadsResolved){downloads=UserDownloads.resolve();downloadsResolved=true;} }
     public boolean notificationsEnabled() { return notifications; }
     public void checkNow() { if(!closed)try{worker.execute(()->check(true));}catch(RejectedExecutionException stopped){} }
     public CompletableFuture<Boolean> setNotifications(boolean value) {
@@ -109,11 +123,9 @@ public final class PluginUpdater implements AutoCloseable {
             }
             if(!fetched)throw new IOException("无法获取 GitHub 发布信息");
             if(release==null || compareVersions(release.version(),currentVersion)<=0){publish(token,EMPTY);return;}
-            Path existing=downloads.resolve(release.name());
-            if(Files.isRegularFile(existing,LinkOption.NOFOLLOW_LINKS)) {
-                try { verify(existing,release);publish(token,new State(Phase.COMPLETE,release,release.size(),release.size(),existing,"下载完毕","本地文件"));return; }
-                catch(Exception invalid){PluginLog.d("updates","已有更新文件未通过校验，等待用户重新下载");}
-            }
+            resolveDownloads();ensure(token);
+            Path existing=existingDownload(release);
+            if(existing!=null){publish(token,new State(Phase.COMPLETE,release,release.size(),release.size(),existing,"下载完毕","本地文件"));return;}
             publish(token,new State(Phase.AVAILABLE,release,0,release.size(),null,"网易云插件已有新版本",""));
         }catch(Exception error){if(valid(token)){PluginLog.w("updates","自动检查更新未完成："+error.getClass().getSimpleName());publish(token,EMPTY);}}
     }
@@ -164,7 +176,8 @@ public final class PluginUpdater implements AutoCloseable {
     private void download(Release release,long token) {
         Path temporary=null;
         try {
-            PrivateFiles.directory(root);PrivateFiles.directory(downloads);
+            resolveDownloads();ensure(token);
+            PrivateFiles.directory(root);Files.createDirectories(downloads);
             CompletionService<Probe> completion=new ExecutorCompletionService<>(probes);
             List<Future<Probe>> jobs=new ArrayList<>();
             for(Source source:sources){Future<Probe> f=completion.submit(()->probe(source,release,token));jobs.add(f);pending.add(f);}
@@ -186,12 +199,9 @@ public final class PluginUpdater implements AutoCloseable {
                     transfer(candidate.source(),release,temporary,token);ensure(token);
                     publish(token,new State(Phase.VERIFYING,release,release.size(),release.size(),null,"正在校验下载文件",candidate.source().label()));
                     verify(temporary,release);ensure(token);
-                    Path target=downloads.resolve(release.name());
                     synchronized(this) {
                         ensure(token);
-                        if(Files.isSymbolicLink(target))throw new IOException("更新文件路径不合法");
-                        try{Files.move(temporary,target,StandardCopyOption.REPLACE_EXISTING,StandardCopyOption.ATOMIC_MOVE);}
-                        catch(AtomicMoveNotSupportedException unsupported){Files.move(temporary,target,StandardCopyOption.REPLACE_EXISTING);}
+                        Path target=publishDownload(temporary,release.name());
                         temporary=null;
                         publish(token,new State(Phase.COMPLETE,release,release.size(),release.size(),target,"下载完毕",candidate.source().label()));
                     }
@@ -202,6 +212,31 @@ public final class PluginUpdater implements AutoCloseable {
             throw new IOException("所有下载线路均未成功，请重试",last);
         }catch(Exception error){if(valid(token))publish(token,new State(Phase.FAILED,release,0,release.size(),null,"下载未完成，请重试", ""));}
         finally{if(temporary!=null)try{Files.deleteIfExists(temporary);}catch(IOException ignored){}}
+    }
+    private Path publishDownload(Path temporary,String name)throws IOException {
+        // The user Downloads folder is shared: never replace an existing file.
+        for(int suffix=0;suffix<1000;suffix++) {
+            String filename=suffix==0?name:name.substring(0,name.length()-6)+" ("+suffix+").spmod";
+            Path target=downloads.resolve(filename);
+            try{Files.move(temporary,target);return target;}
+            catch(FileAlreadyExistsException collision){/* Try the next user-visible name. */}
+        }
+        throw new IOException("下载目录同名文件过多");
+    }
+    private Path existingDownload(Release release) {
+        Path original=downloads.resolve(release.name());
+        if(verifiedDownload(original,release))return original;
+        if(!Files.isDirectory(downloads))return null;
+        String stem=release.name().substring(0,release.name().length()-6);
+        var alternate=java.util.regex.Pattern.compile(java.util.regex.Pattern.quote(stem)+" \\([1-9][0-9]{0,2}\\)\\.spmod");
+        try(var files=Files.newDirectoryStream(downloads,stem+"*.spmod")) {
+            for(Path file:files)if(alternate.matcher(file.getFileName().toString()).matches()&&verifiedDownload(file,release))return file;
+        }catch(IOException unavailable){PluginLog.d("updates","已有下载文件暂不可读，等待用户下载");}
+        return null;
+    }
+    private static boolean verifiedDownload(Path file,Release release) {
+        if(!Files.isRegularFile(file,LinkOption.NOFOLLOW_LINKS))return false;
+        try{verify(file,release);return true;}catch(Exception invalid){return false;}
     }
     private Probe probe(Source source,Release release,long token) {
         long started=System.nanoTime();HttpURLConnection connection=null;

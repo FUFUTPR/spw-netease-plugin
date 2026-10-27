@@ -1169,6 +1169,7 @@ public final class NeteasePlugin extends SpwPlugin {
     @Override
     public void stop() {
         try {
+            com.example.netease.svc.PluginUpdateInstaller.onPluginStop();
             com.example.netease.svc.PluginUpdater.stopGlobal();
             SYNC.stop();
             com.example.netease.svc.LocalPlaybackCompatibility.stop();

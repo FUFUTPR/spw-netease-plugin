@@ -74,7 +74,7 @@ public final class HostBridgeWorker {
         Thread t = thread;
         thread = null;
         queue.clear();
-        if (t != null) {
+        if (t != null && t != Thread.currentThread()) {
             t.interrupt();
         }
     }
@@ -177,7 +177,7 @@ public final class HostBridgeWorker {
     }
 
     private void loop() {
-        while (running) {
+        while (running && Thread.currentThread() == thread) {
             Runnable task;
             try {
                 task = queue.takeFirst();
