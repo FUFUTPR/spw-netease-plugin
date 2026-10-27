@@ -41,7 +41,9 @@ public final class PluginUpdater implements AutoCloseable {
     private final boolean fixture;
     private final ScheduledExecutorService worker;
     private final ExecutorService probes;
+    private final ExecutorService connectionCloser;
     private final Set<HttpURLConnection> connections = ConcurrentHashMap.newKeySet();
+    private final Set<HttpURLConnection> closing = ConcurrentHashMap.newKeySet();
     private final Set<Future<?>> pending = ConcurrentHashMap.newKeySet();
     private final AtomicLong generation = new AtomicLong();
     private final Consumer<State> listener;
@@ -55,6 +57,7 @@ public final class PluginUpdater implements AutoCloseable {
         this.fixture=loopback(endpoint);
         worker=Executors.newSingleThreadScheduledExecutor(r->daemon(r,"netease-update-worker"));
         probes=Executors.newFixedThreadPool(3,r->daemon(r,"netease-update-probe"));
+        connectionCloser=Executors.newFixedThreadPool(3,r->daemon(r,"netease-update-close"));
     }
     private static Thread daemon(Runnable r,String name) { Thread t=new Thread(r,name);t.setDaemon(true);return t; }
     public static synchronized void startGlobal(Path data,String version) {
@@ -153,9 +156,9 @@ public final class PluginUpdater implements AutoCloseable {
         try{worker.execute(()->download(release,token));}catch(RejectedExecutionException stopped){}
     }
     public synchronized void cancel() {
-        if(!state.busy())return;
+        if(closed || !state.busy())return;
         long token=generation.incrementAndGet();
-        pending.forEach(f->f.cancel(true));connections.forEach(HttpURLConnection::disconnect);
+        pending.forEach(f->f.cancel(true));closeConnectionsAsync();
         publish(token,new State(Phase.CANCELLED,state.release(),0,state.total(),null,"已取消下载",""));
     }
     private void download(Release release,long token) {
@@ -253,6 +256,16 @@ public final class PluginUpdater implements AutoCloseable {
         connections.add(c);if(!valid(token)){disconnect(c);throw new IOException("更新任务已取消");}return c;
     }
     private void disconnect(HttpURLConnection c){if(c!=null){connections.remove(c);c.disconnect();}}
+    private void closeConnectionsAsync() {
+        // disconnect() may wait for HttpURLConnection's blocked-read monitor.
+        // Never hold the UI/cancel caller there. Snapshot only this generation's
+        // current connections so a quick retry cannot lose its new connection.
+        for(HttpURLConnection connection:List.copyOf(connections))if(closing.add(connection)) {
+            try { connectionCloser.execute(()->{
+                try{disconnect(connection);}finally{closing.remove(connection);}
+            }); }catch(RejectedExecutionException stopped){closing.remove(connection);}
+        }
+    }
     private static boolean loopback(URI uri) {return "http".equals(uri.getScheme())&&("127.0.0.1".equals(uri.getHost())||"localhost".equals(uri.getHost()));}
     public static void verify(Path file,Release release) throws Exception {
         if(Files.size(file)!=release.size())throw new IOException("发布包大小不符");
@@ -282,10 +295,13 @@ public final class PluginUpdater implements AutoCloseable {
     private void ensure(long token)throws IOException {if(!valid(token))throw new IOException("更新任务已取消");}
     private synchronized void publish(long token,State next){if(!valid(token))return;state=next;if(listener!=null)try{listener.accept(next);}catch(Throwable ignored){}}
     @Override public void close() {
-        synchronized(this){closed=true;generation.incrementAndGet();}
-        pending.forEach(f->f.cancel(true));connections.forEach(HttpURLConnection::disconnect);
-        worker.shutdownNow();probes.shutdownNow();
-        try{worker.awaitTermination(600,TimeUnit.MILLISECONDS);probes.awaitTermination(600,TimeUnit.MILLISECONDS);}catch(InterruptedException interrupted){Thread.currentThread().interrupt();}
+        synchronized(this){if(closed)return;closed=true;generation.incrementAndGet();}
+        pending.forEach(f->f.cancel(true));closeConnectionsAsync();
+        worker.shutdownNow();probes.shutdownNow();connectionCloser.shutdown();
+        long deadline=System.nanoTime()+TimeUnit.MILLISECONDS.toNanos(600);
+        try{for(ExecutorService executor:List.of(worker,probes,connectionCloser)){
+            long remaining=deadline-System.nanoTime();if(remaining>0)executor.awaitTermination(remaining,TimeUnit.NANOSECONDS);
+        }}catch(InterruptedException interrupted){Thread.currentThread().interrupt();}
     }
     public static String bytes(long value) {
         if(value<1024)return value==0?"0KB":value+"B";
