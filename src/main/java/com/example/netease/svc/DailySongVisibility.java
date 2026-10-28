@@ -7,7 +7,8 @@ import java.nio.file.*;
 import java.util.*;
 import java.util.concurrent.*;
 
-/** Track provenance survives recommendation refreshes; filtering never queries Room on the UI thread. */
+/** Only cloud tracks with a current ordinary playlist membership belong in Songs.
+ * Keep orphan rows for playback/history; filtering never queries Room on the UI thread. */
 public final class DailySongVisibility {
     private static final Set<String> known = ConcurrentHashMap.newKeySet();
     private static volatile Set<String> hidden = Set.of();
@@ -22,9 +23,8 @@ public final class DailySongVisibility {
         worker.scheduleWithFixedDelay(() -> {
             try {
                 load();
-                if (known.isEmpty()) return;
                 Boolean changed = HostSqlBridge.onHostConnection(DailySongVisibility::refreshOn);
-                if (Boolean.TRUE.equals(changed)) HostTrackListGate.refresh("每日推荐曲目可见性变化");
+                if (Boolean.TRUE.equals(changed)) HostTrackListGate.refresh("网易云曲目歌单归属变化");
             } catch (Throwable error) { PluginLog.d("daily", "曲目可见性稍后重试："+error.getClass().getSimpleName()); }
         },1,2,TimeUnit.SECONDS);
     }
@@ -38,7 +38,7 @@ public final class DailySongVisibility {
         load();boolean changed=false;
         for(var song:songs)if(song.id()>0)changed|=known.add(NativeLibrary.ID_PREFIX+song.id());
         if(changed) {
-            hidden=Set.copyOf(known);
+            var next=new HashSet<>(hidden);next.addAll(known);hidden=Set.copyOf(next);
             Files.createDirectories(file().getParent());
             var temp=Files.createTempFile(file().getParent(),"daily-origin-",".tmp");
             try {Files.write(temp,new TreeSet<>(known));Files.move(temp,file(),StandardCopyOption.REPLACE_EXISTING);}
@@ -51,10 +51,15 @@ public final class DailySongVisibility {
         var layout=new PlaylistLinks(sql);
         var allowed=new HashSet<String>();
         String query=layout.modern
-            ? "SELECT DISTINCT s.playbackTrackId FROM PlaylistTrack p JOIN SyncTrack s ON s.id=p.syncTrackId AND s.scopeId=p.scopeId WHERE p.isRemoved=0 AND p.playlistId<>?"
-            : "SELECT DISTINCT trackId FROM PlaylistTrack WHERE playlistId<>?";
-        for(var row:sql.rows(query,DailyRecommendations.HOST_ID))allowed.add(String.valueOf(row[0]));
-        var next=new HashSet<>(known);next.removeAll(allowed);
+            ? "SELECT DISTINCT s.primaryTrackId,s.playbackTrackId FROM PlaylistTrack p JOIN SyncTrack s ON s.id=p.syncTrackId AND s.scopeId=p.scopeId JOIN Playlist pl ON pl.id=p.playlistId AND pl.scopeId=p.scopeId WHERE p.isRemoved=0 AND p.playlistId<>?"
+            : "SELECT DISTINCT p.trackId FROM PlaylistTrack p JOIN Playlist pl ON pl.id=p.playlistId WHERE p.playlistId<>?";
+        for(var row:sql.rows(query,DailyRecommendations.HOST_ID))for(Object id:row)if(id!=null)allowed.add(String.valueOf(id));
+        var next=new HashSet<>(known);
+        for(var row:sql.rows("SELECT id FROM Track WHERE id GLOB 'netease-[0-9]*'")) {
+            String id=String.valueOf(row[0]);
+            if(id.matches("netease-[0-9]+"))next.add(id);
+        }
+        next.removeAll(allowed);
         var snapshot=Set.copyOf(next);boolean changed=!snapshot.equals(hidden);hidden=snapshot;return changed;
     }
     public static synchronized void stop() {if(worker!=null)worker.shutdownNow();worker=null;}

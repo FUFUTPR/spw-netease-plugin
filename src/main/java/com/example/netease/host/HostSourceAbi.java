@@ -24,7 +24,7 @@ public final class HostSourceAbi {
         if(resource==null || !(resource.openConnection() instanceof JarURLConnection connection))throw new IllegalStateException("宿主源码标记不可用");
         var matches=new ArrayList<String>();
         try(var jar=new java.util.jar.JarFile(connection.getJarFileURL().toURI().getPath())) {
-            for(var entry:jar.stream().filter(e->e.getName().startsWith("androidx/compose/ui/")&&e.getName().endsWith(".class")&&!e.getName().contains("$")).toList()) {
+            for(var entry:jar.stream().filter(e->(e.getName().startsWith("androidx/compose/ui/")||e.getName().startsWith("com/xuncorp/voxzen/ui/component/"))&&e.getName().endsWith(".class")&&!e.getName().contains("$")).toList()) {
                 try(var in=jar.getInputStream(entry)) {
                     String body=new String(in.readAllBytes(),StandardCharsets.ISO_8859_1);
                     if(body.contains(source)&&body.contains(marker))matches.add(entry.getName().replace('/','.').replace(".class",""));

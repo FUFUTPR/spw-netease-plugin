@@ -71,11 +71,14 @@ internal object HostManagedPlaylists {
         }
     }
     private fun builder(selected:Managed,dismiss:()->Unit):(Any)->Unit={scope->
+        if(selected.id==DailyRecommendations.PLAYLIST_ID) {
+            HostSongPopup.item(scope,"关闭每日推荐",true) {dismiss();HostDailyRecommendations.requestDisable()}
+        } else {
         // Deletion is intentionally absent only for plugin-owned playlist identities.
         HostSongPopup.item(scope,"编辑",selected.id>0) {
             dismiss();editing=selected;title=selected.title;description=selected.description;message="";busy=false
         }
-        if(selected.id<=0)HostSongPopup.item(scope,"每日推荐由插件管理",false){}
+        }
     }
     private fun save(){
         val selected=editing?:return

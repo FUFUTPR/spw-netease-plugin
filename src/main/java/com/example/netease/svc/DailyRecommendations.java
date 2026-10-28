@@ -48,7 +48,7 @@ public final class DailyRecommendations {
             boolean on = PluginConfig.dailyRecommendations();
             if (epoch != account || on != enabled) {
                 generation++;
-                removePlaylist();
+                resetPlaylist(on);
                 account = epoch; enabled = on; loadedDay = null; retryAfter = 0;
                 state = new State(false, on ? "请先登录网易云账号" : "每日推荐已关闭，可在插件配置页开启", List.of());
             }
@@ -139,9 +139,11 @@ public final class DailyRecommendations {
                     NativeLibrary.writeCoversOn(sql, covers)));
         } catch (Throwable error) { if (valid(token, epoch)) fail(error); }
     }
-    private static void removePlaylist() throws Exception {
+    private static void resetPlaylist(boolean keepPosition) throws Exception {
         Boolean removed = HostSqlBridge.onHostConnection(sql -> {
-            NativeLibrary.removeDailyPlaylistOn(sql); return true;
+            if(keepPosition)NativeLibrary.clearDailyPlaylistOn(sql);
+            else NativeLibrary.removeDailyPlaylistOn(sql);
+            return true;
         });
         if (removed == null) throw new IllegalStateException("宿主曲库尚未就绪，请稍后重试");
         VoxzenBridge.refreshHostLibrary();

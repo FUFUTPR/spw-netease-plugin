@@ -519,6 +519,7 @@ public final class PlaybarCover {
     public static void onMusicStarted(String why) {
         long sid = currentSongId;
         long auth = playingNow();                    // 0.11.49c：worker 现读 —— 只读缓存会滞后一整轮（11:58 自动接续静默丢投）
+        if (auth < 0L) { leaveCloudPlayback(); return; }
         if (auth > 0L && auth != sid) {
             sid = lagTolerantTarget(sid, auth);      // 0.11.49c：权威滞后（仍指上一首）时不覆盖刚认到的新曲
             currentSongId = sid;
@@ -695,7 +696,7 @@ public final class PlaybarCover {
             return;                                  // 没有待复核的
         }
         long playing = playingNow();
-        if (playing > 0L && playing != sid) {
+        if (playing < 0L || (playing > 0L && playing != sid)) {
             // 0.11.49：这一张属于上一首（复核窗口里用户/宿主已换曲）—— 绝不补投，也绝不「确认」错图。
             clearLanding();
             PluginLog.i(TAG, "封面落地复核放弃：netease-" + sid + " 已不是宿主当前曲（现在 netease-"
@@ -778,6 +779,7 @@ public final class PlaybarCover {
 
     /** 只重发图流（宿主同款两步：按尺寸缩放缓存 + 投进播放条图片流）。 */
     private static void redeliverOnly(Object owner) {
+        if (playingNow() < 0L) return;
         Object cache = callStatic0(cls("com.xuncorp.voxzen.image.ScaledImageBitmapCacheKt"),
                 "getSharedScaledImageBitmapCache");
         if (cache != null) {
@@ -866,6 +868,7 @@ public final class PlaybarCover {
     public static void onPoll() {
         try {
             long authoritativeId = playingNow();
+            if (authoritativeId < 0L) { leaveCloudPlayback(); return; }
             landCheck();                 // 0.11.21：先复核上一首投出去的封面还在不在（自动接续那一轮会补投）
             // A paused track produces no new Ready/isPlaying callback. The initial
             // 4-8s landing watch cannot repair an image cleared hours later.
@@ -998,7 +1001,7 @@ public final class PlaybarCover {
      * 宿主播放器「当前曲」的权威值（worker 上现读并刷新缓存；其它线程只读缓存 —— 宿主回调线程 /
      * 流服务线程绝不允许在这里阻塞）。
      *
-     * @return 裸 id &gt; 0 = 宿主当前播放的就是这一首；0 = 读不到（不得据此判「没有在播」）
+     * @return 裸 id &gt; 0 = 网易云当前曲；-1 = 其它来源；0 = 读取失败。
      */
     private static long playingNow() {
         try {
@@ -1012,6 +1015,13 @@ public final class PlaybarCover {
             // 退到缓存
         }
         return playingIdCache;
+    }
+
+    /** Forget our delivery state, leaving the host's current local artwork untouched. */
+    private static void leaveCloudPlayback() {
+        currentSongId = lastOk = musicDeliveredId = -1L;
+        pending.set(-1L);
+        clearLanding();
     }
 
     /**
@@ -1076,6 +1086,7 @@ public final class PlaybarCover {
             // 0.11.49：inject 之前用宿主播放器对一次账（唯一权威判据）。对不上 = 这一首已经不是当前曲
             // （邻曲保温把 currentSongId 带偏 / 用户已换曲）⇒ 一次都不投，并把封面改投真正的当前曲。
             long playing = playingNow();
+            if (playing < 0L) { leaveCloudPlayback(); return; }
             if (playing > 0L && playing != songId && !authLagsBehind(songId)) {
                 cancelFor(playing, songId, why);
                 return;
@@ -1328,6 +1339,7 @@ public final class PlaybarCover {
      * @return {@code null} = 已投递；否则是一行「哪一环不可达」的原因
      */
     private static String inject(byte[] bytes, int side, long songId) {
+        if (playingNow() < 0L) return "当前歌曲来自其它来源，停止网易云封面投递";
         Class<?> ibmUtil = cls("com.xuncorp.voxzen.util.ImageBitmapUtil");
         Class<?> skiaKt = cls("androidx.compose.ui.graphics.SkiaImageAsset_skikoKt");
         Class<?> rcibCls = cls("com.xuncorp.voxzen.image.RefCountedImageBitmap");
@@ -1361,7 +1373,13 @@ public final class PlaybarCover {
         }
         Object monitor = staticObj(pmCls, "INSTANCE");
         if (monitor == null) {
+            callArgs(owner, "close");
             return "PlaybackMonitor.INSTANCE 取不到";
+        }
+        long playing = playingNow();
+        if (playing < 0L || (playing > 0L && playing != songId && !authLagsBehind(songId))) {
+            callArgs(owner, "close");
+            return "歌曲已切换，停止旧封面投递";
         }
         Object cache = callStatic0(scKt, "getSharedScaledImageBitmapCache");
         if (cache != null) {

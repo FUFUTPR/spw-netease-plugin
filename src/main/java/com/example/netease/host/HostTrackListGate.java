@@ -949,6 +949,7 @@ public final class HostTrackListGate {
         int size = list.size();
         boolean merge = PluginConfig.mergePlaylists();
         boolean[] plugin = new boolean[size];
+        boolean[] excluded = new boolean[size];
         String[] titles = new String[size];
         String[] artists = new String[size];
         String[] albums = new String[size];
@@ -957,7 +958,9 @@ public final class HostTrackListGate {
         boolean fieldsOk = true;
         for (int i = 0; i < size; i++) {
             Object item = list.get(i);
-            plugin[i] = isPluginTrack(item);
+            String id=trackId(item);
+            plugin[i] = id!=null&&id.startsWith(NativeLibrary.ID_PREFIX);
+            excluded[i]=(!merge&&plugin[i]) || (id!=null&&com.example.netease.svc.DailySongVisibility.hidden(id));
             try {
                 titles[i] = TITLE.getString(item);
                 artists[i] = ARTIST.getString(item);
@@ -967,25 +970,18 @@ public final class HostTrackListGate {
             } catch (Throwable t) {
                 fieldsOk = false;
                 if (TRANSFORM_FAIL_LOGGED.compareAndSet(false, true)) {
-                    PluginLog.w(TAG, "读曲目字段失败（本份列表不做去重、也不隐藏）：" + brief(t));
+                    PluginLog.w(TAG, "读曲目字段失败（本份列表跳过去重，仍按来源应用显示开关）：" + brief(t));
                 }
-                break;
             }
         }
         boolean[] dupHidden = fieldsOk
-                ? dedupHiddenMask(titles, artists, albums, sizes, durations, plugin)
+                ? dedupHiddenMask(titles, artists, albums, sizes, durations, plugin, excluded)
                 : new boolean[size];
         List<Object> kept = new ArrayList<>(size);
         int droppedPlugin = 0;
         int droppedDup = 0;
         for (int i = 0; i < size; i++) {
-            try {
-                Object value=list.get(i).getClass().getMethod("getId").invoke(list.get(i));
-                if(value instanceof String id && com.example.netease.svc.DailySongVisibility.hidden(id)) {
-                    droppedPlugin++;continue;
-                }
-            } catch(ReflectiveOperationException ignored) { }
-            if (!merge && plugin[i]) {
+            if (excluded[i]) {
                 droppedPlugin++;
                 continue;
             }
@@ -1015,10 +1011,16 @@ public final class HostTrackListGate {
      */
     public static boolean[] dedupHiddenMask(String[] titles, String[] artists, String[] albums,
                                             long[] sizes, long[] durations, boolean[] plugin) {
+        return dedupHiddenMask(titles,artists,albums,sizes,durations,plugin,new boolean[titles.length]);
+    }
+
+    private static boolean[] dedupHiddenMask(String[] titles, String[] artists, String[] albums,
+                                            long[] sizes, long[] durations, boolean[] plugin, boolean[] excluded) {
         int n = titles.length;
         boolean[] hidden = new boolean[n];
         HashMap<String, Integer> best = new HashMap<>();
         for (int i = 0; i < n; i++) {
+            if(excluded[i])continue;
             String key = norm(titles[i]) + '\u0001' + norm(artists[i]) + '\u0001' + norm(albums[i]);
             Integer j = best.get(key);
             if (j == null) {
@@ -1070,22 +1072,27 @@ public final class HostTrackListGate {
 
     /** 是否插件写入的行（{@code Track.id} 以 {@code netease-} 开头）；取不到 ID 一律当本地放行。 */
     private static boolean isPluginTrack(Object item) {
+        String id=trackId(item);
+        return id!=null&&id.startsWith(NativeLibrary.ID_PREFIX);
+    }
+
+    private static String trackId(Object item) {
         if (item == null) {
-            return false;
+            return null;
         }
         try {
             Method getter = idGetter;
-            if (getter == null) {
+            if (getter == null || !getter.getDeclaringClass().isInstance(item)) {
                 getter = item.getClass().getMethod("getId");
                 idGetter = getter;
             }
             Object id = getter.invoke(item);
-            return (id instanceof String) && ((String) id).startsWith(NativeLibrary.ID_PREFIX);
+            return id instanceof String value?value:null;
         } catch (Throwable t) {
             if (TRANSFORM_FAIL_LOGGED.compareAndSet(false, true)) {
                 PluginLog.w(TAG, "读取曲目 ID 失败（该首按本地放行）：" + brief(t));
             }
-            return false;
+            return null;
         }
     }
 

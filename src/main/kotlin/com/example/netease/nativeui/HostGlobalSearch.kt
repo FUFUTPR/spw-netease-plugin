@@ -164,7 +164,7 @@ internal object HostGlobalSearch {
                 draw(root, listOf(call.arguments.getOrNull(0) ?: false), currentComposer)
                 if (mainTitle && titleBounds.width > 0f) {
                     // 对话框打开时不卸载搜索层：它是真实的焦点归还目标（按窗口登记），
-                    // 卸载会让关闭对话框后无目标可还。这里只做不可交互 + 淡出。
+                    // 卸载会让关闭对话框后无目标可还。弹窗期间保留显示，仅阻止交互。
                     val interactive = !NativeUiPresentation.anyDialogOpen()
                     HostSaltTheme.read()?.let { snapshot ->
                         CompositionLocalProvider(LocalSaltSnapshot provides snapshot) {
@@ -288,11 +288,7 @@ internal object HostGlobalSearch {
     @Composable private fun BoxScope.Overlay(interactive: Boolean, rootWidth: Dp) {
         val density = LocalDensity.current
         val focus = LocalFocusManager.current
-        val overlayAlpha by animateFloatAsState(
-            targetValue = if (interactive) 1f else 0f,
-            animationSpec = Motion.state(),
-            label = "search-overlay-alpha",
-        )
+        val overlayAlpha = 1f
         val x = with(density) { (titleBounds.left - rootBounds.left).toDp() }
         val y = with(density) { (titleBounds.top - rootBounds.top).toDp() }
         // Read current measurement constraints, not the previous frame's global
@@ -302,7 +298,7 @@ internal object HostGlobalSearch {
         val syncMessage = syncProgressMessage(NativeUiState.sync)
         val message = refreshProgressMessage(NativeUiState.sync, NativeUiState.daily)
         val visibility = remember { MutableTransitionState(false) }
-        visibility.targetState = interactive && message.isNotBlank()
+        visibility.targetState = message.isNotBlank()
         val showing = visibility.currentState || visibility.targetState
         SideEffect { HostLibraryNotices.progressVisible = showing }
         DisposableEffect(Unit) { guardedCleanup { HostLibraryNotices.progressVisible = false } }

@@ -1347,7 +1347,7 @@ public final class VoxzenBridge {
                             try {
                                 if (stopped || seq != SEQ.get()) return;
                                 long actual = playingTrackId();
-                                if (actual > 0 && !trackId.equals("netease-" + actual)) return;
+                                if (actual < 0 || (actual > 0 && !trackId.equals("netease-" + actual))) return;
                                 PluginLog.i(TAG, label + " #" + seq + " ③⁺" + d + "ms 保活：" + registryActivate(trackId, location)
                                         + " 读回=" + registrySourceDump());
                             } catch (Throwable t) {
@@ -3153,8 +3153,8 @@ public final class VoxzenBridge {
      * {@code Dispatchers.Main} 上的那次比对。本方法走同一条权威路径，是「播放条封面该投哪一首」的
      * 唯一判据来源。</p>
      *
-     * @return 裸数字 id（只认 {@code netease-<4 位以上数字>} 形态）；读不到 / 不是本插件曲目 → 0
-     *         （0 = 「不知道」而不是「没有在播」，调用方不得据此判空）
+     * @return 网易云数字 id；已确认是其它来源的媒资项 → -1；读取失败 → 0。
+     *         0 是未知，-1 必须停止插件封面投递，不能沿用上一首网易云歌曲。
      */
     public static long playingTrackId() {
         try {
@@ -3227,11 +3227,18 @@ public final class VoxzenBridge {
                 warnAuthLost("媒资项为空", "播放器当前媒资项为空（空闲或读取失败）");
                 return 0L;
             }
-            return neteaseTrackId(itemId(item));
+            return artworkTrackId(itemId(item));
         } catch (Throwable t) {
             warnAuthLost("异常/" + t.getClass().getSimpleName(), "读当前媒资项异常：" + brief(t));
             return 0L;
         }
+    }
+
+    private static long artworkTrackId(String raw) {
+        if(raw==null||raw.isBlank())return 0L;
+        if(!raw.matches("netease-[1-9][0-9]*"))return -1L;
+        try{return Long.parseLong(raw.substring("netease-".length()));}
+        catch(NumberFormatException invalid){return 0L;}
     }
 
     /** 宿主播放器上的「当前媒资项」：0 参且返回 {@code com.xuncorp.pisces.PiscesMediaItem} 的方法。 */

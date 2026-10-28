@@ -410,11 +410,16 @@ public final class NativeLibrary {
     }
 
     public static void removeDailyPlaylistOn(Sql raw) throws Exception {
+        clearDailyPlaylistOn(raw);
+        raw.exec("DELETE FROM Playlist WHERE id=?", DailyRecommendations.HOST_ID);
+    }
+
+    /** Account/startup refresh clears old songs while preserving the user's playlist position. */
+    public static void clearDailyPlaylistOn(Sql raw) throws Exception {
         SqlSchema sql = requireSchema(raw, "每日推荐");
         String id = DailyRecommendations.HOST_ID;
         new PlaylistLinks(sql).checkPlaylist(id);
         sql.exec("DELETE FROM PlaylistTrack WHERE playlistId=?", id);
-        sql.exec("DELETE FROM Playlist WHERE id=?", id);
     }
 
     public static void renameCloudPlaylistOn(Sql raw,long id,String title,String description) throws Exception {

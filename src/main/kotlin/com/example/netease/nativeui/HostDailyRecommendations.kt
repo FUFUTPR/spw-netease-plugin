@@ -31,7 +31,13 @@ internal object HostDailyRecommendations {
     private var state by mutableStateOf(DailyRecommendations.state())
     private var pageBounds by mutableStateOf(Rect.Zero)
     private var pageOwner by mutableStateOf<Any?>(null)
+    private var playlistSearchBounds by mutableStateOf(Rect.Zero)
+    private var searchMethod:java.lang.reflect.Method?=null
+    private var toolbarBottom by mutableStateOf(0f)
+    private var collapsedSearchWidth by mutableStateOf(32.dp)
+    private var collapsedSearchMeasured=false
     fun dialogOpen() = dialog.isNotEmpty()
+    fun requestDisable() {dialog="disable"}
     fun dismiss() { dialog = ""; NativeUiPresentation.requestFocusReturn() }
     fun install() {
         if (handles.isNotEmpty()) return
@@ -43,13 +49,23 @@ internal object HostDailyRecommendations {
                     resolved.method().name, caller, resolved.method().parameterTypes.take(2).map { it.name }, 100, Hook)
                 defaults += HostReplacementDefaults.prepare(WorkshopApi.hookRegistrar, resolved.method(), caller)
             }
+            val searchOwner=com.example.netease.host.HostSourceAbi.find("ScreenSearchBar.kt","ScreenSearchBar (")
+            val search=searchOwner.declaredMethods.single{it.returnType==Void.TYPE&&it.parameterCount==5&&it.parameterTypes[0].name=="androidx.compose.foundation.text.input.TextFieldState"&&it.parameterTypes[1]==Modifier::class.java}
+            search.isAccessible=true;searchMethod=search
+            val searchCallers=com.example.netease.host.HostSourceAbi.callers(search,resolved.method().declaringClass)
+            check(searchCallers.isNotEmpty()) {"找不到歌单内搜索调用点"}
+            searchCallers.forEach{caller->
+                handles+=WorkshopApi.hookRegistrar.replaceComposable(searchOwner.name,search.name,caller,search.parameterTypes.take(2).map{it.name},100,SearchHook)
+                defaults+=HostReplacementDefaults.prepare(WorkshopApi.hookRegistrar,search,caller)
+            }
             PluginLog.i("daily-ui", "每日推荐歌单工具栏已注册（含宿主默认参数调用）")
         } catch (error: Throwable) { uninstall(); throw error }
     }
     fun uninstall() {
         defaults.asReversed().forEach { runCatching { it.close() } }; defaults.clear()
         handles.asReversed().forEach { runCatching { it.unhook() } }; handles.clear()
-        target = null; dialog = ""; pageOwner = null; pageBounds = Rect.Zero
+        target = null;searchMethod=null; dialog = ""; pageOwner = null; pageBounds = Rect.Zero;playlistSearchBounds=Rect.Zero;toolbarBottom=0f
+        collapsedSearchWidth=32.dp;collapsedSearchMeasured=false
     }
     private object Hook : ComposableHook() {
         @Composable override fun Content(call: UiHookCall) {
@@ -63,12 +79,32 @@ internal object HostDailyRecommendations {
             if (!daily) { original(); return }
             DisposableEffect(route) {
                 pageOwner = route
+                playlistSearchBounds=Rect.Zero
+                toolbarBottom=0f
+                collapsedSearchWidth=32.dp;collapsedSearchMeasured=false
                 guardedCleanup { if (pageOwner === route) { pageOwner = null; pageBounds = Rect.Zero } }
             }
             BoxWithConstraints(Modifier.fillMaxSize().onGloballyPositioned { pageBounds = it.boundsInRoot() }) {
-                val top = if (maxWidth >= 850.dp) 0.dp else if (maxWidth < 420.dp) 96.dp else 56.dp
-                Box(Modifier.fillMaxSize().padding(top = top)) { original() }
+                val minimum = if(maxWidth<420.dp)96.dp else 56.dp
+                val measured=with(LocalDensity.current){toolbarBottom.toDp()}+8.dp
+                val top = if (maxWidth >= 850.dp) 0.dp else maxOf(minimum,measured)
+                Box(Modifier.fillMaxSize().padding(top = top).testTag("daily-native-content")) { original() }
             }
+        }
+    }
+    /** Measure the playlist's own native search, independently of the global titlebar editor. */
+    private object SearchHook:ComposableHook(){
+        @Composable override fun Content(call:UiHookCall){
+            val method=searchMethod?:return
+            val density=LocalDensity.current
+            val modifier=(call.arguments[1] as? Modifier?:Modifier).onGloballyPositioned {
+                if(pageOwner!=null&&HostGlobalSearch.currentRoute()==pageOwner){
+                    playlistSearchBounds=it.boundsInRoot()
+                    val width=with(density){playlistSearchBounds.width.toDp()}
+                    if(!collapsedSearchMeasured&&width>0.dp&&width<=48.dp){collapsedSearchWidth=width;collapsedSearchMeasured=true}
+                }
+            }.testTag("daily-playlist-search")
+            method.invoke(null,call.arguments[0],modifier,currentComposer,0,0)
         }
     }
 
@@ -84,8 +120,12 @@ internal object HostDailyRecommendations {
         val top = with(density) { (pageBounds.top - rootBounds.top).toDp() }
         val wide = width >= 850.dp
         val toolbarWidth = if (wide) 400.dp else (width - 32.dp).coerceAtLeast(0.dp)
-        Column(Modifier.offset(if (wide) left + width - 244.dp - toolbarWidth else left + 16.dp,
-                top + if (wide) 16.dp else 8.dp).width(toolbarWidth).testTag("daily-toolbar"),
+        // ScreenSearchBar already animates its measured width. Follow those exact
+        // frames instead of adding a second animation or moving the native page.
+        val searchExpansion=with(density){playlistSearchBounds.width.toDp()}.minus(collapsedSearchWidth).coerceAtLeast(0.dp)
+        Column(Modifier.offset(if (wide) left + width - 244.dp - toolbarWidth-searchExpansion else left + 16.dp,
+                top + if (wide) 16.dp else 8.dp).width(toolbarWidth).testTag("daily-toolbar")
+                .onGloballyPositioned {toolbarBottom=(it.boundsInRoot().bottom-pageBounds.top).coerceAtLeast(0f)},
             verticalArrangement = Arrangement.spacedBy(4.dp)) {
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 val available = interactive && PluginConfig.dailyRecommendations()
@@ -93,7 +133,7 @@ internal object HostDailyRecommendations {
                 SaltSecondaryButton(onClick = { PluginLog.i("daily-ui", "点击风格推荐"); DailyRecommendations.style() }, enabled = available && !state.busy()) { SaltText("风格推荐") }
                 SaltSecondaryButton(onClick = { PluginLog.i("daily-ui", "点击历史日推"); dialog = "history"; DailyRecommendations.historyDates() },
                     enabled = available && !state.busy()) { SaltText("历史日推") }
-                SaltSecondaryButton(onClick = { PluginLog.i("daily-ui", "点击关闭每日推荐"); dialog = "disable" }, enabled = available) { SaltText("关闭每日推荐") }
+                SaltSecondaryButton(onClick = { PluginLog.i("daily-ui", "点击关闭每日推荐"); requestDisable() }, enabled = available) { SaltText("关闭每日推荐") }
             }
             SaltText(state.message(), style = HostStyle.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }

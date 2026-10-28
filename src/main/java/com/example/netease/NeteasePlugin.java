@@ -651,7 +651,7 @@ public final class NeteasePlugin extends SpwPlugin {
             HostBridgeWorker.get().submitFast(() -> {
                 // 0.11.49：先问宿主播放器的「当前媒资项」（权威路径）；属性层那条历史路径读不到时再退回。
                 long sid = VoxzenBridge.playingTrackId();
-                if (sid <= 0L) {
+                if (sid == 0L) {
                     sid = VoxzenBridge.currentTrackId();
                 }
                 if (sid > 0L) {
