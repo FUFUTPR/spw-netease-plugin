@@ -1250,17 +1250,26 @@ public final class PlaybarCover {
     // ------------------------------------------------------------------ 成品图字节缓存
 
     private static byte[] cached(String album) {
+        String identity=CoverStore.imageIdentity(album);
         synchronized (CACHE) {
+            if(!java.util.Objects.equals(CACHE_IDENTITIES.get(album),identity)) {
+                byte[] stale=CACHE.remove(album);if(stale!=null)cacheBytes-=stale.length;
+                CACHE_IDENTITIES.remove(album);return null;
+            }
             return CACHE.get(album);
         }
     }
+
+    private static final Map<String,String> CACHE_IDENTITIES=new java.util.HashMap<>();
 
     private static void put(String album, byte[] bytes) {
         if (album == null || bytes == null || bytes.length == 0) {
             return;
         }
+        String identity=CoverStore.imageIdentity(album);
         synchronized (CACHE) {
             byte[] old = CACHE.put(album, bytes);
+            CACHE_IDENTITIES.put(album,identity);
             if (old != null) {
                 cacheBytes -= old.length;
             }
@@ -1269,6 +1278,7 @@ public final class PlaybarCover {
             while ((CACHE.size() > CACHE_MAX_ITEMS || cacheBytes > CACHE_MAX_BYTES) && it.hasNext()) {
                 Map.Entry<String, byte[]> e = it.next();
                 cacheBytes -= e.getValue().length;
+                CACHE_IDENTITIES.remove(e.getKey());
                 it.remove();
             }
             if (cacheBytes < 0L) {
@@ -1288,6 +1298,7 @@ public final class PlaybarCover {
     public static void clearCache() {
         synchronized (CACHE) {
             CACHE.clear();
+            CACHE_IDENTITIES.clear();
             cacheBytes = 0L;
         }
         PREWARM_SEEN.clear();

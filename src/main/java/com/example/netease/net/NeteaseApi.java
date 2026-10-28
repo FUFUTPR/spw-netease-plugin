@@ -1325,27 +1325,43 @@ public final class NeteaseApi {
      * @return 歌单摘要列表；未登录/无数据 = 空列表，绝不返回 null
      */
     public static List<Dto.PlaylistBrief> userPlaylists(long uid, int limit) throws NeteaseException {
+        return userPlaylistSnapshot(uid, limit).playlists();
+    }
+
+    public record PlaylistSnapshot(List<Dto.PlaylistBrief> playlists, boolean complete) {}
+    interface UserPlaylistFetch { Object fetch(Map<String, Object> payload) throws NeteaseException; }
+    static volatile UserPlaylistFetch userPlaylistFetch = payload -> weapiFirst(payload, "user/playlist", "v1/user/playlist");
+
+    /** Only a validated, exhausted listing may authorize removal of missing local mirrors. */
+    public static PlaylistSnapshot userPlaylistSnapshot(long uid, int limit) throws NeteaseException {
         List<Dto.PlaylistBrief> out = new ArrayList<>();
         if (!isLoggedIn()) {
             PluginLog.d("netease", "userPlaylists：未登录 → 返回空列表");
-            return out;
+            return new PlaylistSnapshot(List.of(), false);
         }
         long who = resolveUid(uid);
         if (who <= 0L) {
             PluginLog.w("netease", "userPlaylists：拿不到 uid（未登录或账号信息缺失）→ 空列表");
-            return out;
+            return new PlaylistSnapshot(List.of(), false);
         }
         int want = limit <= 0 ? MAX_PLAYLIST_LIMIT : Math.max(1, Math.min(limit, MAX_PLAYLIST_LIMIT));
         int offset = 0;
+        boolean complete = false;
+        boolean validListing = true;
         for (int page = 0; page < MAX_PLAYLIST_PAGES; page++) {
             Map<String, Object> payload = Json.newObject();
             payload.put("uid", who);
             payload.put("limit", want);
             payload.put("offset", offset);
             payload.put("includeVideo", true);
-            Object root = weapiFirst(payload, "user/playlist", "v1/user/playlist");
+            Object root = userPlaylistFetch.fetch(payload);
+            if (!(Json.get(root, "playlist") instanceof List) && !(Json.get(root, "data.playlist") instanceof List))
+                throw new NeteaseException("歌单列表响应不完整，保留本地歌单");
             List<Object> items = playlistArray(root);
+            if (!(Json.get(root, "more") instanceof Boolean) && !(Json.get(root, "data.more") instanceof Boolean)) validListing = false;
+            boolean more = Json.bool(root, "more", false) || Json.bool(root, "data.more", false);
             if (items.isEmpty()) {
+                complete = validListing && !more;
                 break;
             }
             for (Object node : items) {
@@ -1354,17 +1370,17 @@ public final class NeteaseApi {
                     out.add(brief);
                     if (brief.mine() && Json.integer(node,"specialType",0)==SPECIAL_TYPE_LIKED)
                         likedPlaylistCache=new LikedPlaylistCache(who,brief.id(),System.currentTimeMillis());
-                }
+                } else validListing = false;
             }
-            boolean more = Json.bool(root, "more", false) || Json.bool(root, "data.more", false);
             if (!more || out.size() >= want) {
+                complete = validListing && !more;
                 break;
             }
             offset += items.size();
         }
         PluginLog.i("netease", "userPlaylists uid=" + who + " → " + out.size() + " 个歌单（HTTP "
                 + Http.lastStatus() + "）");
-        return out;
+        return new PlaylistSnapshot(List.copyOf(out), complete);
     }
 
     /**
@@ -1663,7 +1679,7 @@ public final class NeteaseApi {
         }
         Map<String, Object> payload = Json.newObject();
         payload.put("afresh", false);
-        Object root = weapiLoggedIn(payload, "v1/discovery/recommend/songs", "v2/discovery/recommend/songs");
+        Object root = weapiLoggedIn(payload, "v3/discovery/recommend/songs", "v1/discovery/recommend/songs", "v2/discovery/recommend/songs");
         List<Object> items = Json.list(Json.get(root, "data.dailySongs"), "");
         if (items.isEmpty()) {
             items = Json.list(Json.get(root, "recommend"), "");
@@ -1681,6 +1697,45 @@ public final class NeteaseApi {
         }
         PluginLog.i("netease", "每日推荐 → " + out.size() + " 首（HTTP " + Http.lastStatus() + "）");
         return out;
+    }
+
+    /** Uses the account's current daily style preferences. Never substitutes search results. */
+    public static List<Dto.Song> dailyStyleSongs() throws NeteaseException {
+        return recommendationSongs(weapiLoggedIn(Json.newObject(), "homepage/category/daily/song/list"));
+    }
+
+    public static List<String> dailyHistoryDates() throws NeteaseException {
+        Object root = weapiLoggedIn(Json.newObject(), "discovery/recommend/songs/history/recent");
+        var dates = new java.util.LinkedHashSet<String>();
+        for (Object value : Json.list(root, "data.dates")) {
+            String date = value instanceof String s ? s : Json.str(value, "date", "");
+            if (date.matches("\\d{4}-\\d{2}-\\d{2}")) dates.add(date);
+        }
+        return List.copyOf(dates);
+    }
+
+    public static List<Dto.Song> dailyHistorySongs(String date) throws NeteaseException {
+        try { java.time.LocalDate.parse(date); }
+        catch (RuntimeException invalid) { throw new NeteaseException("无效的历史日推日期"); }
+        var payload = Json.newObject(); payload.put("date", date);
+        return recommendationSongs(weapiLoggedIn(payload, "discovery/recommend/songs/history/detail"));
+    }
+
+    static List<Dto.Song> recommendationSongs(Object root) throws NeteaseException {
+        List<Object> items = List.of();
+        for (String path : List.of("data.dailySongs", "data.songs", "data.songList", "songs", "recommend")) {
+            items = Json.list(root, path);
+            if (!items.isEmpty()) break;
+        }
+        var out = new LinkedHashMap<Long, Dto.Song>();
+        var privileges = privilegeSt(root);
+        for (Object item : items) {
+            Object song = Json.get(item, "song");
+            Dto.Song parsed = toSong(song == null ? item : song, privileges);
+            if (parsed != null && parsed.id() > 0) out.putIfAbsent(parsed.id(), parsed);
+        }
+        if (out.isEmpty()) throw new NeteaseException("网易云暂未返回推荐歌曲，可能暂无数据或当前账号没有访问权限");
+        return List.copyOf(out.values());
     }
 
     /**
@@ -2088,7 +2143,17 @@ public final class NeteaseApi {
     static void requirePlaylistMutationSuccess(String response) throws NeteaseException {
         Object root=Json.parse(response);
         int code=Json.integer(root,"code",-1);
-        if(code!=200) throw new NeteaseException("网易云未确认添加：code="+code+" "+PluginLog.sanitize(wordsOf(root)));
+        if(code!=200) throw new NeteaseException("网易云未确认修改：code="+code+" "+PluginLog.sanitize(wordsOf(root)));
+    }
+
+    public static void renamePlaylist(long id,String title) throws NeteaseException {
+        if(id<=0 || !isLoggedIn() || title==null || title.isBlank() || title.length()>40)throw new NeteaseException("歌单标题须为1至40字，并已登录网易云");
+        var payload=Json.newObject();payload.put("id",id);payload.put("name",title.trim());
+        String csrf=java.util.Objects.toString(Http.cookie("__csrf"),"");payload.put("csrf_token",csrf);
+        var encrypted=WeapiCrypto.encrypt(payload);
+        try { requirePlaylistMutationSuccess(Http.postFormOnce(Http.BASE+"/weapi/playlist/update/name/?csrf_token="+csrf,
+                Map.of("params",encrypted.params(),"encSecKey",encrypted.encSecKey()))); }
+        catch(IOException failure){throw new NeteaseException("改名结果未确认，请先刷新网易云歌单核对，避免重复操作");}
     }
 
     private static Object weapi(String path, Map<String, Object> payload) throws NeteaseException {

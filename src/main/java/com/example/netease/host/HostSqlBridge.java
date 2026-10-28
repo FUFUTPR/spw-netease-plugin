@@ -80,8 +80,6 @@ public final class HostSqlBridge {
     };
 
     private static final String CLS_DB = "com.xuncorp.voxzen.data.AppDatabase";
-    private static final String CLS_CONN = "androidx.sqlite.SQLiteConnection";
-    private static final String CLS_STMT = "androidx.sqlite.SQLiteStatement";
     private static final String CLS_FUNCTION2 = "kotlin.jvm.functions.Function2";
     private static final String CLS_CONTINUATION = "kotlin.coroutines.Continuation";
     private static final String CLS_EMPTY_CONTEXT = "kotlin.coroutines.EmptyCoroutineContext";
@@ -602,32 +600,6 @@ public final class HostSqlBridge {
      */
     private static boolean canPrepare(Object o) {
         return prepareMethod(o) != null;
-    }
-
-    /** 类名链里有没有 {@code androidx.sqlite.SQLiteConnection}（只看日志/诊断用）。 */
-    private static boolean isConnection(Object o) {
-        if (o == null) {
-            return false;
-        }
-        java.util.Set<Class<?>> seen = new java.util.HashSet<>();
-        java.util.ArrayDeque<Class<?>> queue = new java.util.ArrayDeque<>();
-        queue.add(o.getClass());
-        while (!queue.isEmpty()) {
-            Class<?> c = queue.poll();
-            if (c == null || !seen.add(c)) {
-                continue;
-            }
-            if (CLS_CONN.equals(c.getName())) {
-                return true;
-            }
-            if (c.getSuperclass() != null) {
-                queue.add(c.getSuperclass());
-            }
-            for (Class<?> i : c.getInterfaces()) {
-                queue.add(i);
-            }
-        }
-        return false;
     }
 
     /** 显式点一次失效刷新（{@code InvalidationTracker.refreshAsync()} 非挂起，公开方法名未被混淆）。 */

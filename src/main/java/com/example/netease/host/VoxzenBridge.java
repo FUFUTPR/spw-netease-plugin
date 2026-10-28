@@ -22,7 +22,6 @@ import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.Proxy;
 import java.lang.reflect.Type;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -93,17 +92,6 @@ public final class VoxzenBridge {
     private static final String CLS_ITEM = "com.xuncorp.pisces.PiscesMediaItem";
 
     /**
-     * 0.3.18：是否给宿主「补装」音乐视频声源切换器（{@code PlaybackController.musicVideoAudioSwitcher}）。
-     *
-     * <p>桌面构建把它写死成 null（javap 实证）。0.3.10–0.3.17 默认补装 + bind，结果 http 条目的装载被
-     * 引向「临时声源」机制（切换器的 {@code select} → {@code createLoadPlan} → {@code pendingSource}），
-     * 而该机制的源只在宿主自己发请求时才被喂上：真机四轮里 {@code pendingSource / activeSource /
-     * lastManagedLoad} 恒空、播放器恒 Idle。0.3.18 起默认 false：不装切换器，靠「注册表登记 +
-     * 活清单里的真拦截器 + 宿主自己的装载器」这条原生路线（装载器已能开流并分析出真曲目）。</p>
-     */
-    private static final boolean ONLINE_INSTALL_SWITCHER = false;
-
-    /**
      * 整单播放（0.6.0）一次入队多少首：从用户点的那首起，向后取这么多首。
      *
      * <p>不是「整张歌单都灌进去」：网易云直链带时效（URL 里的时间戳是分钟级），一次灌 3000 首
@@ -117,8 +105,6 @@ public final class VoxzenBridge {
     private static final String CLS_MV_INTERCEPTOR = "com.xuncorp.voxzen.cast.MusicVideoStreamInterceptor";
     /** 0.3.10：宿主的「声源切换器」——桌面构建里 {@code PlaybackController.<clinit>} 把它写死成 null。 */
     private static final String CLS_SWITCHER = "com.xuncorp.voxzen.service.musicvideo.MusicVideoAudioSwitcher";
-    private static final String CLS_SWITCHER_KT =
-            "com.xuncorp.voxzen.service.musicvideo.MusicVideoAudioSwitcher_desktopKt";
     private static final String FIELD_SWITCHER = "musicVideoAudioSwitcher";
 
     /** 0.3.15：宿主自带的 HTTP Range 取流器（{@code create(String,int,HttpRangeStreamOwner)} 能对我们的直链开流）。 */
@@ -132,9 +118,6 @@ public final class VoxzenBridge {
 
     /** 拦截器接口 {@code androidx.compose.ui.ౚ} 的末位码点（仅结构识别全失败时兜底）。 */
     private static final int IFACE_CODE_POINT = 0x0C5A;
-
-    /** 具体播放器类 {@code com.xuncorp.pisces.Ԩ} 的末位码点（1.18.5 静态析出；兜底用）。 */
-    private static final int PLAYER_IMPL_CODE_POINT = 0x0528;
 
     /** 「取流器」类 {@code androidx.compose.ui.Ņ} 的末位码点（1.18.5 静态析出；兜底用）。 */
     private static final int OPENER_CODE_POINT = 0x0145;
@@ -168,9 +151,6 @@ public final class VoxzenBridge {
      * 「宿主问了「这个位置归你管吗」然后被否掉」这种情况——那时取流方法根本不会被调到。
      */
     private static final AtomicInteger PROXY_ALL = new AtomicInteger();
-
-    /** 0.3.11：直调装载器时，动态代理 Continuation 收到的 {@code resumeWith} 结果（可读文本）。 */
-    private static final AtomicReference<String> RESUME = new AtomicReference<>();
 
     private static final java.util.concurrent.ConcurrentMap<Integer, String> PLAY_REPORTS = new java.util.concurrent.ConcurrentHashMap<>();
     public static String playbackReport(int requestId) { return PLAY_REPORTS.get(requestId); }
@@ -730,32 +710,10 @@ public final class VoxzenBridge {
     }
 
     /**
-     * 原生路线登记（异步）：把宿主库里那一行曲目的 {@code (trackId, location)} 预先写进
-     * {@code MusicVideoAudioSourceRegistry}。
-     *
-     * <p>宿主从库里取曲目时会自己造曲目项（第 1 字段 = 行 id，第 6 字段 = 行 path），
-     * 注册表里必须存在<b>完全一致</b>的这一对，{@code matches(item)} 才为真、宿主才会
-     * 用它的 {@code HttpRangeBassStream} 去开这个网络位置。幂等，可反复调（当保活用）。</p>
-     */
-    public static void registerSource(String trackId, String location) {
-        if (trackId == null || location == null) {
-            return;
-        }
-        HostBridgeWorker.get().submit(() -> {
-            try {
-                PluginLog.i(TAG, "原生登记 " + trackId + " → " + describeUrl(location)
-                        + "：" + registryActivate(trackId, location));
-            } catch (Throwable t) {
-                PluginLog.w(TAG, "原生登记失败 " + trackId, t);
-            }
-        });
-    }
-
-    /**
      * 原生播放桥（0.11.11）<b>批量</b>登记（异步，一次任务）：把全库流式行的
      * {@code (trackId, location)} 一口气写进注册表，只落一行汇总日志。
      *
-     * <p>为什么要批量：单条 {@link #registerSource} 每对打一行日志，全库 3000+ 行会把日志刷爆；
+     * <p>为什么要批量：过去逐条登记每对打一行日志，全库 3000+ 行会把日志刷爆；
      * 而保活轮（每 60 秒一次）要反复登记同一批，噪声必须压在一条上。</p>
      *
      * @param pairs 每条 = {@code [trackId, location]}（见 {@code NativeLibrary#streamSources()}）
@@ -781,28 +739,6 @@ public final class VoxzenBridge {
             }
             PluginLog.i(TAG, "原生登记（" + why + "）：" + ok + "/" + pairs.size()
                     + (firstBad == null ? "（全部就位）" : "（首个失败 " + firstBad + "）"));
-        });
-    }
-
-    /**
-     * 原生路线取证（异步）：往插件日志打一行宿主当前状态
-     * （队列、播放器状态、当前项、注册表源、代理调用计数）。
-     *
-     * <p>用点：在宿主原生 UI 里点一下我们写进库的曲目，这条日志会显示宿主到底把哪个
-     * {@code trackId} / {@code location} 送进了播放器——这是「原生点击能不能播」的第一手证据。</p>
-     */
-    public static void logHostState(String label) {
-        HostBridgeWorker.get().submit(() -> {
-            try {
-                String dump = hostStateDump();
-                if (dump.equals(lastStateDump)) {
-                    return;   // 只在状态真的变了时落一行，避免刷屏
-                }
-                lastStateDump = dump;
-                PluginLog.i(TAG, label + " 宿主状态：" + dump);
-            } catch (Throwable t) {
-                PluginLog.d(TAG, label + " 状态读回失败（忽略）：" + t);
-            }
         });
     }
 
@@ -958,24 +894,11 @@ public final class VoxzenBridge {
                 PluginLog.w(TAG, "在线播放 #" + seq + " ①′⁺ 属性清单注入失败：" + brief(t), t);
             }
 
-            // ①″ 0.3.10：宿主桌面构建把「声源切换器」写死成 null（clinit 里 aconst_null）。
-            //      0.3.10–0.3.17 我们一直用宿主自己的工厂造一个切换器 + Unsafe 写回 + bind 播放器。
-            //      **0.3.18 起默认不再安装**：0.3.14–0.3.17 四轮真机证明，装了它之后 http 条目的装载
-            //      会被引向「临时声源（music video）」机制——`pendingSource / activeSource /
-            //      lastManagedLoad` 恒空、播放器恒 Idle（0.3.17 连「孪生位置」都错开了，照样空）。
-            //      而桌面构建本来就没有这东西（null），宿主自己的装载器 `androidx.compose.ui.Ņ`
-            //      已经能把这条 http 直链开成流并分析出真曲目（0.3.15 起 装载器回调=
-            //      MorvaniumAnalyzedTrack(trackId=netease-…, durationMs=170584)）⇒ 回归「不装切换器、
-            //      只登记注册表 + 把真拦截器放进活清单」的原生路线。
-            //      需要回到旧行为时把 ONLINE_INSTALL_SWITCHER 改成 true 即可。
-            if (ONLINE_INSTALL_SWITCHER) {
-                PluginLog.i(TAG, "在线播放 #" + seq + " ①″ 声源切换器：" + ensureSwitcherOnWorker());
-            } else {
-                PluginLog.i(TAG, "在线播放 #" + seq + " ①″ 声源切换器：本版**不安装**"
-                        + "（桌面构建本来就是 null；装了会把 http 条目的装载引向临时声源机制，而该机制"
-                        + "只在宿主自己的请求下才喂源）→ 走原生装载路线；当前字段="
-                        + (switcherInstance() == null ? "空" : tname(switcherInstance().getClass())));
-            }
+            // Keep the existing native loading route; the retired switcher experiment was disabled.
+            PluginLog.i(TAG, "在线播放 #" + seq + " ①″ 声源切换器：本版**不安装**"
+                    + "（桌面构建本来就是 null；装了会把 http 条目的装载引向临时声源机制，而该机制"
+                    + "只在宿主自己的请求下才喂源）→ 走原生装载路线；当前字段="
+                    + (switcherInstance() == null ? "空" : tname(switcherInstance().getClass())));
 
             // ② 曲目项：第 6 个参数是「播放位置」，本地路径与 URL 同槽（宿主 copyWithPath 实证）
             //    0.3.18：曲目项位置回到**真链**（0.3.17 的「孪生占位」实验已排除——错开位置之后
@@ -987,7 +910,7 @@ public final class VoxzenBridge {
             Object probeItem = ctor.newInstance(trackId, nz(title), nz(artist), nz(album), nz(artist), url);
             Object item = ctor.newInstance(trackId, nz(title), nz(artist), nz(album), nz(artist), url);
             PluginLog.i(TAG, "在线播放 #" + seq + " ② 曲目项已构造：" + summarizeItem(item)
-                    + "（曲目项位置=真链" + (ONLINE_INSTALL_SWITCHER ? "；切换器已开启" : "；本版不装切换器") + "）");
+                    + "（曲目项位置=真链；本版不装切换器）");
 
             driveOnWorker(seq, item, probeItem, "在线播放", title, artist, trackId, url);
             String report = PLAY_REPORTS.get(seq);
@@ -1149,7 +1072,6 @@ public final class VoxzenBridge {
             // ③⁺ 有界保活；开发者模式下才进行只读状态诊断
             keepRegistryAlive(seq, label, startTrackId, startLoc);
 
-
             if (PluginConfig.devMode()) scheduleStateReadback(seq, label);
             set(seq, "已提交给宿主播放器：整单 " + items.size() + " 首，从「" + nz(win.get(0).name()) + "」开始连播");
         } catch (Throwable t) {
@@ -1219,87 +1141,6 @@ public final class VoxzenBridge {
     // ------------------------------------------------------------ 声源切换器（0.3.10）
 
     /**
-     * 把宿主自己的「声源切换器」装回 {@code PlaybackController.musicVideoAudioSwitcher}。
-     *
-     * <p><b>为什么必须走这一步</b>（javap 实证）：{@code PlaybackController.<clinit>} 里这个字段
-     * 是 {@code aconst_null; putstatic}——桌面构建**写死成 null**；而
-     * {@code setPlaybackAudioSource(a,b,J,Z)} 的字节码是
-     * {@code getstatic musicVideoAudioSwitcher; dup; ifnull …; switcher.select(a,b,J,Z); return; …: pop; return}
-     * ⇒ 字段为 null 时它是**静默空操作**（0.3.1 真机就见过 {@code musicVideoAudioSwitcher=null}）。
-     * 装上之后：{@code select} → {@code activateSource = MusicVideoAudioSourceRegistry.activate(trackId, location)}
-     * → {@code MusicVideoStreamInterceptor.createStream} 经 {@code HttpRangeBassStream} 做 HTTP Range
-     * 真流式拉流（宿主自带的那条路，不再需要我们自己喂 URL 给播放器）。</p>
-     *
-     * <p>切换器本身用**宿主的工厂**造：{@code createMusicVideoAudioSwitcher(scope)} ＝
-     * {@code new MusicVideoAudioSwitcher(scope, locationOf = item::getPath, copyWithLocation = copyWithPath,
-     * isLocationSupported = 默认（恒 true）, beforeSourceLoad = $3, activateSource = registry::activate,
-     * clearSource = registry::clear)}；装完立刻 {@code bind(player)}，把观察者从句柄挂到活动播放器上。</p>
-     *
-     * <p>字段是 {@code private static final}，普通反射写不进去（{@code VarHandle} 对 final 也不给写），
-     * 只能用 {@code sun.misc.Unsafe}；宿主 JRE 含 {@code jdk.unsupported}（已核实 legal/jdk.unsupported）。</p>
-     *
-     * @return 中文单行摘要（永不抛）
-     */
-    private static String ensureSwitcherOnWorker() {
-        try {
-            Object ctrl = staticInstance(CLS_CONTROLLER);
-            if (ctrl == null) {
-                return "跳过：控制器不可用";
-            }
-            Field f = switcherField();
-            if (f == null) {
-                return "跳过：宿主流里没有 " + FIELD_SWITCHER + " 字段";
-            }
-            Object cur = staticField(ctrl.getClass(), CLS_SWITCHER, FIELD_SWITCHER);
-            if (cur != null) {
-                return "已存在（" + tname(cur.getClass()) + "）";
-            }
-            Object scope = staticField(ctrl.getClass(), "CoroutineScope", "scope");
-            if (scope == null) {
-                return "失败：拿不到宿主 CoroutineScope";
-            }
-            Class<?> kt = Class.forName(CLS_SWITCHER_KT);
-            Class<?> scopeCls = Class.forName("kotlinx.coroutines.CoroutineScope");
-            Object switcher = kt.getMethod("createMusicVideoAudioSwitcher", scopeCls).invoke(null, scope);
-            if (switcher == null) {
-                return "失败：宿主工厂返回 null";
-            }
-            String why = putStaticFinal(f, switcher);
-            if (why != null) {
-                return "失败：写入静态字段失败（" + why + "）";
-            }
-            Object back = staticField(ctrl.getClass(), CLS_SWITCHER, FIELD_SWITCHER);
-            StringBuilder sb = new StringBuilder();
-            sb.append(back == null ? "未生效（读回仍为空）" : "已安装（" + tname(back.getClass()) + "）");
-            Object svc = staticField(ctrl.getClass(), "PlaybackService", "service");
-            Object player = findPlayer(svc);
-            if (back == null || player == null) {
-                sb.append(" + 未 bind（").append(player == null ? "找不到播放器" : "字段未生效").append(')');
-                return sb.toString();
-            }
-            try {
-                Class<?> playerCls = Class.forName(CLS_PLAYER);
-                back.getClass().getMethod("bind", playerCls).invoke(back, player);
-                sb.append(" + 已 bind 播放器");
-            } catch (Throwable t) {
-                sb.append(" + bind 失败(").append(brief(t)).append(')');
-            }
-            return sb.toString();
-        } catch (Throwable t) {
-            return "失败：" + brief(t);
-        }
-    }
-
-    /** 声源切换器的静态字段（找不到返回 null）。 */
-    private static Field switcherField() {
-        try {
-            return Class.forName(CLS_CONTROLLER).getDeclaredField(FIELD_SWITCHER);
-        } catch (Throwable t) {
-            return null;
-        }
-    }
-
-    /**
      * 0.3.17：给音频直链造一个「孪生占位位置」——只多一个无害查询参数，scheme 仍是 http/https。
      *
      * <p>用途见 {@code injectOnWorker} ②：切换器的 {@code createLoadPlan} 只有在
@@ -1323,56 +1164,6 @@ public final class VoxzenBridge {
             return staticField(ctrl.getClass(), CLS_SWITCHER, FIELD_SWITCHER);
         } catch (Throwable t) {
             return null;
-        }
-    }
-
-    /**
-     * 0.3.16：让宿主的声源切换器发一次
-     * {@code select(location, trackId, positionMs, play)}——宿主音乐视频播临时声源走的就是它。
-     *
-     * <p>它内部会写出 {@code latestRequest}，再由 {@code createLoadPlan} 结合播放器**当前项**算出
-     * {@code pendingSource}；0.3.15 真机里 {@code latestRequest} 非空却「值取不到」、{@code pendingSource}
-     * 恒空，只能说明请求从未真正发出。JVM 里串扰后的 {@code select} 可能被编译成挂起函数
-     * （尾参 {@code Continuation}），所以两种形状都试。</p>
-     *
-     * @return 中文单行摘要（永不抛）
-     */
-    private static String switcherSelect(String trackId, String location) {
-        try {
-            Object sw = switcherInstance();
-            if (sw == null) {
-                return "跳过：切换器未安装";
-            }
-            Method plain = null;
-            Method suspend = null;
-            for (Method m : sw.getClass().getDeclaredMethods()) {
-                if (!m.getName().startsWith("select") || m.isSynthetic()) {
-                    continue;
-                }
-                Class<?>[] ps = m.getParameterTypes();
-                if (ps.length == 4 && ps[0] == String.class && ps[1] == String.class && ps[2] == long.class
-                        && (ps[3] == boolean.class || ps[3] == Boolean.class)) {
-                    plain = m;
-                    break;
-                }
-                if (ps.length == 5 && ps[0] == String.class && ps[1] == String.class && ps[2] == long.class
-                        && "kotlin.coroutines.Continuation".equals(ps[4].getName())) {
-                    suspend = m;
-                }
-            }
-            if (plain != null) {
-                plain.setAccessible(true);
-                Object r = plain.invoke(sw, nz(location), nz(trackId), 0L, Boolean.TRUE);
-                return "select(" + describeUrl(location) + ", " + nz(trackId) + ", 0, true) -> " + rawText(r);
-            }
-            if (suspend != null) {
-                suspend.setAccessible(true);
-                Object r = suspend.invoke(sw, nz(location), nz(trackId), 0L, Boolean.TRUE, continuationProxy());
-                return "select（挂起形，" + describeUrl(location) + ", " + nz(trackId) + ", 0, true) -> " + rawText(r);
-            }
-            return "找不到 select(String,String,long,boolean)";
-        } catch (Throwable t) {
-            return "失败：" + brief(t);
         }
     }
 
@@ -1443,117 +1234,6 @@ public final class VoxzenBridge {
         return null;
     }
 
-    /**
-     * 直调装载器：调它「首参 = {@code PiscesMediaItem}」的公开方法（真机上是
-     * {@code (PiscesMediaItem, Continuation)}），并动态代理一个 {@code kotlin.coroutines.Continuation}
-     * 接住 {@code resumeWith} 的结果。
-     *
-     * <p>这一步**只做验证**：它拿返回值 / 挂起情况 / 代理调用增量来回答「拦截器链到底能不能把
-     * https 位置变成 BASS 句柄」。它不负责让宿主开始播放（装载器返回的句柄没人接手）。</p>
-     */
-    private static String directLoad(int seq, Object player, Object item, String trackId, String location) {
-        // 0.3.12：回调是**异步**的（真机证明本地路径 400 ms 内不一定回来）。RESUME 是静态的，
-        // 上一次调用的回调会污染下一次的输出 ⇒ 每次进入先清空，并打上本次 seq 便于归因。
-        RESUME.set(null);
-        Object loader = loaderOf(player);
-        if (loader == null) {
-            return "未找到装载器（" + esc(loaderClass()) + "）";
-        }
-        StringBuilder sb = new StringBuilder("装载器=").append(shortName(loader.getClass()));
-        // 0.3.13：0.3.12 真机里这一刻「注册表源=空」（被声源切换器 clear 了），装载器于是把直链
-        // 当文件打开 ⇒ FileNotOpened。本版在直调之前**先重新登记**，把「有登记 / 无登记」变成唯一变量。
-        if (location != null && location.startsWith("http")) {
-            sb.append(" 登记=").append(registryActivate(trackId, location))
-                    .append(" 匹配=").append(registryMatches(item));
-        }
-        List<Method> ms = new ArrayList<>();
-        for (Method m : loader.getClass().getMethods()) {
-            if (m.isSynthetic() || m.isBridge() || m.getParameterCount() == 0
-                    || !CLS_ITEM.equals(m.getParameterTypes()[0].getName())) {
-                continue;
-            }
-            ms.add(m);
-        }
-        if (ms.isEmpty()) {
-            return sb.append(" 无「首参=曲目项」的公开方法").toString();
-        }
-        ms.sort(Comparator.comparingInt((Method m) -> m.getParameterCount()).thenComparing(Method::getName));
-        for (Method m : ms) {
-            sb.append("；").append(esc(m.getName())).append('/').append(m.getParameterCount()).append("参->");
-            try {
-                Object[] args = new Object[m.getParameterCount()];
-                args[0] = item;
-                for (int i = 1; i < args.length; i++) {
-                    args[i] = continuationProxy();
-                }
-                long before = PROXY_CALLS.get();
-                Object r = m.invoke(loader, args);
-                sleepQuiet(400L);
-                long delta = PROXY_CALLS.get() - before;
-                if (isSuspended(r)) {
-                    sb.append("挂起中");
-                } else {
-                    sb.append(resumeText(r));
-                }
-                sb.append("（代理调用+").append(delta).append('/').append(PROXY_CALLS.get()).append("）");
-                if (RESUME.get() != null) {
-                    sb.append(" 回调=").append(RESUME.get());
-                }
-            } catch (Throwable t) {
-                sb.append("异常(").append(brief(t)).append(')');
-            }
-        }
-        return sb.toString();
-    }
-
-    /** 动态代理一个 {@code kotlin.coroutines.Continuation}：把 {@code resumeWith} 的结果记进 {@link #RESUME}。 */
-    private static Object continuationProxy() {
-        try {
-            Class<?> cont = Class.forName("kotlin.coroutines.Continuation");
-            return Proxy.newProxyInstance(cont.getClassLoader(), new Class<?>[]{cont}, (p, m, a) -> {
-                String n = m.getName();
-                if ("toString".equals(n)) {
-                    return "netease-continuation";
-                }
-                if ("hashCode".equals(n)) {
-                    return System.identityHashCode(p);
-                }
-                if ("equals".equals(n)) {
-                    Object o = a == null || a.length == 0 ? null : a[0];
-                    return o == p;
-                }
-                if ("getContext".equals(n)) {
-                    try {
-                        return Class.forName("kotlin.coroutines.EmptyCoroutineContext").getField("INSTANCE").get(null);
-                    } catch (Throwable t) {
-                        return null;
-                    }
-                }
-                if ("resumeWith".equals(n)) {
-                    Object r = a == null || a.length == 0 ? null : a[0];
-                    String text = resumeText(r);
-                    RESUME.set(text);
-                    PluginLog.i(TAG, "装载器回调：resumeWith(" + text + ") 代理调用="
-                            + PROXY_CALLS.get() + "/总计=" + PROXY_ALL.get());
-                }
-                return null;
-            });
-        } catch (Throwable t) {
-            return null;
-        }
-    }
-
-    /** Kotlin 协程挂起哨兵判定（{@code IntrinsicsKt.getCOROUTINE_SUSPENDED()}）。 */
-    private static boolean isSuspended(Object r) {
-        try {
-            Object s = Class.forName("kotlin.coroutines.intrinsics.IntrinsicsKt")
-                    .getMethod("getCOROUTINE_SUSPENDED").invoke(null);
-            return r == s;
-        } catch (Throwable t) {
-            return false;
-        }
-    }
-
     /** 返回值 / resumeWith 结果的可读摘要（{@code Result} 的 toString 就够用，过长则截断）。 */
     private static String resumeText(Object r) {
         if (r == null) {
@@ -1567,14 +1247,6 @@ public final class VoxzenBridge {
             return esc(s);
         } catch (Throwable t) {
             return summary(r);
-        }
-    }
-
-    private static void sleepQuiet(long ms) {
-        try {
-            Thread.sleep(ms);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
         }
     }
 
@@ -1622,51 +1294,6 @@ public final class VoxzenBridge {
             return flow.getClass().getMethod("getValue").invoke(flow);
         } catch (Throwable t) {
             return null;
-        }
-    }
-
-    /**
-     * 0.3.12：直接调**真**音乐视频拦截器（{@code MusicVideoStreamInterceptor}，不是 0.3.2 那个代理），
-     * 用我们自己构造的曲目项当参数，看宿主的 HTTP-Range 流创建能不能真的出句柄。
-     *
-     * <p>依据：0.3.11 javap 证明 `MusicVideoStreamInterceptor.createStream(PlatformContext, PiscesMediaItem,
-     * long, long, int, Continuation&lt;Result&lt;Integer&gt;&gt;)` 是「http 位置 → BASS 句柄」的唯一实现，
-     * 而 `MusicVideoStreamInterceptorKt.isHttpLocation` 对 http/https 都返回 true（URI.getScheme 比较，
-     * 大小写不敏感）⇒ 方案不是底色问题。真机里装载器却对 http 位置直接抛 FileNotOpened（没走拦截器链），
-     * 所以必须单独验证「这个实现本身对我们这个位置是什么结果」。</p>
-     */
-    private static String probeRealInterceptor(Object player, Object item, String trackId, String location) {
-        try {
-            Object itc = hostInterceptorInstance(null, player);
-            if (itc == null) {
-                return "取不到真拦截器实例";
-            }
-            // 0.3.13：先重新登记再调——0.3.12 里这一刻登记已被声源切换器清空（注册表源=空），
-            // 拦截器于是对这个位置无从下手（返回 null、无回调）。本版把登记补上，matches 也一并打出来。
-            StringBuilder head0 = new StringBuilder();
-            if (location != null && location.startsWith("http")) {
-                head0.append("登记=").append(registryActivate(trackId, location))
-                        .append(" 匹配=").append(registryMatches(item)).append(' ');
-            }
-            Object ctx = instanceField(player, "com.xuncorp.pisces.PlatformContext", null);
-            Method target = null;
-            for (Method m : itc.getClass().getMethods()) {
-                if (m.getName().startsWith("createStream") && m.getParameterCount() == 6) {
-                    target = m;
-                    break;
-                }
-            }
-            if (target == null) {
-                return head0 + "真拦截器上没有 createStream*(6) 方法";
-            }
-            RESUME.set(null);
-            Object r = target.invoke(itc, ctx, item, 0L, 0L, 0, continuationProxy());
-            sleepQuiet(900L);
-            String head = head0 + esc(target.getName()) + "->"
-                    + (isSuspended(r) ? "COROUTINE_SUSPENDED" : resumeText(r));
-            return head + (RESUME.get() == null ? "（无回调）" : " 回调=" + RESUME.get());
-        } catch (Throwable t) {
-            return "抛异常：" + brief(t) + (RESUME.get() == null ? "" : " 回调=" + RESUME.get());
         }
     }
 
@@ -1899,27 +1526,6 @@ public final class VoxzenBridge {
      * 但 {@code Ready} 不等于 {@code Playing}——③ 里的 {@code play()} 是在加载**之前**发的。
      * 这里 2.5 s 后再补一次，验证「宿主加载完了还得再点一次播放」这个假设（对在线/本地都跑）。</p>
      */
-    /** 0.3.12：延迟后在宿主线程打一行「切换链 + 注册表源」（判定 ⑤′ 有没有被宿主看在眼里）。 */
-    private static void chainReadbackLater(int seq, String label, long delayMs, String tag) {
-        try {
-            Timers.later(delayMs, () -> {
-                try {
-                    HostBridgeWorker.get().submit(() -> {
-                        try {
-                            PluginLog.i(TAG, label + " #" + seq + " " + tag + " 切换链："
-                                    + switcherDump() + " 注册表源=" + registrySourceDump());
-                        } catch (Throwable t) {
-                            PluginLog.w(TAG, label + " #" + seq + " " + tag + " 读回失败：" + brief(t), t);
-                        }
-                    });
-                } catch (Throwable t) {
-                    PluginLog.w(TAG, label + " #" + seq + " " + tag + " 投递失败：" + brief(t), t);
-                }
-            });
-        } catch (Throwable t) {
-            PluginLog.w(TAG, label + " #" + seq + " " + tag + " 定时失败：" + brief(t), t);
-        }
-    }
 
     /** 单个读回点：延迟 delayMs 后在宿主线程打一行 {@code <label> #seq <tag> 宿主状态：…}。 */
     private static void readbackLater(int seq, long delayMs, String tag, String label) {
@@ -2103,38 +1709,6 @@ public final class VoxzenBridge {
         return sb.toString();
     }
 
-    /**
-     * 直接驱动播放器：把曲目项交给每个候选方法（各自独立 try/catch），返回结果摘要。
-     *
-     * <p>这是 0.3.7 的关键探针——宿主 {@code playMusicAt} 的协程体最终就调这些方法，
-     * 但它们**不外抛**：播放器若拒收（比如曲目项不在它的库里、引擎未初始化），
-     * 只有直接调才能把异常/返回值捞出来。</p>
-     */
-    private static String drivePlayer(Object player, Object item) {
-        if (player == null) {
-            return "玩家未取到";
-        }
-        List<Method> ms = itemMethods(player);
-        if (ms.isEmpty()) {
-            return "玩家上没有「单参=曲目项」的公开方法";
-        }
-        StringBuilder sb = new StringBuilder();
-        for (Method m : ms) {
-            if (sb.length() > 0) {
-                sb.append("；");
-            }
-            sb.append(esc(m.getName())).append("->");
-            try {
-                m.setAccessible(true);
-                Object r = m.invoke(player, item);
-                sb.append(r == null ? "void/null" : summary(r));
-            } catch (Throwable t) {
-                sb.append("异常(").append(brief(t)).append(')');
-            }
-        }
-        return sb.toString();
-    }
-
     /** 队列状态对象（{@code PlaybackQueueState}）的字段摘要：模式/队列size/索引/顺序size/数量/播放中。 */
     private static String dumpQueueState(Object state) {
         if (state == null) {
@@ -2306,51 +1880,6 @@ public final class VoxzenBridge {
         ListCand cand = new ListCand(props, f, list, 3, "属性");
         return installToList(cand, real, "真拦截器(属性)") + "；" + installToList(cand, proxy, "代理(属性)")
                 + "（接口=" + esc(iface.getName()) + " " + where + "）";
-    }
-
-    /**
-     * 0.3.19 ③⁗″：直接调**播放器自己的取流方法**，回答 0.3.18 剩下的唯一问题。
-     *
-     * <p>javap 产物 {@code build\host-javap\com.xuncorp.pisces.Ԩ.bytecode.txt} 行 6201 是
-     * {@code (PiscesMediaItem, Long, Continuation) → Object}（Kotlin {@code Result<流>} 的装箱返
-     * 回），它是「曲目项 → BASS 流」的播放器侧入口；0.3.11 的 ③⁗ 打的是**分析器**（{@code Ņ}），
-     * 那是另一条路。本探针因此专门验：播放器自己这条路，对我们的 http 位置出不出句柄。</p>
-     */
-    private static String streamPathProbe(Object player, Object item, String trackId, String location) {
-        if (player == null || item == null) {
-            return "跳过：播放器或曲目项为空";
-        }
-        Method target = null;
-        for (Class<?> c = player.getClass(); c != null && c != Object.class && target == null; c = c.getSuperclass()) {
-            for (Method m : c.getDeclaredMethods()) {
-                Class<?>[] ps = m.getParameterTypes();
-                if (ps.length != 3 || !ps[0].getName().equals(CLS_ITEM)
-                        || ps[1] != Long.class
-                        || !"kotlin.coroutines.Continuation".equals(ps[2].getName())) {
-                    continue;
-                }
-                target = m;
-                break;
-            }
-        }
-        if (target == null) {
-            return "找不到取流方法（" + tname(player.getClass()) + "）";
-        }
-        String name = esc(target.getName());
-        registryActivate(trackId, location);
-        RESUME.set(null);
-        try {
-            target.setAccessible(true);
-            Object r = target.invoke(player, item, null, continuationProxy());
-            if (isSuspended(r)) {
-                sleepQuiet(900L);
-                return "取流=" + name + "->COROUTINE_SUSPENDED（代理调用=" + PROXY_CALLS.get() + "/" + PROXY_ALL.get()
-                        + "） 回调=" + RESUME.get();
-            }
-            return "取流=" + name + "->" + rawText(r) + "（代理调用=" + PROXY_CALLS.get() + "/" + PROXY_ALL.get() + "）";
-        } catch (Throwable t) {
-            return "取流=" + name + " 抛异常：" + brief(t);
-        }
     }
 
     /**
@@ -3552,25 +3081,6 @@ public final class VoxzenBridge {
         }
     }
 
-    /**
-     * 队列候选（0.11.7 W5 / D6 冻结规则）：宿主 {@code PlaybackQueueState} 里<b>每个</b>能解析出 id 的
-     * List 字段。P-3 实证有两个（队列本体 + 随机顺序表），<b>两支都满足</b>「配对索引指向当前曲」
-     * （{@code Ԩ=[2643127259,4885597,1377530437]} 配索引 2、{@code Ԫ=[2643127259,1377530437,4885597]}
-     * 配索引 1，当前曲 = 1377530437），<b>光靠索引分不出哪支是真队列</b>。
-     *
-     * <p>真队列的裁决权交给<b>自校准</b>：{@code svc.NextTrack#notePlayback(long)} 用相邻两首起播
-     * (A→B) 逐支校验 {@code list[(idx_A+1)%len] == B}，命中者调 {@link #pinQueueList(String)} 记为活配；
-     * 未校准时由调用方按「与 DB 歌单 order 一致」打分挑一支（B2 实测 {@code Ԩ} 一致）。</p>
-     *
-     * @param listField 字段名（活配用的键，同一次运行内稳定）
-     * @param ids       解析出的 netease id（紧凑表，跳过解析失败项）
-     * @param aligned   与宿主列表逐位对齐的表（解析不出的位置为 {@code null}）
-     * @param index     配对索引字段的值（宿主「当前第几首」）；取不到 -1
-     */
-    public record QueueChoice(String listField, java.util.List<String> ids, java.util.List<String> aligned,
-                              int index, int size) {
-    }
-
     /** 自校准出来的「活配」字段名；空串 = 尚未校准。 */
     private static volatile String pinnedQueueList = "";
 
@@ -3578,72 +3088,6 @@ public final class VoxzenBridge {
     public static String pinnedQueueList() {
         String s = pinnedQueueList;
         return s == null ? "" : s;
-    }
-
-    /**
-     * 记下自校准命中的队列字段（幂等）。只有 {@code svc.NextTrack} 的自校准调用它——写错字段会让
-     * 「下一首」算错，所以日志按 INFO 留痕（可 grep 复核）。
-     */
-    public static void pinQueueList(String listField) {
-        if (listField == null || listField.isEmpty()) {
-            return;
-        }
-        String old = pinnedQueueList;
-        pinnedQueueList = listField;
-        if (!listField.equals(old)) {
-            PluginLog.i(TAG, "队列活配：" + (old == null || old.isEmpty() ? "（首次校准）" : "由 " + old + " 改为 ")
-                    + listField + "（自校准：相邻两首起播顺序与宿主列表逐位吻合）");
-        }
-    }
-
-    /** 全部队列候选（读不到返回空表）。线程：投 {@link HostBridgeWorker} + latch 4s；绝不抛。 */
-    public static java.util.List<QueueChoice> queueChoices() {
-        try {
-            HostBridgeWorker w = HostBridgeWorker.get();
-            if (w.isOnWorkerThread()) {
-                return queueChoicesOnWorker();
-            }
-            java.util.concurrent.atomic.AtomicReference<java.util.List<QueueChoice>> box =
-                    new java.util.concurrent.atomic.AtomicReference<>();
-            java.util.concurrent.CountDownLatch done = new java.util.concurrent.CountDownLatch(1);
-            if (!w.submit(() -> {
-                try {
-                    box.set(queueChoicesOnWorker());
-                } catch (Throwable t) {
-                    PluginLog.d(TAG, "读队列候选异常：" + brief(t));
-                } finally {
-                    done.countDown();
-                }
-            })) {
-                return java.util.List.of();
-            }
-            done.await(4L, java.util.concurrent.TimeUnit.SECONDS);
-            java.util.List<QueueChoice> v = box.get();
-            return v == null ? java.util.List.of() : v;
-        } catch (Throwable t) {
-            PluginLog.d(TAG, "读队列候选失败：" + brief(t));
-            return java.util.List.of();
-        }
-    }
-
-    private static java.util.List<QueueChoice> queueChoicesOnWorker() {
-        java.util.List<QueueChoice> out = new java.util.ArrayList<>();
-        Object ctrl = staticInstance(CLS_CONTROLLER);
-        if (ctrl == null) {
-            return out;
-        }
-        Object flow = staticField(ctrl.getClass(), "StateFlow", "playbackQueueState");
-        Object state = flow == null ? null : callAnyNoArg(flow, "getValue");
-        if (state == null) {
-            return out;
-        }
-        for (ListSlot s : listSlots(state)) {
-            if (s.ids().isEmpty()) {
-                continue;
-            }
-            out.add(new QueueChoice(s.field().getName(), s.ids(), s.aligned(), s.index(), s.raw().size()));
-        }
-        return out;
     }
 
     /**
@@ -3877,10 +3321,6 @@ public final class VoxzenBridge {
         } catch (Throwable ignored) {
             return 0L;
         }
-    }
-
-    private static java.util.List<String> queueTrackIdsOnWorker() {
-        return queueViewOnWorker().ids();
     }
 
     /**

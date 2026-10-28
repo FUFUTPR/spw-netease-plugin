@@ -277,8 +277,8 @@ internal object HostSaltComponents {
     fun drawDialogFrame(content: Any, composer: Composer) { dialogFrame.invoke(null, content, composer, 0) }
     fun drawDialogBody(title: String, content: Any, dismiss: () -> Unit, confirm: () -> Unit,
                        confirmVisible: Boolean, cancelText: String, confirmText: String,
-                       scope: ColumnScope, composer: Composer) {
-        dialogBody.invoke(null, title, content, true, dismiss, cancelText, confirmVisible, confirm, confirmText,
+                       scope: ColumnScope, composer: Composer, dismissVisible: Boolean = true) {
+        dialogBody.invoke(null, title, content, dismissVisible, dismiss, cancelText, confirmVisible, confirm, confirmText,
             scope, composer, 0)
     }
 

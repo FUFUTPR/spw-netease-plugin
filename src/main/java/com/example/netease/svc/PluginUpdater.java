@@ -22,7 +22,9 @@ public final class PluginUpdater implements AutoCloseable {
     public static final String API = "https://api.github.com/repos/FUFUTPR/spw-netease-plugin/releases/latest";
     public static final String ID = "com.example.netease";
     public enum Phase { IDLE, CHECKING, AVAILABLE, PROBING, DOWNLOADING, VERIFYING, COMPLETE, CANCELLED, FAILED }
-    public record Release(String version, String name, URI url, long size, String sha256) { }
+    public record Release(String version, String name, URI url, long size, String sha256, String notes) {
+        public Release(String version, String name, URI url, long size, String sha256) { this(version,name,url,size,sha256,""); }
+    }
     public record State(Phase phase, Release release, long downloaded, long total, Path file, String message, String source) {
         public boolean busy() { return phase==Phase.PROBING || phase==Phase.DOWNLOADING || phase==Phase.VERIFYING; }
     }
@@ -169,7 +171,7 @@ public final class PluginUpdater implements AutoCloseable {
             if(!official&&!(fixture&&loopback(url)))throw new IOException("发布包不属于本仓库");
             String digest=Objects.toString(asset.get("digest"),"");
             if(!digest.isBlank()&&!digest.matches("sha256:[a-fA-F0-9]{64}"))throw new IOException("发布摘要不合法");
-            return new Release(version,name,url,size,digest.replaceFirst("^sha256:","").toLowerCase(Locale.ROOT));
+            return new Release(version,name,url,size,digest.replaceFirst("^sha256:","").toLowerCase(Locale.ROOT),Objects.toString(json.get("body"),""));
         }
         return null;
     }

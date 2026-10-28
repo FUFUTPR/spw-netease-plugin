@@ -41,6 +41,17 @@ internal fun syncProgressMessage(status: SyncCoordinator.Status?): String {
     return text + if (status.total() > 0) "（${status.completed()} / ${status.total()} 个歌单）" else ""
 }
 
+internal fun refreshProgressMessage(status: SyncCoordinator.Status?, daily: com.example.netease.svc.DailyRecommendations.State): String {
+    val sync = syncProgressMessage(status)
+    val refreshingDaily = daily.busy() && daily.message().startsWith("正在刷新每日歌单")
+    if (!refreshingDaily) return sync
+    if (sync.isBlank()) return "正在刷新每日歌单"
+    // The topbar displays the text before the parenthesized count in its marquee.
+    // Keep both refresh messages ahead of that suffix so daily progress is visible.
+    return sync.substringBefore("（") + " · 正在刷新每日歌单" +
+        if (sync.contains("（")) "（" + sync.substringAfter("（") else ""
+}
+
 /**
  * 状态行快照：阶段（跨阶段淡入淡出）+ 该阶段当下的完整文案。
  *

@@ -1,0 +1,2 @@
+# Build-time only; never included in the plugin package.
+zopfli==0.4.3

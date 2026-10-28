@@ -418,6 +418,7 @@ internal object NativeUiSession {
 
     private fun tickOnce() {
         try {
+            NativeUiState.daily = com.example.netease.svc.DailyRecommendations.state()
             // PLAN §8.2：账号一变化，旧搜索请求与旧播放反馈立即失效（列表/选中保留，见 SearchController）。
             val epoch = sessionEpoch()
             if (epoch >= 0L && epoch != lastAccountEpoch) {
@@ -427,6 +428,7 @@ internal object NativeUiSession {
                 NativeSongMenu.stop()
                 // 账号切换时旧账号的移除确认/结果提示必须立即关闭，并让 (epoch,uid) 菜单缓存失效。
                 HostCloudSongMenu.stop()
+                HostManagedPlaylists.accountChanged()
             }
             searchController?.tick()
             NativeTopSearch.tick()

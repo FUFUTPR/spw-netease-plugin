@@ -27,6 +27,8 @@ internal fun NativeModalEscapeGate(window: Window?) {
                 consuming = true
                 if (!NativeUiPresentation.anyDialogOpen()) NativeTopSearch.collapse()
                 else if (NativeUpdateUi.dialogOpen()) NativeUpdateUi.dismiss()
+                else if (HostDailyRecommendations.dialogOpen()) HostDailyRecommendations.dismiss()
+                else if (HostManagedPlaylists.dialogOpen()) HostManagedPlaylists.dismiss()
                 else if (HostCloudSongMenu.removal != null) HostCloudSongMenu.dismissRemoval()
                 else if (HostCloudSongMenu.message.isNotBlank()) HostCloudSongMenu.dismissMessage()
                 else if (NativeUiPresentation.localSaveOpen) NativeUiPresentation.closeLocalSave(cancel = true)

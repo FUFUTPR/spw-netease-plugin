@@ -3,9 +3,9 @@ package com.example.netease.nativeui
 import java.lang.reflect.Method
 import kotlin.ranges.IntRange
 
-/** 1.19.0's replacement guard rejects nonzero default masks. Our dispatcher
- * explicitly restores ModConfigScreen's ViewModel default, so this one site can
- * accept mask=2. Rebuild only this registration's transformer before finishStart
+/** The host replacement guard rejects nonzero default masks. Our configuration
+ * and playlist dispatchers explicitly restore the ViewModel default, allowing
+ * their individual sites to accept mask=2. Rebuild only the site's transformer before finishStart
  * publishes it. No host class, global transformer or other site is modified.
  */
 internal object HostReplacementDefaults {
@@ -36,7 +36,9 @@ internal object HostReplacementDefaults {
         check(site.javaClass.name == SITE) { "Unsupported UI hook site" }
         val methods = site.javaClass.declaredMethods
         val read = methods.single { it.returnType == IntRange::class.java && it.parameterCount == 0 }
-        check(read.invoke(site) == (4..4)) { "Unexpected ModConfigScreen default-mask layout" }
+        val target=site.javaClass.methods.single { it.parameterCount==0 && it.returnType==Method::class.java }.invoke(site) as Method
+        val expected=target.parameterCount-1
+        check(read.invoke(site) == (expected..expected)) { "Unexpected Compose default-mask layout" }
         val write = methods.single { it.parameterTypes.toList() == listOf(IntRange::class.java) }
         val transformerType = Class.forName(TRANSFORMER)
         val setter = methods.single {

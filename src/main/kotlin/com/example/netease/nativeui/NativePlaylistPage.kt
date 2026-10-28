@@ -118,7 +118,8 @@ private fun PlaylistToolbar(
             SaltSecondaryButton(onClick = onToggleNav) { SaltText(if (navOpen) "收起歌单列表" else "歌单列表") }
         }
         SaltSecondaryButton(onClick = { controller.loadLiked() }) { SaltText("我喜欢的音乐") }
-        SaltSecondaryButton(onClick = { controller.loadDaily() }) { SaltText("每日推荐") }
+        if (com.example.netease.cfg.PluginConfig.dailyRecommendations())
+            SaltSecondaryButton(onClick = { controller.loadDaily() }) { SaltText("每日推荐") }
         SaltSecondaryButton(onClick = { controller.loadMine() }) { SaltText(if (state.briefsLoaded()) "刷新我的歌单" else "载入我的歌单") }
         SaltSecondaryButton(onClick = { NativeUiSession.requestLocalRefresh() }) { SaltText("刷新本地歌单") }
         if (state.canRetry()) SaltSecondaryButton(

@@ -6,13 +6,15 @@
     pwsh -File build.ps1
     pwsh -File build.ps1 -SkipApi          # 已抽过 API，跳过抽取
     pwsh -File build.ps1 -ForceApi         # 强制重新抽取宿主 API
+    pwsh -File build.ps1 -SkipApi -FastPackage # 开发用：跳过更密的 DEFLATE 编码
 #>
 [CmdletBinding()]
 param(
     [switch] $SkipApi,
     [switch] $ForceApi,
     [string] $HostJar,
-    [string] $DistDir
+    [string] $DistDir,
+    [switch] $FastPackage
 )
 
 $ErrorActionPreference = 'Stop'
@@ -70,6 +72,7 @@ if (-not $python) { throw '找不到 python（需要 Python 3.8+）。' }
 
 $buildArgs = @((Join-Path $root 'tools\build.py'), '--package-only', '--classes-dir', (Join-Path $root 'build\plugin-classes'))
 if ($DistDir) { $buildArgs += @('--dist-dir', $DistDir) }
+if ($FastPackage) { $buildArgs += '--fast' }
 if ($pyVer -eq 'py') { $buildArgs = @('-3') + $buildArgs }
 
 & $python @buildArgs

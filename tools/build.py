@@ -33,6 +33,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import io
 import json
@@ -44,6 +45,7 @@ import subprocess
 import sys
 import time
 import zipfile
+import zlib
 from pathlib import Path
 
 # Windows 控制台默认 GBK：中文路径/中文 manifest 一定会炸，先统一切到 UTF-8（不支持的字符替换而非崩溃）
@@ -64,6 +66,19 @@ CLASSES = BUILD / "classes"
 STAGE = BUILD / "stage"
 
 MANIFEST_LINE_LIMIT = 72  # jar 规范：每物理行 UTF-8 字节数上限
+
+# SDK documentation is useful in source, but is not loaded by VerifyHost.
+DEVELOPMENT_RESOURCES = frozenset(
+    "verify-host/Microsoft.Web.WebView2." + name + ".xml"
+    for name in ("Core", "WinForms", "Wpf")
+)
+TEST_ONLY_CLASSES = (
+    "com/example/netease/net/SmokeHooks",
+    "com/example/netease/ui/CoverCache",
+)
+ZOPFLI_VERSION = "0.4.3"
+_dense_encoder = None
+DENSE_CACHE = CACHE / "dense-deflate" / f"zopfli-{ZOPFLI_VERSION}-i5"
 
 # --------------------------------------------------------------------------- 工具
 
@@ -266,10 +281,12 @@ def collect_sources(src_dir: Path) -> list[Path]:
     return sorted(p for p in src_dir.rglob("*.java") if p.is_file())
 
 
-def copy_tree(src: Path, dst: Path) -> int:
+def copy_tree(src: Path, dst: Path, excluded: frozenset[str] = frozenset()) -> int:
     count = 0
     for f in sorted(src.rglob("*")):
         if not f.is_file():
+            continue
+        if f.relative_to(src).as_posix() in excluded:
             continue
         target = dst / f.relative_to(src)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -308,6 +325,122 @@ def compile_java(project: dict, javac: str, sources: list[Path], extra_cp: list[
 # --------------------------------------------------------------------------- 组装 / 打包
 
 
+def configure_compression(fast: bool = False) -> None:
+    """Load an isolated, pinned build tool. Player installations need only DEFLATE."""
+    global _dense_encoder
+    _dense_encoder = None
+    if fast:
+        log("  compression = zlib level 9（--fast）")
+        return
+    if sys.version_info < (3, 10):
+        log("  compression = zlib level 9（当前 Python 低于 3.10，保留原有构建兼容性）")
+        return
+    directory = CACHE / "size-compression"
+    if not (directory / f"zopfli-{ZOPFLI_VERSION}.dist-info").is_dir():
+        log("  安装构建专用压缩工具到 tools/.cache（不修改全局 Python 环境）…")
+        subprocess.run([
+            sys.executable, "-m", "pip", "install", "--disable-pip-version-check",
+            "--only-binary=:all:", "--no-deps", "--upgrade", "--target", str(directory),
+            "-r", str(TOOLS / "requirements-build.txt"),
+        ], check=True)
+    sys.path.insert(0, str(directory))
+    import zopfli
+    import zopfli.zlib
+    if zopfli.__version__ != ZOPFLI_VERSION:
+        die(f"压缩工具版本不符：期望 {ZOPFLI_VERSION}，实际 {zopfli.__version__}")
+    _dense_encoder = zopfli.zlib.compress
+    DENSE_CACHE.mkdir(parents=True, exist_ok=True)
+    log(f"  compression = Zopfli {ZOPFLI_VERSION}（标准 DEFLATE，内容寻址缓存）")
+
+
+def dense_deflate(data: bytes) -> bytes:
+    standard = zlib.compress(data, 9)[2:-4]
+    # Already compressed JARs and tiny entries do not benefit from a slow search.
+    if _dense_encoder is None or len(data) < 512 or len(standard) > len(data) * 0.90:
+        return standard
+    cached = DENSE_CACHE / (hashlib.sha256(data).hexdigest() + ".deflate")
+    try:
+        compressed = cached.read_bytes()
+        decoder = zlib.decompressobj(-15)
+        restored = decoder.decompress(compressed, len(data) + 1)
+        if restored == data and decoder.eof and not decoder.unused_data:
+            return min((standard, compressed), key=len)
+    except (OSError, zlib.error):
+        pass
+    compressed = _dense_encoder(data, numiterations=5)[2:-4]
+    if zlib.decompress(compressed, -15) != data:
+        die("DEFLATE 编码内容校验失败，拒绝生成产物")
+    compressed = min((standard, compressed), key=len)
+    temporary = cached.with_suffix(f".{os.getpid()}.tmp")
+    temporary.write_bytes(compressed)
+    temporary.replace(cached)
+    return compressed
+
+
+class _PreparedDeflate:
+    """One-shot compressor for ZipFile's standard CRC/header-writing stream."""
+
+    def __init__(self, data: bytes, compressed: bytes):
+        self.data = data
+        self.compressed = compressed
+        self.used = False
+
+    def compress(self, data: bytes) -> bytes:
+        if self.used or data != self.data:
+            raise ValueError("ZIP writer changed its one-shot input contract")
+        self.used = True
+        return self.compressed
+
+    def flush(self) -> bytes:
+        return b"" if self.used else self.compressed
+
+
+def write_zip_entry(archive: zipfile.ZipFile, info: zipfile.ZipInfo, data: bytes) -> None:
+    if _dense_encoder is None:
+        archive.writestr(info, data, compress_type=zipfile.ZIP_DEFLATED, compresslevel=9)
+        return
+    compressed = dense_deflate(data)
+    info.compress_type = zipfile.ZIP_DEFLATED
+    info.file_size = len(data)
+    # zipfile exposes no custom encoder parameter. Keep its own CRC, size, ZIP64,
+    # header and directory handling; replace only this entry's compressor.
+    with archive.open(info, "w") as entry:
+        if not hasattr(entry, "_compressor"):
+            raise RuntimeError("Unsupported Python ZIP writer; use --fast")
+        entry._compressor = _PreparedDeflate(data, compressed)
+        entry.write(data)
+
+
+def stage_dependency(source: Path, target: Path) -> None:
+    """Recompress SQLite without changing any entry, including native libraries."""
+    if not source.name.startswith("sqlite-jdbc-"):
+        shutil.copy2(source, target)
+        return
+    with zipfile.ZipFile(source) as original:
+        # Signed archives must remain byte-identical; never invalidate a signature.
+        if any(
+            entry.filename.upper().startswith("META-INF/")
+            and entry.filename.upper().endswith((".SF", ".RSA", ".DSA", ".EC"))
+            for entry in original.infolist()
+        ):
+            shutil.copy2(source, target)
+            return
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as packed:
+            packed.comment = original.comment
+            for entry in original.infolist():
+                info = copy.copy(entry)
+                write_zip_entry(packed, info, original.read(entry))
+                # zipfile substitutes permissions when the original value is zero.
+                # Restore it on the central-directory entry before closing the JAR.
+                info.external_attr = entry.external_attr
+        data = buffer.getvalue()
+    if len(data) < source.stat().st_size:
+        target.write_bytes(data)
+    else:
+        shutil.copy2(source, target)
+
+
 def stage_plugin(project: dict, manifest: bytes, classes_dir: Path) -> int:
     """把 classes_dir 的编译产物与资源装进 STAGE；返回复制的资源文件数。
 
@@ -322,7 +455,7 @@ def stage_plugin(project: dict, manifest: bytes, classes_dir: Path) -> int:
     # --- classes/：编译产物 + 资源
     copy_tree(classes_dir, STAGE / "classes")
     res_dir = ROOT / project["resourceDir"]
-    res_count = copy_tree(res_dir, STAGE / "classes") if res_dir.exists() else 0
+    res_count = copy_tree(res_dir, STAGE / "classes", DEVELOPMENT_RESOURCES) if res_dir.exists() else 0
 
     # --- manifest：根目录一份（PF4J 读）+ classes/META-INF 一份（插件自己按 /META-INF/MANIFEST.MF 读版本号）
     (STAGE / "META-INF" / "MANIFEST.MF").write_bytes(manifest)
@@ -343,7 +476,7 @@ def stage_plugin(project: dict, manifest: bytes, classes_dir: Path) -> int:
     lib_count = 0
     if libdir.exists():
         for jar in sorted(libdir.glob("*.jar")):
-            shutil.copy2(jar, STAGE / "lib" / jar.name)
+            stage_dependency(jar, STAGE / "lib" / jar.name)
             lib_count += 1
 
     return res_count
@@ -363,7 +496,7 @@ def make_spmod(project: dict) -> Path:
             info = zipfile.ZipInfo(arc, date_time=(2020, 1, 1, 0, 0, 0))  # 确定性构建
             info.compress_type = zipfile.ZIP_DEFLATED
             info.external_attr = 0o644 << 16
-            z.writestr(info, f.read_bytes())
+            write_zip_entry(z, info, f.read_bytes())
     return out
 
 
@@ -375,6 +508,16 @@ def verify_spmod(spmod: Path, project: dict) -> list[str]:
 
     with zipfile.ZipFile(spmod) as z:
         names = set(z.namelist())
+        bad_entry = z.testzip()
+        if bad_entry:
+            problems.append(f"ZIP CRC 校验失败：{bad_entry}")
+        for resource in DEVELOPMENT_RESOURCES:
+            if "classes/" + resource in names:
+                problems.append(f"包内混入开发文档：{resource}")
+        for name in names:
+            if any(name == "classes/" + cls + ".class" or
+                   name.startswith("classes/" + cls + "$") for cls in TEST_ONLY_CLASSES):
+                problems.append(f"包内混入测试专用类：{name}")
         for required in [
             "META-INF/MANIFEST.MF",
             want_main,
@@ -456,6 +599,21 @@ def verify_spmod(spmod: Path, project: dict) -> list[str]:
                 continue
             try:
                 with zipfile.ZipFile(io.BytesIO(z.read(name))) as inner:
+                    if inner.testzip():
+                        problems.append(f"依赖 CRC 校验失败：{name}")
+                    source = ROOT / project.get("libDir", "libs") / Path(name).name
+                    if source.name.startswith("sqlite-jdbc-") and source.is_file():
+                        with zipfile.ZipFile(source) as original:
+                            if inner.namelist() != original.namelist() or inner.comment != original.comment:
+                                problems.append(f"依赖条目列表或注释被改变：{name}")
+                            else:
+                                for before, after in zip(original.infolist(), inner.infolist()):
+                                    if (original.read(before) != inner.read(after)
+                                            or before.date_time != after.date_time
+                                            or before.external_attr != after.external_attr
+                                            or before.extra != after.extra or before.comment != after.comment):
+                                        problems.append(f"依赖条目内容或元数据被改变：{name}!/{before.filename}")
+                                        break
                     for entry in inner.namelist():
                         if entry.startswith(("com/xuncorp/", "org/pf4j/", "com/example/netease/")):
                             problems.append(f"lib/{name} 内夹带不该打包的类：{entry}")
@@ -535,6 +693,7 @@ def main() -> int:
     parser.add_argument("--package-only", action="store_true", help="只打包：复用 --classes-dir 的编译产物，不调用 javac、不清空输入目录")
     parser.add_argument("--classes-dir", default=None, help="编译产物目录（--package-only 必填，默认 build/classes）")
     parser.add_argument("--dist-dir", default=None, help="构建暂存目录；验证完成前不覆盖交付目录")
+    parser.add_argument("--fast", action="store_true", help="使用 zlib level 9，跳过构建专用的更密 DEFLATE 编码")
     args = parser.parse_args()
     if args.package_only and not args.classes_dir:
         parser.error("--package-only 必须配合 --classes-dir <目录>")
@@ -563,6 +722,7 @@ def _run_build(args) -> int:
     if args.dist_dir:
         project["distDir"] = args.dist_dir
     log(f"== 构建 {project['pluginId']} v{project['version']} ({project['name']}) ==")
+    configure_compression(args.fast)
 
     classes_dir = (ROOT / args.classes_dir).resolve() if args.classes_dir else CLASSES
 

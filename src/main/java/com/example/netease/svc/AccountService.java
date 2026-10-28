@@ -284,8 +284,8 @@ public final class AccountService {
     /**
      * 注入「登录成功后」回调（0.11.7，W1；生产者：{@code NeteasePlugin.start()}）。
      *
-     * <p>覆盖全部登录路径：扫码 803、手机号+短信验证码 —— 它们最终都走
-     * {@link #refreshAccountInfo()}。传 {@code null} = 卸载回调（宿主停用插件时）。</p>
+     * <p>覆盖全部登录路径：扫码 803、手机号+短信验证码；登录会话提交
+     * 并刷新账号信息后执行。传 {@code null} = 卸载回调（宿主停用插件时）。</p>
      *
      * <p>回调在 {@code netease-account} 线程上同步执行：实现必须立即返回（投递任务即可），
      * 不得在该线程做网络 / 磁盘 / 锁等待（docs/00 §6.10 线程纪律）。</p>
@@ -1254,7 +1254,7 @@ public final class AccountService {
      * 状态机核心（生产与烟测共用）：把一次轮询结果落成状态 + 副作用（803 落盘凭据）。
      *
      * @param verifyUrl 风控答复里的行为验证地址（0.11.32 需求①；非风控码传空串/null）
-     * @param nickname  非空表示调用方已知道昵称（烟测路径），否则 803 后由 {@link #refreshAccountInfo()} 补
+     * @param nickname  非空表示调用方已知道昵称（烟测路径）；生产扫码成功时在登录会话提交阶段获取账号信息
      */
     private static void feedQrCode(int code, String verifyUrl, String cookies, String nickname, long uid,
                                    boolean vip) {
@@ -1454,26 +1454,6 @@ public final class AccountService {
     // 原实现：确保本机客户端在跑（必要时由我们拉起并隐藏窗口）→ 用 CDP 读它内存里的 cookie
     // → 注入 jar → 加密落盘 → 补账号信息。这条路径依赖本机 cloudmusic 进程，已在 0.11.7 移除：
     // 插件自带「精简客户端」，登录只走 weapi（扫码 / 手机号+短信验证码）。
-
-    /** 803 之后补昵称/uid/VIP（账号线程）；失败不改变 LOGGED_IN。 */
-    private static void refreshAccountInfo() {
-        // 新凭据生效后不能继续复用匿名/旧会员权限下的低音质直链和缓存。
-        NativeStreamServer.credentialsChanged();
-        try {
-            Dto.Account acc = NeteaseApi.accountInfo();
-            if (acc == null) {
-                PluginLog.w(TAG, "登录后账号信息为空，保持已登录");
-                return;
-            }
-            setStatus(new LoginStatus(State.LOGGED_IN, "登录成功", acc.nickname(), acc.userId(), acc.vip(),
-                    acc.vipName(), 0L));
-            PluginLog.i(TAG, "账号信息已更新：昵称=" + acc.nickname() + "，uid=" + acc.userId()
-                    + "，VIP=" + acc.vip() + "（" + (acc.vipName().isEmpty() ? "档位未知" : acc.vipName()) + "）");
-        } catch (Throwable t) {
-            PluginLog.w(TAG, "登录后获取账号信息失败（登录态保持）：" + describe(t));
-        }
-        fireAfterLogin();
-    }
 
     /** 触发登录后回调（账号线程；异常只记日志，绝不影响登录态）。 */
     private static void fireAfterLogin() {
@@ -1678,6 +1658,20 @@ public final class AccountService {
         }
     }
 
+    public static java.util.concurrent.CompletableFuture<Void> renamePlaylist(long epoch,long uid,long id,String title,java.util.function.BooleanSupplier valid) {
+        var result=new java.util.concurrent.CompletableFuture<Void>();
+        if(!submit(()->{
+            try {
+                if(!valid.getAsBoolean() || sessionEpoch()!=epoch || status().uid()!=uid || !loggedIn())throw new IllegalStateException("账号已变化，请重新打开编辑窗口");
+                var playlists=NeteaseApi.userPlaylists(uid,1000);
+                if(playlists.stream().noneMatch(p->p.id()==id&&p.mine()))throw new IllegalStateException("只能修改当前账号自己创建的网易云歌单");
+                if(!valid.getAsBoolean() || sessionEpoch()!=epoch || status().uid()!=uid)throw new IllegalStateException("账号已变化，已停止改名");
+                NeteaseApi.renamePlaylist(id,title);result.complete(null);
+            }catch(Throwable failure){result.completeExceptionally(failure);}
+        }))result.completeExceptionally(new IllegalStateException("账号服务不可用"));
+        return result;
+    }
+
     private static boolean isOnAccountThread() {
         Thread t = accountThread;
         return t != null && Thread.currentThread() == t;
@@ -1704,11 +1698,6 @@ public final class AccountService {
             SESSION_EPOCH.incrementAndGet();
         }
         status = s;
-    }
-
-    private static void setStatus(State st, String message) {
-        LoginStatus cur = status();
-        setStatus(new LoginStatus(st, message, cur.nickname(), cur.uid(), cur.vip(), cur.vipName(), 0L));
     }
 
     private static int len(String s) {

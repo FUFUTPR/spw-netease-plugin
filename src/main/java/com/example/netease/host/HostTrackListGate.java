@@ -979,6 +979,12 @@ public final class HostTrackListGate {
         int droppedPlugin = 0;
         int droppedDup = 0;
         for (int i = 0; i < size; i++) {
+            try {
+                Object value=list.get(i).getClass().getMethod("getId").invoke(list.get(i));
+                if(value instanceof String id && com.example.netease.svc.DailySongVisibility.hidden(id)) {
+                    droppedPlugin++;continue;
+                }
+            } catch(ReflectiveOperationException ignored) { }
             if (!merge && plugin[i]) {
                 droppedPlugin++;
                 continue;

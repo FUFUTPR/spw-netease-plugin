@@ -8,7 +8,6 @@ import com.example.netease.net.Dto;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.sql.Connection;
 import java.sql.Driver;
@@ -77,7 +76,6 @@ public final class NativeLibrary {
     /** 歌单 id 前缀（与曲目前缀区分，便于日志与人眼辨认）。 */
     public static final String PLAYLIST_PREFIX = ID_PREFIX + "pl-";
 
-    private static final String HOST_DIR_NAME = "Salt Player for Windows";
     private static final DateTimeFormatter STAMP = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss");
 
     /** 本次进程内是否已经备份过（每次启动最多备份一次，避免刷爆磁盘）。 */
@@ -163,26 +161,6 @@ public final class NativeLibrary {
     /** 最近一次备份目录名（未备份过为 null）。 */
     public static String lastBackup() {
         return lastBackup;
-    }
-
-    /** 列出所有备份目录名（新→旧）。 */
-    public static List<String> listBackups() {
-        List<String> out = new ArrayList<>();
-        try {
-            Path root = DataPaths.data().resolve("db-backup");
-            if (!Files.isDirectory(root)) {
-                return out;
-            }
-            try (var s = Files.list(root)) {
-                s.filter(Files::isDirectory)
-                        .map(p -> p.getFileName().toString())
-                        .sorted((a, b) -> b.compareTo(a))
-                        .forEach(out::add);
-            }
-        } catch (Throwable t) {
-            PluginLog.d(TAG, "列备份失败（忽略）：" + t);
-        }
-        return out;
     }
 
     // ------------------------------------------------------------------ 同步
@@ -431,6 +409,41 @@ public final class NativeLibrary {
         return order;
     }
 
+    public static void removeDailyPlaylistOn(Sql raw) throws Exception {
+        SqlSchema sql = requireSchema(raw, "每日推荐");
+        String id = DailyRecommendations.HOST_ID;
+        new PlaylistLinks(sql).checkPlaylist(id);
+        sql.exec("DELETE FROM PlaylistTrack WHERE playlistId=?", id);
+        sql.exec("DELETE FROM Playlist WHERE id=?", id);
+    }
+
+    public static void renameCloudPlaylistOn(Sql raw,long id,String title,String description) throws Exception {
+        SqlSchema sql=requireSchema(raw,"歌单改名");String key=PLAYLIST_PREFIX+id;
+        if(id<=0||title==null||title.isBlank())throw new IllegalArgumentException("歌单标题无效");
+        new PlaylistLinks(sql).checkPlaylist(key);
+        if(sql.execUpdate("UPDATE Playlist SET title=?,description=? WHERE id=?",title,description==null?"":description,key)!=1)
+            throw new IllegalStateException("本地歌单已不存在，请刷新后重试");
+    }
+
+    /** Remove only positive cloud-playlist mirrors absent from a complete current listing. */
+    public static int removeMissingCloudPlaylistsOn(Sql raw, Set<Long> retained) throws Exception {
+        SqlSchema sql = requireSchema(raw, "清理已删除的云端歌单");
+        PlaylistLinks layout = new PlaylistLinks(sql);
+        var stale = new ArrayList<String>();
+        for (Object[] row : sql.rows("SELECT id FROM Playlist WHERE id LIKE ?", PLAYLIST_PREFIX + "%")) {
+            String id = String.valueOf(row[0]);
+            try {
+                long cloudId = Long.parseLong(id.substring(PLAYLIST_PREFIX.length()));
+                if (cloudId > 0 && !retained.contains(cloudId)) { layout.checkPlaylist(id); stale.add(id); }
+            } catch (NumberFormatException ignored) { }
+        }
+        for (String id : stale) {
+            sql.exec("DELETE FROM PlaylistTrack WHERE playlistId=?", id);
+            sql.exec("DELETE FROM Playlist WHERE id=?", id);
+        }
+        return stale.size();
+    }
+
     public static int writePlaylistCoverTimesOn(Sql sql, Map<String, Long> times) throws Exception {
         int changed = 0;
         for (var entry : times.entrySet()) {
@@ -609,22 +622,6 @@ public final class NativeLibrary {
         }
     }
 
-    /** 把一条曲目的 {@code path} 改成本地音频缓存文件（插件自带 JDBC + 独立事务）：宿主同连接不可用时的兜底。 */
-    public static int setTrackPathExternal(String trackId, String fileUri, long size) {
-        if (!available()) {
-            return 0;
-        }
-        try (Connection c = open()) {
-            c.setAutoCommit(false);
-            int n = setTrackPathOn(new JdbcSql(c), trackId, fileUri, size);
-            c.commit();
-            return n;
-        } catch (Throwable t) {
-            PluginLog.d(TAG, "改曲目 path（外部连接）失败（忽略）：" + t);
-            return 0;
-        }
-    }
-
     /**
      * 升级迁移：把本插件曲目统一恢复为当前流服务地址（事务归调用方）。
      *
@@ -699,38 +696,6 @@ public final class NativeLibrary {
                         + " coverRevision = coverRevision + 1 WHERE id = ?",
                 prefix, id.substring(ID_PREFIX.length()), System.currentTimeMillis(), id);
         return 1;
-    }
-
-    /**
-     * 只读：行封面预热需要的曲目素材（{@code album / path / size / coverRevision}）。
-     *
-     * <p>0.11.3 {@code svc.CoverPrimer} 用。走本类已验证的 {@link #available()} + {@link #open()}
-     * 路径 —— 插件启动早期 {@link #dbPath()} 可能还是 {@code null}，直接拼 JDBC URL 会连到一个空库
-     * （表现为「读到 0 首」而不是报错）。</p>
-     *
-     * <p>线程：任意非宿主回调线程（只读连接，不占用宿主连接、不触发失效）。</p>
-     */
-    public static java.util.List<String[]> primeRows() {
-        java.util.List<String[]> out = new java.util.ArrayList<>();
-        if (!available()) {
-            return out;
-        }
-        try (Connection c = open();
-             PreparedStatement ps = c.prepareStatement(
-                     "SELECT album, path, size, coverRevision FROM Track WHERE path LIKE 'http://127.0.0.1%'")) {
-            try (var rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    out.add(new String[]{
-                            rs.getString(1) == null ? "" : rs.getString(1),
-                            rs.getString(2) == null ? "" : rs.getString(2),
-                            Long.toString(rs.getLong(3)),
-                            Integer.toString(rs.getInt(4))});
-                }
-            }
-        } catch (Throwable t) {
-            PluginLog.d(TAG, "读取行封面素材失败（忽略：" + t + "）");
-        }
-        return out;
     }
 
     /**
@@ -913,49 +878,6 @@ public final class NativeLibrary {
             n++;
         }
         return n;
-    }
-
-    /**
-     * 只读核对（用插件自带的 JDBC 连接，不占宿主连接、不影响失效）：
-     * 看刚挂的封面是否真的落在库里。
-     *
-     * @return 形如 {@code "Album 命中 2/2（Arcana Eden=file:///…）"}
-     */
-    public static String verifyCovers(List<CoverArt.Cover> covers) {
-        if (covers == null || covers.isEmpty() || !available()) {
-            return "无封面可核对";
-        }
-        int hit = 0;
-        StringBuilder sample = new StringBuilder();
-        try (Connection c = open()) {
-            for (CoverArt.Cover cv : covers) {
-                String cover = null;
-                String sql = cv.artist() == null || cv.artist().isBlank()
-                        ? "SELECT cover FROM Album WHERE title = ?"
-                        : "SELECT cover FROM Album WHERE title = ? AND artist = ?";
-                try (PreparedStatement ps = c.prepareStatement(sql)) {
-                    ps.setString(1, cv.album());
-                    if (sql.contains("artist = ?")) {
-                        ps.setString(2, cv.artist());
-                    }
-                    try (var rs = ps.executeQuery()) {
-                        if (rs.next()) {
-                            cover = rs.getString(1);
-                        }
-                    }
-                }
-                if (cv.fileUri().equals(cover)) {
-                    hit++;
-                    if (sample.length() < 80) {
-                        sample.append(sample.length() > 0 ? "、" : "").append(cv.album());
-                    }
-                }
-            }
-        } catch (Throwable t) {
-            return "核对失败：" + t;
-        }
-        return "Album 命中 " + hit + "/" + covers.size()
-                + (sample.length() > 0 ? "（" + sample + "…）" : "（无一命中，宿主可能还没派生出专辑行）");
     }
 
     /**
@@ -1544,8 +1466,8 @@ public final class NativeLibrary {
      * {@code createdTime} 每轮被刷新、宿主里用户自己换的封面标记 {@code isUserEditedCover}
      * 也被清零（真机上表现为「同步一次封面设置就丢一次」）。现在歌单行交给
      * {@link #insertPlaylist} 的 {@code ON CONFLICT(id) DO UPDATE} 增量更新：插件自己管的列
-     * （title / coverModifiedTime / description / order）每轮覆盖，宿主/用户数据
-     * （createdTime / isUserEditedCover / trackSort / trackSortDescending）原样保留。</p>
+     * （title / coverModifiedTime）每轮覆盖，宿主/用户数据
+     * （description / order / createdTime / isUserEditedCover / trackSort / trackSortDescending）原样保留。</p>
      */
     private static void resetPlaylistForSync(SqlSchema c, String plId) throws Exception {
         c.exec("DELETE FROM PlaylistTrack WHERE playlistId = ?", plId);
@@ -1567,11 +1489,13 @@ public final class NativeLibrary {
         v.put("isUserEditedCover", 0L);                  // 用户在宿主里自己换过封面 ⇒ 不进下面的更新列表
         v.put("description", desc);
         v.put("createdTime", now);
-        v.put("order", (long) order);
+        var existing = c.rows("SELECT 1 FROM Playlist WHERE id=?", id);
+        long appendedOrder = existing.isEmpty() ? asLong(c.rows("SELECT COALESCE(MAX(`order`),-1)+1 FROM Playlist").getFirst()[0]) : order;
+        v.put("order", appendedOrder);
         v.put("trackSort", 0L);
         v.put("trackSortDescending", 0L);
         layout.playlistValues(id, v);
-        upsertBySchema(c, "Playlist", "id", v, cols("title", "coverModifiedTime", "description", "order"));
+        upsertBySchema(c, "Playlist", "id", v, cols("title", "coverModifiedTime"));
     }
 
     private static void upsertTrack(SqlSchema c, String id, Dto.Song s, String urlPrefix, int order, long now)

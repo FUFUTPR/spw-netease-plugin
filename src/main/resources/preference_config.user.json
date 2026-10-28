@@ -69,6 +69,13 @@
         },
         {
           "type": "switch",
+          "key": "daily_recommendations",
+          "title": "每日推荐",
+          "summary": "每天6:00更新，关闭后可在此开启",
+          "default_value": true
+        },
+        {
+          "type": "switch",
           "key": "search_box_enabled",
           "title": "搜索框",
           "summary": "在顶栏显示网易云歌曲搜索框",

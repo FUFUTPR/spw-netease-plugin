@@ -1269,10 +1269,15 @@ public final class CoverStore {
                 if (s.id() > 0L) {
                     SONGS.put(s.id(), new String[]{album, artist});   // 播放即时补图靠这张小表找回专辑
                 }
-                if (refStub(refKey(album, artist)) != null) {
-                    continue;                        // 这张（专辑+歌手）已登记：别人的同名专辑不影响它
+                String key=refKey(album,artist);
+                String url=s.picUrl()==null?"":s.picUrl().trim();
+                synchronized(REFS) {
+                    String previous=picUrlOf(key);
+                    if(REFS.containsKey(key) && (url.isEmpty() || url.equals(previous)))continue;
+                    // A placeholder may have been registered before detail metadata arrived.
+                    // Refresh its source while retaining the current stub until replacement is ready.
+                    rememberRef(album,artist,url,null);
                 }
-                rememberRef(album, artist, s.picUrl() == null ? "" : s.picUrl().trim(), null);
                 n++;
             }
         }
@@ -1483,6 +1488,17 @@ public final class CoverStore {
         catch(Throwable missing){PluginLog.d(TAG,"取封面原图失败（忽略）："+missing);return null;}
     }
 
+    /** In-memory image identity for consumers retaining bytes across placeholder repairs. */
+    public static String imageIdentity(String refKey) {
+        if(refKey==null)return "";
+        synchronized(REFS) {
+            String stub=refStub(refKey);
+            String idx=stub==null?null:idxFromStub(stub);
+            var record=idx==null?null:castOrNull(INDEX.get(idx));
+            return stub==null?"":stub+"|"+(record==null?"":str(record.get("i")));
+        }
+    }
+
     /** Stable cached original for the native Windows media session; no download or audio stub. */
     public static Path originalImageFile(String refKey) {
         if (refKey == null || refKey.isBlank()) {
@@ -1500,11 +1516,26 @@ public final class CoverStore {
             }
             Map<String, Object> m = castOrNull(INDEX.get(idx));
             String name = m == null ? "" : str(m.get("i"));
-            if (name.isEmpty()) {
-                return null;
+            Path img = name.isEmpty()?null:imagePath(name);
+            if(img!=null && Files.isRegularFile(img) && Files.size(img)>0)return img;
+            if(name.startsWith("placeholder-"))return null;
+            // Older or partially cleaned caches can retain the complete picture in
+            // the local FLAC stub after losing img/. Recover it without a network request.
+            synchronized(LOCKS.computeIfAbsent(idx,k->new Object())) {
+                if(img!=null && Files.isRegularFile(img) && Files.size(img)>0)return img;
+                byte[] recovered=CoverArt.readStubImage(stubDir().resolve(stub));
+                if(recovered==null)return null;
+                String mime=CoverArt.sniff(recovered);
+                if(mime==null)return null;
+                String restored=store(recovered,mime);
+                if(restored==null)return null;
+                synchronized(REFS) {
+                    var record=m==null?new LinkedHashMap<String,Object>():new LinkedHashMap<>(m);
+                    record.put("i",restored);INDEX.put(idx,record);dirty=true;
+                }
+                flush(false);
+                return imagePath(restored);
             }
-            Path img = imagePath(name);
-            return Files.isRegularFile(img) ? img : null;
         } catch (Throwable t) {
             PluginLog.d(TAG, "取封面原图失败（忽略）：" + t);
             return null;
@@ -1820,16 +1851,6 @@ public final class CoverStore {
         }
         int q = url.indexOf('?');
         return Hashes.md5Hex(q > 0 ? url.substring(0, q) : url);
-    }
-
-    private static int attempts(String idx) {
-        synchronized (REFS) {
-            Object v = INDEX.get(idx);
-            if (v instanceof Map<?, ?> m && m.get("n") instanceof Number n) {
-                return n.intValue();
-            }
-            return 0;
-        }
     }
 
     private static int bumpAttempts(String idx, String album, String url) {
@@ -2200,14 +2221,6 @@ public final class CoverStore {
         }
     }
 
-    /** refs 记录（按引用键）；不存在返回 {@code null}。 */
-    private static Map<String, Object> refRec(String refKey) {
-        synchronized (REFS) {
-            Object v = REFS.get(refKey);
-            return v instanceof Map<?, ?> m ? cast(m) : null;
-        }
-    }
-
     private static String refStub(String album) {
         synchronized (REFS) {
             Object v = REFS.get(album);
@@ -2266,10 +2279,6 @@ public final class CoverStore {
 
     private static boolean usable(Path p) {
         return CoverArt.usable(p);
-    }
-
-    private static boolean usable(String name) {
-        return name != null && !name.isEmpty() && usable(stubDir().resolve(name));
     }
 
     /** {@code stub\} 里的桩数量（0.10.x 的旧目录已在 {@link #init()} 里搬空）。 */

@@ -52,6 +52,7 @@ internal fun EmbeddedSaltDialog(
     cancelText: String = "关闭",
     confirmText: String = "确定",
     interactive: Boolean = true,
+    dismissVisible: Boolean = true,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val focus = remember { FocusRequester() }
@@ -116,7 +117,7 @@ internal fun EmbeddedSaltDialog(
             val padded: @Composable ColumnScope.() -> Unit = { Column(Modifier.padding(16.dp)) { content() } }
             val body: @Composable ColumnScope.() -> Unit = {
                 HostSaltComponents.drawDialogBody(title, padded, onDismiss, onConfirm,
-                    confirmVisible && interactive, cancelText, confirmText, this, currentComposer)
+                    confirmVisible && interactive, cancelText, confirmText, this, currentComposer, dismissVisible)
             }
             CompositionLocalProvider(LocalDialogMotionSettled provides settled) {
                 HostSaltComponents.drawDialogFrame(body, currentComposer)

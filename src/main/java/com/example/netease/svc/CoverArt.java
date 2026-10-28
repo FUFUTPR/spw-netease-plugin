@@ -1,6 +1,5 @@
 package com.example.netease.svc;
 
-import com.example.netease.core.DataPaths;
 import com.example.netease.core.PluginLog;
 import com.example.netease.core.PluginVersions;
 import com.example.netease.net.Dto;
@@ -11,8 +10,6 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
-import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -358,6 +355,38 @@ public final class CoverArt {
 
     // ------------------------------------------------------------------ FLAC 封面桩
 
+    /** Read only an existing plugin stub's bounded metadata; never fetch or decode audio. */
+    static byte[] readStubImage(Path stub) {
+        try {
+            long size=Files.size(stub);
+            if(size<8 || size>MAX_IMAGE_BYTES+65536L)return null;
+            var bytes=java.nio.ByteBuffer.wrap(Files.readAllBytes(stub));
+            if(bytes.getInt()!=0x664c6143)return null;
+            while(bytes.remaining()>=4) {
+                int header=bytes.getInt(),length=header&0xffffff,type=(header>>>24)&0x7f;
+                if(length>bytes.remaining())return null;
+                int end=bytes.position()+length;
+                if(type==6) {
+                    var picture=bytes.slice();picture.limit(length);
+                    if(picture.remaining()<32)return null;
+                    picture.getInt();int mimeLength=picture.getInt();
+                    if(mimeLength<0||mimeLength>picture.remaining()-24)return null;
+                    picture.position(picture.position()+mimeLength);
+                    int descriptionLength=picture.getInt();
+                    if(descriptionLength<0||descriptionLength>picture.remaining()-20)return null;
+                    picture.position(picture.position()+descriptionLength+16);
+                    int imageLength=picture.getInt();
+                    if(imageLength<=0||imageLength>MAX_IMAGE_BYTES||imageLength>picture.remaining())return null;
+                    byte[] image=new byte[imageLength];picture.get(image);
+                    if(sniff(image)!=null)return image;
+                }
+                bytes.position(end);
+                if((header&0x80000000)!=0)break;
+            }
+        }catch(Exception invalid){PluginLog.d(TAG,"本地封面桩无法恢复原图："+invalid.getClass().getSimpleName());}
+        return null;
+    }
+
     /**
      * 造「最小 FLAC」：{@code fLaC} + {@code STREAMINFO} + {@code PICTURE}(last)。
      *
@@ -443,20 +472,6 @@ public final class CoverArt {
             return Files.isRegularFile(p) && Files.size(p) >= STUB_MIN_BYTES;
         } catch (Throwable t) {
             return false;
-        }
-    }
-
-    private static String md5Hex(String s) {
-        try {
-            MessageDigest md = MessageDigest.getInstance("MD5");
-            byte[] d = md.digest(s.getBytes(java.nio.charset.StandardCharsets.UTF_8));
-            StringBuilder sb = new StringBuilder(d.length * 2);
-            for (byte b : d) {
-                sb.append(Character.forDigit((b >> 4) & 0xF, 16)).append(Character.forDigit(b & 0xF, 16));
-            }
-            return sb.toString();
-        } catch (Throwable t) {
-            return Integer.toHexString(s.hashCode());
         }
     }
 

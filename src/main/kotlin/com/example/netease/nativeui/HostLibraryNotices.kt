@@ -50,7 +50,7 @@ internal object HostLibraryNotices {
                             val phase = NeteasePlugin.syncStatusSnapshot().phase()
                             val syncing = phase == SyncCoordinator.Phase.WAITING ||
                                 phase == SyncCoordinator.Phase.FETCHING || phase == SyncCoordinator.Phase.WRITING
-                            val message = policy.poll(now(), HostLibraryNoticeAbi.scanning(), syncing || progressVisible)
+                            val message = policy.poll(now(), HostLibraryNoticeAbi.scanning(), syncing || progressVisible || com.example.netease.svc.DailyRecommendations.state().busy())
                             if (message != null && isActive) toast.invoke(null, message)
                         } catch (error: Throwable) {
                             if (error is CancellationException) throw error

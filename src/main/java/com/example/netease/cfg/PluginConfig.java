@@ -100,7 +100,7 @@ public final class PluginConfig {
             boolean audioCache,
             long audioCacheBytes,
             boolean devMode,
-            boolean mergePlaylists, boolean searchBoxEnabled, String playbackTransport) {
+            boolean mergePlaylists, boolean searchBoxEnabled, String playbackTransport, boolean dailyRecommendations) {
 
         String summary() {
             // ⚠️ 手机号是 PII：只报「配没配」，绝不把号码写进日志。
@@ -118,7 +118,28 @@ public final class PluginConfig {
     }
 
     private static final Snapshot DEFAULTS = new Snapshot(
-            true, "info", "lossless", true, "", true, 10L * 1024 * 1024 * 1024, false, true, true, "auto");
+            true, "info", "lossless", true, "", true, 10L * 1024 * 1024 * 1024, false, true, true, "auto", true);
+
+    public static boolean dailyRecommendations() { return snap.dailyRecommendations(); }
+
+    /** Persist before publishing the new snapshot; failure leaves the feature enabled. */
+    public static java.util.concurrent.CompletableFuture<Void> disableDailyRecommendations() {
+        var result = new java.util.concurrent.CompletableFuture<Void>();
+        if (!HostBridgeWorker.get().submit(() -> {
+            try {
+                ConfigHelper target = helper(F_MUSIC);
+                if (target == null) throw new IllegalStateException("配置尚未就绪，请稍后重试");
+                target.set("daily_recommendations", false);
+                if (!target.save()) {
+                    target.set("daily_recommendations", snap.dailyRecommendations());
+                    throw new IllegalStateException("配置保存失败，每日推荐尚未关闭，请重试");
+                }
+                refresh();
+                result.complete(null);
+            } catch (Throwable error) { result.completeExceptionally(error); }
+        })) result.completeExceptionally(new IllegalStateException("配置服务不可用"));
+        return result;
+    }
 
     private static final Map<String, ConfigHelper> HELPERS = new ConcurrentHashMap<>();
 
@@ -134,6 +155,35 @@ public final class PluginConfig {
     private static final String ABSENT = "\u0000absent";
 
     private static volatile Snapshot snap = DEFAULTS;
+    private static volatile String startupAudioChoice;
+    private static java.nio.file.Path qualityFile() { return com.example.netease.core.DataPaths.data().resolve("audio-quality-choice.json"); }
+    /** Capture the persisted choice before the host can seed missing preferences with defaults. */
+    public static void primeAudioLevel() {
+        String selected = null, remembered = null;
+        try { remembered = Levels.canonical(com.example.netease.core.Json.str(com.example.netease.core.Json.parse(java.nio.file.Files.readString(qualityFile())),"audio_level",null)); } catch(Exception ignored) {}
+        for(String file:new String[]{F_MUSIC,F_MAIN,F_LEGACY_CLIENT}) {
+            try {selected=Levels.canonical(com.example.netease.core.Json.str(com.example.netease.core.Json.parse(java.nio.file.Files.readString(com.example.netease.core.DataPaths.data().resolve(file))),"audio_level",null));}catch(Exception ignored){}
+            if(selected!=null)break;
+        }
+        if(remembered!=null && (selected==null || selected.equals(Levels.DEFAULT)))selected=remembered;
+        startupAudioChoice=selected;
+        if(selected!=null)snap=withAudio(snap,selected);
+    }
+    private static Snapshot withAudio(Snapshot s,String audio) {
+        return new Snapshot(s.enabled(),s.logLevel(),audio,s.autoLogin(),s.phone(),s.audioCache(),s.audioCacheBytes(),s.devMode(),s.mergePlaylists(),s.searchBoxEnabled(),s.playbackTransport(),s.dailyRecommendations());
+    }
+    private static void rememberAudioChoice() {
+        String value=Levels.canonical(migratedAudioLevel());
+        if(value==null)return;
+        try {
+            var json=com.example.netease.core.Json.newObject();json.put("audio_level",value);
+            String content=com.example.netease.core.Json.stringify(json);
+            if(java.nio.file.Files.isRegularFile(qualityFile()) && java.nio.file.Files.readString(qualityFile()).equals(content))return;
+            java.nio.file.Files.createDirectories(qualityFile().getParent());
+            var tmp=java.nio.file.Files.createTempFile(qualityFile().getParent(),"quality-",".tmp");
+            try {java.nio.file.Files.writeString(tmp,content);java.nio.file.Files.move(tmp,qualityFile(),java.nio.file.StandardCopyOption.REPLACE_EXISTING);}finally{java.nio.file.Files.deleteIfExists(tmp);}
+        }catch(Exception error){PluginLog.w("cfg","音质选择备份未完成："+error.getClass().getSimpleName());}
+    }
     private static volatile String pluginId = "com.example.netease";
     private static volatile ConfigManager manager;
 
@@ -199,8 +249,13 @@ public final class PluginConfig {
         // 0.11.45 补丁（用户需求：开发者模式默认关闭）：先把上次会话残留的 dev_mode=true 复位，
         // 再 refresh —— 顺序不能反，否则 refresh 会先把装机档位改成开发者档、页面又冒开发者行。
         resetDevModeOnStartup();
+        if(startupAudioChoice!=null) {
+            var target=helper(F_MUSIC);
+            if(target!=null) {target.set("audio_level",startupAudioChoice);if(!target.save())PluginLog.w("cfg","音质选择恢复保存失败，暂时保留已有配置");}
+        }
         migratePreferenceGroups();
         refresh();
+        rememberAudioChoice();
         PluginLog.i("cfg", "配置已加载 " + snap.summary());
     }
 
@@ -242,6 +297,7 @@ public final class PluginConfig {
             return;
         }
         Snapshot before = snap;
+        String configuredAudio=Levels.canonical(migratedAudioLevel());
         // 用哨兵默认值区分「没配过」（0.9.0 只有布尔开关 native_audio_cache 时，读不到数值键）
         String configuredCacheGb = rawString(F_CACHE, "audio_cache_gb", rawString(F_MAIN, "audio_cache_gb", ABSENT));
         if (ABSENT.equals(configuredCacheGb)) {
@@ -256,7 +312,7 @@ public final class PluginConfig {
                 str(F_MAIN, "log_level", "info"),
                 // 音质档位 0.11.7 起归「维护」组（F_MAIN）；老用户的取值还在 client_cfg.json 里，
                 // 读不到新键时回退读遗留键，做到「升级不丢用户选择」。白名单见 core.Levels
-                level(migratedAudioLevel()),
+                configuredAudio == null ? before.audioLevel() : configuredAudio,
                 // 0.11.46（用户需求：这行搬进「维护」组）⇒ 开关的新写盘落点是 config.json；
                 // 老用户的取值还在账号组（account_cfg.json），读不到新键时回退读旧键 ——
                 // 「升级不丢用户选择」（与 audio_level 的遗留迁移同一手法）。
@@ -270,7 +326,8 @@ public final class PluginConfig {
                 // 0.11.46（合并歌单，用户需求）：默认开 —— 网易云与本地音乐合并显示在「歌曲」里；
                 // 关 ⇒ 同步链路整体停写 + 撤销已写入的 netease-* 行（落地动作走 mergePlaylistsHook）。
                 bool(F_MUSIC, "merge_playlists", bool(F_MAIN, "merge_playlists", true)), bool(F_MUSIC, "search_box_enabled", true),
-                transport(str(F_ONLINE,"playback_transport",str(F_MUSIC,"playback_transport","auto"))));
+                transport(str(F_ONLINE,"playback_transport",str(F_MUSIC,"playback_transport","auto"))),
+                bool(F_MUSIC, "daily_recommendations", true));
         snap = s;
         if (before.searchBoxEnabled() != s.searchBoxEnabled()) {
             var hook = searchBoxHook;
@@ -310,6 +367,7 @@ public final class PluginConfig {
         PluginLog.i("cfg", "配置已变更：" + fileName);
         HostBridgeWorker.get().submit(() -> {
             refresh();
+            if (F_MUSIC.equals(fileName) || F_MAIN.equals(fileName)) rememberAudioChoice();
             // 0.11.22：账号组变了（用户点了某个输入框的「确定」）→ 交给登录流程看一眼。
             // 只有配置页那一排控件的写盘会走到这里；插件自己写「当前账号」也会走到，
             // 此时验证码键是空的 ⇒ SmsLogin 立刻返回，不会自激。

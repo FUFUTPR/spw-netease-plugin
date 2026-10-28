@@ -72,6 +72,7 @@ internal object NativeUiState {
     var search by mutableStateOf<SearchController.State?>(null)
     var playlist by mutableStateOf<PlaylistController.State?>(null)
     var sync by mutableStateOf<SyncCoordinator.Status?>(null)
+    var daily by mutableStateOf(com.example.netease.svc.DailyRecommendations.state())
     var syncRequestNote by mutableStateOf("")
 
     var searchKeyword by mutableStateOf("")

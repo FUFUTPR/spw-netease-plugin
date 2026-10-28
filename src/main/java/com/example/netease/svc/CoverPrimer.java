@@ -422,11 +422,6 @@ public final class CoverPrimer {
         return null;
     }
 
-    private static String dbPath() {
-        Path p = resolveDb();
-        return p == null ? "" : p.toString();
-    }
-
     /** 缓存目录（{@code <宿主数据>\cache\shared_cover}）：由曲库文件位置推出，找不到返回 null。 */
     public static Path cacheDir() {
         try {

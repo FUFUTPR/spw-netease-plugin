@@ -7,6 +7,8 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.layout.*
 import androidx.compose.runtime.*
@@ -223,6 +225,11 @@ internal object NativeUpdateUi {
                         SaltText("是否下载新版本 ${current.release()?.version().orEmpty()}？")
                         if(current.phase()==Phase.FAILED)SaltText(current.message(),style=HostStyle.typography.bodySmall)
                         OptOut()
+                    }
+                    if (!checkingNow && notice.isBlank() && current.release()?.notes()?.isNotBlank() == true) {
+                        Column(Modifier.fillMaxWidth().heightIn(max = 220.dp).verticalScroll(rememberScrollState()).testTag("update-release-notes")) {
+                            SaltText(current.release()!!.notes(), style = HostStyle.typography.bodySmall)
+                        }
                     }
                     if(error.isNotBlank())SaltText(error,style=HostStyle.typography.bodySmall)
                 }

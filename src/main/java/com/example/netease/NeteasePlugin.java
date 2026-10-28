@@ -283,6 +283,7 @@ public final class NeteasePlugin extends SpwPlugin {
      */
     public static com.example.netease.svc.SyncCoordinator.RequestResult syncRequestFromNativeUi() {
         try {
+            com.example.netease.svc.DailyRecommendations.today();
             return SYNC.request(java.util.List.of(), "force:native-ui");
         } catch (Throwable t) {
             PluginLog.w(TAG, "原生页面提交同步请求失败：" + t);
@@ -364,6 +365,7 @@ public final class NeteasePlugin extends SpwPlugin {
             }
             // ① 纯文件/零宿主依赖的初始化
             DataPaths.init(id, pluginPath);
+            PluginConfig.primeAudioLevel();
             PluginLog.init(DataPaths.logs());
             if (!DataPaths.storageNote().isBlank()) PluginLog.i("paths", DataPaths.storageNote());
             PluginLog.i(TAG, "开始启动：id=" + id
@@ -382,6 +384,8 @@ public final class NeteasePlugin extends SpwPlugin {
             // ② 起线程（顺序敏感：HostBridgeWorker 必须先于一切宿主交互）
             HostBridgeWorker.get().start();
             Timers.start();
+            com.example.netease.svc.DailyRecommendations.start();
+            com.example.netease.svc.DailySongVisibility.start();
             EventBus.get().start();
 
             // ②′ 「歌曲」列表门（0.11.46 真机修正；0.11.47 扩展）：TrackRepo 与 TrackRepoKt 两处 DAO
@@ -971,15 +975,23 @@ public final class NeteasePlugin extends SpwPlugin {
                 try { want.putIfAbsent(Long.parseLong(row[0]), row.length > 1 ? row[1] : ""); }
                 catch (NumberFormatException ignored) { }
             }
+            boolean completeListing = false;
             if (ticket.uid() > 0) {
-                for (Dto.PlaylistBrief item : NeteaseApi.userPlaylists(ticket.uid(), NATIVE_SYNC_PLAYLIST_MAX)) {
+                var listing = NeteaseApi.userPlaylistSnapshot(ticket.uid(), NATIVE_SYNC_PLAYLIST_MAX);
+                completeListing = listing.complete();
+                for (Dto.PlaylistBrief item : listing.playlists()) {
                     if (item != null && item.id() > 0) want.putIfAbsent(item.id(), item.name());
                 }
             }
             coordinator.check(ticket);
             total = want.size();
-            if (want.isEmpty()) throw new IllegalStateException("没有可同步的歌单");
             String backup = NativeLibrary.backupOnce("sync");
+            if (completeListing) {
+                var retained = java.util.Set.copyOf(want.keySet());
+                int removed = writeSyncTask(ticket, sql -> NativeLibrary.removeMissingCloudPlaylistsOn(sql, retained));
+                if (removed > 0) { PluginLog.i(TAG, "已同步移除云端不存在的歌单：" + removed); VoxzenBridge.refreshHostLibrary(); }
+            }
+            if (want.isEmpty() && !completeListing) throw new IllegalStateException("没有可同步的歌单");
             var headers = want.entrySet().stream().map(e ->
                     new NativeLibrary.Entry(e.getKey(), e.getValue(), java.util.List.<Dto.Song>of())).toList();
             writeSyncTask(ticket, sql -> NativeLibrary.publishPlaylistHeadersOn(sql, headers));
@@ -1084,7 +1096,7 @@ public final class NeteasePlugin extends SpwPlugin {
      * <p>线程：{@code netease-cover-fill}（任意非宿主回调线程都可安全调用
      * {@link HostSqlBridge#onHostConnection}，见 host/HostSqlBridge 的线程契约）。</p>
      */
-    private static void onCoverBatch(java.util.List<com.example.netease.svc.CoverArt.Cover> batch) {
+    public static void onCoverBatch(java.util.List<com.example.netease.svc.CoverArt.Cover> batch) {
         if (batch == null || batch.isEmpty()) {
             return;
         }
@@ -1172,6 +1184,9 @@ public final class NeteasePlugin extends SpwPlugin {
             com.example.netease.svc.PluginUpdateInstaller.onPluginStop();
             com.example.netease.svc.PluginUpdater.stopGlobal();
             SYNC.stop();
+            com.example.netease.svc.DailyRecommendations.stop();
+            com.example.netease.svc.DailySongVisibility.stop();
+            com.example.netease.svc.CloudPlaylistTitles.stop();
             com.example.netease.svc.LocalPlaybackCompatibility.stop();
             VoxzenBridge.stop();
             // ① 摘原生 UI Hook：宿主页面不再渲染，250ms tick 与各控制器由 Kotlin 侧 stop() 统一收尾。
@@ -1494,6 +1509,7 @@ public final class NeteasePlugin extends SpwPlugin {
     public static void syncNow() {
         guard(() -> {
             var result = SYNC.request(java.util.List.of(), "force:配置页手动");
+            com.example.netease.svc.DailyRecommendations.today();
             boolean shown = HostUiBridge.openNativePage("sync");
             PluginLog.i(TAG, "配置页手动同步：请求结果=" + result + "，原生同步页=" + (shown ? "已打开" : "不可用"));
             if (!shown) {
@@ -1518,6 +1534,7 @@ public final class NeteasePlugin extends SpwPlugin {
      */
     public static void syncFromRefreshLibrary() {
         try {
+            com.example.netease.svc.DailyRecommendations.today();
             spawnNativeSync(java.util.List.of(), "force:刷新音乐库");
         } catch (Throwable t) {
             PluginLog.w(TAG, "刷新音乐库联动：同步触发失败（忽略）：" + t);
