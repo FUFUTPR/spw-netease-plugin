@@ -37,7 +37,11 @@ public final class HostSystemMediaCover {
         if(setter.size()!=1)throw new NoSuchMethodException("Windows media properties setter");
         Method setProperties=setter.getFirst();
         getProperties=controllerType.getMethod("getMediaProperties");update=controllerType.getMethod("updateDisplay");
-        propertiesType=Class.forName("androidx.compose.ui.\u0462",false,loader);
+        Class<?> jmtc=Class.forName("com.xuncorp.voxzen.service.JmtcManager",false,loader);
+        var metadata=Arrays.stream(jmtc.getDeclaredMethods()).filter(m->m.getName().equals("updateMediaProperties")&&m.getParameterCount()==2
+                &&setProperties.getParameterTypes()[0].isAssignableFrom(m.getParameterTypes()[0])).toList();
+        if(metadata.size()!=1)throw new NoSuchMethodException("Current music media properties type");
+        propertiesType=metadata.getFirst().getParameterTypes()[0];
         if(!setProperties.getParameterTypes()[0].isAssignableFrom(propertiesType))throw new NoSuchMethodException("Music media properties type");
         String[] names={"\u037f","\u0528","\u0529"};
         Class<?>[] types={String.class,String[].class,String.class};
@@ -56,7 +60,6 @@ public final class HostSystemMediaCover {
         var items=Arrays.stream(player.getReturnType().getMethods()).filter(m->!Modifier.isStatic(m.getModifiers())&&m.getParameterCount()==0&&m.getReturnType()==media).toList();
         if(items.size()!=1)throw new NoSuchMethodException("Current native media item");item=items.getFirst();
         id=media.getMethod("\u037f");title=media.getMethod("\u0528");artists=media.getMethod("\u0529");album=media.getMethod("\u052a");
-        Class<?> jmtc=Class.forName("com.xuncorp.voxzen.service.JmtcManager",false,loader);
         submit=jmtc.getDeclaredMethod("submitTask",Function1.class);submit.setAccessible(true);
         // Binding and manager initialization happen on HostBridgeWorker, never in the hook.
         manager=jmtc.getField("INSTANCE").get(null);

@@ -341,10 +341,14 @@ public final class HostTrackListGate {
                 original = f.get(db);
             }
             if (slot == null || original == null) { throw new IllegalStateException("TrackDao Lazy missing"); }
-            Field scan = profile.scanRepository().getDeclaredField(NAME_FIELD_DAO);
-            scan.setAccessible(true);
-            Object scanOriginal = scan.get(null);
-            if (!dao.isInstance(scanOriginal)) { throw new IllegalStateException("Scan DAO shape mismatch"); }
+            Field scan = null;
+            Object scanOriginal = null;
+            if (!profile.sharedScanDao()) {
+                scan = profile.scanRepository().getDeclaredField(NAME_FIELD_DAO);
+                scan.setAccessible(true);
+                scanOriginal = scan.get(null);
+                if (!dao.isInstance(scanOriginal)) { throw new IllegalStateException("Scan DAO shape mismatch"); }
+            }
             Object current = lazy.getMethod("getValue").invoke(original);
             if (!dao.isInstance(current)) { throw new IllegalStateException("TrackDao value shape mismatch"); }
             Object gate = Proxy.newProxyInstance(dao.getClassLoader(), new Class<?>[]{dao}, new DaoGate(current));
@@ -356,13 +360,15 @@ public final class HostTrackListGate {
             });
             slot.set(db, replacement);
             REPLACEMENTS.add(new Replacement(slot, db, original, replacement));
-            Object scanGate = Proxy.newProxyInstance(dao.getClassLoader(), new Class<?>[]{dao}, new DaoGate(scanOriginal));
-            String why = putStaticFinal(scan, scanGate);
-            if (why != null) {
-                slot.set(db, original);
-                throw new IllegalStateException("Scan DAO install rejected: " + why);
+            if (scan != null) {
+                Object scanGate = Proxy.newProxyInstance(dao.getClassLoader(), new Class<?>[]{dao}, new DaoGate(scanOriginal));
+                String why = putStaticFinal(scan, scanGate);
+                if (why != null) {
+                    slot.set(db, original);
+                    throw new IllegalStateException("Scan DAO install rejected: " + why);
+                }
             }
-            installed = isGate(lazy.getMethod("getValue").invoke(slot.get(db))) && isGate(scan.get(null));
+            installed = isGate(lazy.getMethod("getValue").invoke(slot.get(db))) && (scan == null || isGate(scan.get(null)));
             scanGateInstalled = installed;
             installRefreshHook();
             note("已安装：1.19 TrackDao Lazy 列表过滤 / 扫库屏蔽；刷新联动=" + refreshGateInstalled, installed, null);
@@ -865,6 +871,7 @@ public final class HostTrackListGate {
     public static boolean isReadableMarkClass(String className) {
         return CLS_TRACK_READABLE_MARK.equals(className) || "androidx.compose.ui.\u1016".equals(className)
                 || "androidx.compose.ui.\u0b71".equals(className)
+                || "androidx.compose.ui.\u03dd".equals(className) // Windows 1.19.3 TrackReadableUpdate
                 || "androidx.compose.ui.\u0e81".equals(className); // Native Linux 1.19.2 TrackReadableUpdate
     }
 

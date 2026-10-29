@@ -1,6 +1,6 @@
 package com.example.netease.nativeui
 
-/** Verified 1.19.0 -> 1.19.1 UI name changes. Signatures still must pass every
+/** Verified 1.19.0 through 1.19.3 UI name changes. Signatures still must pass every
  * component/theme/hook ABI check; unknown hosts never get an approximate UI. */
 internal object HostUiAbi {
     private val renamed = mapOf(
@@ -59,8 +59,31 @@ internal object HostUiAbi {
             it.parameterCount == 5 && it.parameterTypes[0].name == HostUiMountScope.MOD_CONFIG_ROUTE_CLASS
         }
     }.getOrDefault(false)
+    private val windows1193Renamed = mapOf(
+        "androidx.compose.ui.\u012f" to "androidx.compose.ui.\u093d",
+        "androidx.compose.ui.\u0168" to "androidx.compose.ui.\u06d3",
+        "androidx.compose.ui.\u022b" to "androidx.compose.ui.\u0b8f",
+        "androidx.compose.ui.\u029c" to "androidx.compose.ui.\u0b61",
+        "androidx.compose.ui.\u03b4" to "androidx.compose.ui.\u0e16",
+        "androidx.compose.ui.\u0450" to "androidx.compose.ui.\u041a",
+        "androidx.compose.ui.\u045d" to "androidx.compose.ui.\u071a",
+        "androidx.compose.ui.\u04a1" to "androidx.compose.ui.\u04d7",
+        "androidx.compose.ui.\u054a" to "androidx.compose.ui.\u0537",
+        "androidx.compose.ui.\u0587" to "androidx.compose.ui.\u067a",
+        "androidx.compose.ui.\u0682" to "androidx.compose.ui.\u015f",
+        "androidx.compose.ui.\u0712" to "androidx.compose.ui.\u066f",
+        "androidx.compose.ui.\u0936" to "androidx.compose.ui.\u0ca0",
+        "androidx.compose.ui.\u0994" to "androidx.compose.ui.\u022b",
+        "androidx.compose.ui.\u09a8" to "androidx.compose.ui.\u0924",
+        "androidx.compose.ui.\u0ab3" to "androidx.compose.ui.\u0510",
+        "androidx.compose.ui.\u0f43" to "androidx.compose.ui.\u091a",
+        "androidx.compose.ui.\u10ac" to "androidx.compose.ui.\u0aa0",
+        "androidx.compose.ui.\u10f5" to "androidx.compose.ui.\u0e09",
+    )
+    private val windows1193: Boolean by lazy { configRouteOwner("androidx.compose.ui.\u0b8f") }
     private val nativeLinux: Boolean by lazy { configRouteOwner("androidx.compose.ui.\u076e") }
     fun name(value: String): String = when {
+        windows1193 -> windows1193Renamed[value] ?: value
         nativeLinux -> linuxRenamed[value] ?: value
         baseline -> value
         else -> renamed[value] ?: value

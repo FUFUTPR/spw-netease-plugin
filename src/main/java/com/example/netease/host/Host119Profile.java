@@ -2,13 +2,14 @@ package com.example.netease.host;
 
 import java.lang.reflect.Modifier;
 
-/** Names verified against installed 1.19.0 / 1.19.1 / 1.19.2 runtimes.
+/** Names verified against installed 1.19.0 through 1.19.3 runtimes.
  * Resolve without initializing host classes and validate signatures before use.
  */
 final class Host119Profile {
-    record Profile(Class<?> databaseHolder, Class<?> trackDao, Class<?> scanRepository, Class<?> refreshController) { }
+    record Profile(Class<?> databaseHolder, Class<?> trackDao, Class<?> scanRepository, Class<?> refreshController, boolean sharedScanDao) { }
 
     private static final String[][] NAMES = {
+            {"com.xuncorp.voxzen.data.\u058f", "androidx.compose.ui.\u04b9", "androidx.compose.ui.\u0548", "androidx.compose.ui.\u0470", "shared"}, // Windows 1.19.3: scan resolves the instance database DAO
             {"com.xuncorp.voxzen.data.\u058f", "androidx.compose.ui.\u0e01", "androidx.compose.ui.\u10c2", "androidx.compose.ui.\u056b"}, // Steam Linux 1.19.2
             {"com.xuncorp.voxzen.data.\u058f", "androidx.compose.ui.\u0573", "androidx.compose.ui.\u04ee", "androidx.compose.ui.\u0baf"},
             {"com.xuncorp.voxzen.data.\u0781", "androidx.compose.ui.\u0573", "androidx.compose.ui.\u04ee", "androidx.compose.ui.\u0baf"},
@@ -26,13 +27,16 @@ final class Host119Profile {
                 Class<?> dao = Class.forName(names[1], false, loader);
                 if (!dao.isInterface() || !dao.getMethod("\u0528").getReturnType().getName().equals("kotlinx.coroutines.flow.Flow")) continue;
                 Class<?> scan = Class.forName(names[2], false, loader);
-                var scanDao = scan.getDeclaredField("\u0528");
-                if (!Modifier.isStatic(scanDao.getModifiers()) || scanDao.getType() != dao) continue;
+                boolean sharedScanDao = names.length > 4;
+                if (!sharedScanDao) {
+                    var scanDao = scan.getDeclaredField("\u0528");
+                    if (!Modifier.isStatic(scanDao.getModifiers()) || scanDao.getType() != dao) continue;
+                } else if (java.util.Arrays.stream(scan.getDeclaredFields()).anyMatch(f -> f.getType() == dao)) continue;
                 Class<?> refresh = Class.forName(names[3], false, loader);
                 var state = refresh.getDeclaredField("\u052c");
                 if (!Modifier.isStatic(state.getModifiers())
                         || !state.getType().getName().equals("kotlinx.coroutines.flow.MutableStateFlow")) continue;
-                return new Profile(holder, dao, scan, refresh);
+                return new Profile(holder, dao, scan, refresh, sharedScanDao);
             } catch (ReflectiveOperationException | LinkageError ignored) {
                 // A same-named class with a different shape is never a valid profile.
             }
